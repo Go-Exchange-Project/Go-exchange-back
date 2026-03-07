@@ -12,8 +12,8 @@
 package matching
 
 import (
-	"github.com/Go-Exchange-Project/Go-Exchange-back/internal/model"
-	"time"
+	"time"	
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
 )
 
