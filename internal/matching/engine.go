@@ -15,6 +15,8 @@ package matching
 import (
 	"time"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/shopspring/decimal"
+
 )
 
 type MatchingEngine struct {
@@ -64,7 +66,7 @@ func (me *MatchingEngine) Match(order *Order) {
 				// 1. 매도 주문 꺼내기
 				sellOrder := sellLevel.Orders.PopFront()
 				// 2. 체결 수량 계산(매수/매도 중 더 작은 쪽)
-				tradeQty := order.Amount.Min(sellOrder.Amount)
+				tradeQty := decimal.Min(order.Amount, sellOrder.Amount)
 				// 3. 트레이드 생성
 				trade := &model.Trade{
 					CoinSymbol:  order.CoinSymbol,
@@ -100,7 +102,7 @@ func (me *MatchingEngine) Match(order *Order) {
 		if ok {
         	if buyLevel.Price.GreaterThanOrEqual(order.Price) {
             	buyOrder := buyLevel.Orders.PopFront()
-            	tradeQty := order.Amount.Min(buyOrder.Amount)
+            	tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
             	trade := &model.Trade{
                 	CoinSymbol:  order.CoinSymbol,
                 	Price:       buyLevel.Price,
