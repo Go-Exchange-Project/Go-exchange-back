@@ -2,7 +2,11 @@
 
 package repository
 
-import "gorm.io/gorm"
+import (
+	"gorm.io/gorm"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/shopspring/decimal"
+)
 
 type OrderRepository struct{
 	DB *gorm.DB
@@ -10,4 +14,15 @@ type OrderRepository struct{
 
 func NewOrderRepository(db *gorm.DB) *OrderRepository {
 	return &OrderRepository{DB: db}
+}
+
+func (r *OrderRepository) CreateOrder(order *model.Order) error { 
+	return r.DB.Create(order).Error
+}
+
+func (r *OrderRepository) UpdateOrderStatus(orderID uint, status model.OrderStatus, filledAmount decimal.Decimal) error {
+    return r.DB.Model(&model.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
+        "status":        status,
+        "filled_amount": filledAmount,
+    }).Error
 }
