@@ -26,3 +26,9 @@ func (r *OrderRepository) UpdateOrderStatus(orderID uint, status model.OrderStat
         "filled_amount": filledAmount,
     }).Error
 }
+
+func (r *OrderRepository) FindByID(orderID uint) (*model.Order, error) {
+    var order model.Order
+    err := r.DB.First(&order, orderID).Error
+    return &order, err
+}

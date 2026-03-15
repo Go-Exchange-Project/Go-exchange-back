@@ -3,10 +3,10 @@ package main
 import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/gin-gonic/gin"
 )
 
@@ -30,13 +30,26 @@ func main() {
 
 	// TradeCh 결과를 DB에 저장하는 고루틴
 	go func() {
-   	 	for trade := range me.TradeCh {
-       		config.DB.Create(trade)
+    for trade := range me.TradeCh {
+        config.DB.Create(trade)
 
-			orderRepo.UpdateOrderStatus(trade.BuyOrderID, model.OrderStatusFilled, trade.Quantity)
-        	orderRepo.UpdateOrderStatus(trade.SellOrderID, model.OrderStatusFilled, trade.Quantity)
-   	 	}
-	}()
+        // 매수 주문 상태 업데이트
+        buyOrder, _ := orderRepo.FindByID(trade.BuyOrderID)
+        buyStatus := model.OrderStatusFilled
+        if trade.Quantity.LessThan(buyOrder.Amount) {
+            buyStatus = model.OrderStatusPartial
+        }
+        orderRepo.UpdateOrderStatus(trade.BuyOrderID, buyStatus, trade.Quantity)
+
+        // 매도 주문 상태 업데이트
+        sellOrder, _ := orderRepo.FindByID(trade.SellOrderID)
+        sellStatus := model.OrderStatusFilled
+        if trade.Quantity.LessThan(sellOrder.Amount) {
+            sellStatus = model.OrderStatusPartial
+        }
+        orderRepo.UpdateOrderStatus(trade.SellOrderID, sellStatus, trade.Quantity)
+    }
+}()
 
 
 	r := gin.Default()
