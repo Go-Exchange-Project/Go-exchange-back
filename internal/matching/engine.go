@@ -16,7 +16,6 @@ import (
 	"time"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
-
 )
 
 type MatchingEngine struct {
@@ -26,6 +25,7 @@ type MatchingEngine struct {
 }
 
 // 초기화 함수
+// 오더북과 주문이 들어갈 오더 채널, 체결된 정보가 들어갈 트레이드 채널
 func NewMatchingEngine() *MatchingEngine {
 	return &MatchingEngine{
 		OrderBook: NewOrderBook(),
@@ -39,6 +39,7 @@ func NewMatchingEngine() *MatchingEngine {
 2. 채널에서 주문을 계속 기다리고 -> order가 들어올 때마다 실행
 3. 주문 들어오면 오더북에 추가하고
 4. 매칭 시도 하는 함수
+main.go에서 me.Start()가 호출되는 순간 고루틴이 백그라운데서 분리되어서 계속 돌아감.(Go런타임이 관리하는 아주 가벼운 것)
 */
 func (me *MatchingEngine) Start() {
 	// 1

@@ -23,7 +23,7 @@ type Order struct {
 	CoinSymbol string
 	Side      model.OrderSide 
 	FilledAmount decimal.Decimal // 체결된 수량, 체결됬는지 판단도 하기 때문에 Status 없앰.
-	CreatedAt time.Time  
+	CreatedAt time.Time
 	OrderType	model.OrderType
 	Price	  decimal.Decimal
 }

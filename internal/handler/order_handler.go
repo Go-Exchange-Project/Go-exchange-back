@@ -25,6 +25,7 @@ func NewOrderHandler(service *service.OrderService) *OrderHandler {
 	return &OrderHandler{OrderService: service}
 }
 
+// HTTP 요청 받기
 func (h *OrderHandler) CreateOrder(c *gin.Context){
 	var req CreateOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil{
