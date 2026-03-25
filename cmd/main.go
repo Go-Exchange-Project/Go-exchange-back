@@ -10,6 +10,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/upbit"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/ws"
 	"github.com/gin-gonic/gin"
 )
 
@@ -26,6 +27,10 @@ func main() {
 	me := matching.NewMatchingEngine()
 	me.Start()
 
+	// Hub 생성 및 실행
+	hub := ws.NewHub()
+	go hub.Run()
+
 	// 업비트 WebSocket 연결
 	upbitClient, err := upbit.NewUpbitClient()
 	if err != nil {
@@ -33,8 +38,10 @@ func main() {
 	}
 	upbitClient.Subscribe([]string{"KRW-BTC"})
 
+	// 업비트 시세를 Hub로 브로드캐스트
 	go upbitClient.Listen(func(price float64) {
-		fmt.Printf("BTC 현재가: %f\n", price)
+		msg := fmt.Sprintf(`{"type":"ticker","price":%f}`, price)
+		hub.Broadcast <- []byte(msg)
 	})
 
 	// 의존성 주입
@@ -81,6 +88,11 @@ func main() {
 		c.JSON(200, gin.H{
 			"message": "pong",
 		})
+	})
+
+	// WebSocket 라우터 등록
+	r.GET("/ws", func(c *gin.Context) {
+		ws.ServeWs(hub, c)
 	})
 
 	r.POST("/orders", orderHandler.CreateOrder)

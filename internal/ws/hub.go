@@ -29,6 +29,7 @@ func NewHub() *Hub {
 }
 
 func (h *Hub) Run() {
+    // select는 여러 채널을 한 번에 관리하는 문법
     for {
         select {
         case client := <-h.Register:
