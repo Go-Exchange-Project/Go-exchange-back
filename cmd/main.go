@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
@@ -80,6 +81,14 @@ func main() {
 			newQuantity := sellWallet.Quantity.Sub(trade.Quantity)
 			walletRepo.UpdateCoinQuantity(2, trade.CoinSymbol, newQuantity)
 			orderRepo.UpdateOrderStatus(trade.SellOrderID, sellStatus, trade.Quantity)
+
+			// 오더북 스냅샷 브로드캐스트
+			snapshot := me.GetOrderBookSnapshot()
+			snapshotJSON, _ := json.Marshal(map[string]interface{}{
+				"type": "orderbook",
+				"data": snapshot,
+			})
+			hub.Broadcast <- snapshotJSON
 		}
 	}()
 

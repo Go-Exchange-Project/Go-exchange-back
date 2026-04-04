@@ -14,14 +14,25 @@ package matching
 
 import (
 	"time"
+
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
 )
 
 type MatchingEngine struct {
-	OrderBook *OrderBook // 오더북
-	OrderCh chan *Order // 주문 받을 채널
-	TradeCh chan *model.Trade // 체결 결과 내보낼 채널
+	OrderBook *OrderBook        // 오더북
+	OrderCh   chan *Order       // 주문 받을 채널
+	TradeCh   chan *model.Trade // 체결 결과 내보낼 채널
+}
+
+type OrderBookSnapshot struct {
+	Asks []PriceLevelData `json:"asks"` // 매도 호가
+	Bids []PriceLevelData `json:"bids"` // 매수 호가
+}
+
+type PriceLevelData struct {
+	Price    decimal.Decimal `json:"price"`
+	Quantity decimal.Decimal `json:"quantity"`
 }
 
 // 초기화 함수
@@ -29,8 +40,8 @@ type MatchingEngine struct {
 func NewMatchingEngine() *MatchingEngine {
 	return &MatchingEngine{
 		OrderBook: NewOrderBook(),
-		OrderCh: make(chan *Order, 1024),
-		TradeCh: make(chan *model.Trade, 1024),
+		OrderCh:   make(chan *Order, 1024),
+		TradeCh:   make(chan *model.Trade, 1024),
 	}
 }
 
@@ -71,11 +82,11 @@ func (me *MatchingEngine) Match(order *Order) {
 				// 3. 트레이드 생성
 				trade := &model.Trade{
 					CoinSymbol:  order.CoinSymbol,
-    				Price:       sellLevel.Price,
-    				Quantity:    tradeQty,
-    				TradedAt:    time.Now(),
-    				BuyOrderID:  order.ID,
-    				SellOrderID: sellOrder.ID,
+					Price:       sellLevel.Price,
+					Quantity:    tradeQty,
+					TradedAt:    time.Now(),
+					BuyOrderID:  order.ID,
+					SellOrderID: sellOrder.ID,
 				}
 				// 4.TradeCh 채널로 체결 결과 내보내기
 				me.TradeCh <- trade
@@ -86,50 +97,82 @@ func (me *MatchingEngine) Match(order *Order) {
 				sellOrder.Amount = sellOrder.Amount.Sub(tradeQty)
 
 				if sellOrder.Amount.IsZero() {
-    				if sellLevel.Orders.Len() == 0 {
-        				me.OrderBook.SellOrders.Delete(sellLevel)
-    				}
+					if sellLevel.Orders.Len() == 0 {
+						me.OrderBook.SellOrders.Delete(sellLevel)
+					}
 				} else {
-    				sellLevel.Orders.PushFront(sellOrder)
+					sellLevel.Orders.PushFront(sellOrder)
 				}
 
 				if order.Amount.IsZero() {
-    				me.OrderBook.RemoveOrder(order)
+					me.OrderBook.RemoveOrder(order)
 				}
 			}
 		}
-	} else if order.Side == model.OrderSideSell{
+	} else if order.Side == model.OrderSideSell {
 		buyLevel, ok := me.OrderBook.BuyOrders.Max()
 		if ok {
-        	if buyLevel.Price.GreaterThanOrEqual(order.Price) {
-            	buyOrder := buyLevel.Orders.PopFront()
-            	tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
-            	trade := &model.Trade{
-                	CoinSymbol:  order.CoinSymbol,
-                	Price:       buyLevel.Price,
-                	Quantity:    tradeQty,
-                	TradedAt:    time.Now(),
-                	BuyOrderID:  buyOrder.ID,
-                	SellOrderID: order.ID,
-            	}
-            	me.TradeCh <- trade
+			if buyLevel.Price.GreaterThanOrEqual(order.Price) {
+				buyOrder := buyLevel.Orders.PopFront()
+				tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
+				trade := &model.Trade{
+					CoinSymbol:  order.CoinSymbol,
+					Price:       buyLevel.Price,
+					Quantity:    tradeQty,
+					TradedAt:    time.Now(),
+					BuyOrderID:  buyOrder.ID,
+					SellOrderID: order.ID,
+				}
+				me.TradeCh <- trade
 
 				order.Amount = order.Amount.Sub(tradeQty)
 				order.FilledAmount = order.FilledAmount.Add(tradeQty)
 				buyOrder.Amount = buyOrder.Amount.Sub(tradeQty)
 
 				if buyOrder.Amount.IsZero() {
-    				if buyLevel.Orders.Len() == 0 {
-        				me.OrderBook.BuyOrders.Delete(buyLevel)
-    				}
+					if buyLevel.Orders.Len() == 0 {
+						me.OrderBook.BuyOrders.Delete(buyLevel)
+					}
 				} else {
-    				buyLevel.Orders.PushFront(buyOrder)
+					buyLevel.Orders.PushFront(buyOrder)
 				}
-				
+
 				if order.Amount.IsZero() {
-    				me.OrderBook.RemoveOrder(order)
+					me.OrderBook.RemoveOrder(order)
 				}
-        	}
-    	}
+			}
+		}
 	}
+}
+
+func (me *MatchingEngine) GetOrderBookSnapshot() OrderBookSnapshot {
+    snapshot := OrderBookSnapshot{}
+
+    // 매도 호가 (낮은 가격부터)
+    me.OrderBook.SellOrders.Ascend(func(level *PriceLevel) bool {
+        qty := decimal.Zero
+        for i := 0; i < level.Orders.Len(); i++ {
+            qty = qty.Add(level.Orders.At(i).Amount)
+        }
+        snapshot.Asks = append(snapshot.Asks, PriceLevelData{
+            Price:    level.Price,
+            Quantity: qty,
+        })
+        return true
+    })
+
+    // 매수 호가 (높은 가격부터)
+    me.OrderBook.BuyOrders.Descend(func(level *PriceLevel) bool {
+        qty := decimal.Zero
+        for i := 0; i < level.Orders.Len(); i++ {
+            qty = qty.Add(level.Orders.At(i).Amount)
+        }
+        snapshot.Bids = append(snapshot.Bids, PriceLevelData{
+            Price:    level.Price,
+            Quantity: qty,
+        })
+        return true
+    })
+
+    return snapshot
 }
