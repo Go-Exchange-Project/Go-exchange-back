@@ -12,6 +12,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/upbit"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/ws"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -37,14 +38,18 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	upbitClient.Subscribe([]string{"KRW-BTC"})
-
-	// 업비트 시세를 Hub로 브로드캐스트
-	go upbitClient.Listen(func(price float64) {
-		msg := fmt.Sprintf(`{"type":"ticker","price":%f}`, price)
-		hub.Broadcast <- []byte(msg)
+	upbitClient.Subscribe([]string{
+		"KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL",
+		"KRW-DOGE", "KRW-ADA", "KRW-DOT", "KRW-AVAX",
+		"KRW-MATIC", "KRW-LINK", "KRW-ATOM", "KRW-UNI",
+		"KRW-SHIB", "KRW-TRX",
 	})
 
+	// 업비트 시세를 Hub로 브로드캐스트
+	go upbitClient.Listen(func(code string, price float64) {
+		msg := fmt.Sprintf(`{"type":"ticker","code":"%s","price":%f}`, code, price)
+		hub.Broadcast <- []byte(msg)
+	})
 	// 의존성 주입
 	orderRepo := repository.NewOrderRepository(config.DB)
 	walletRepo := repository.NewWalletRepository(config.DB)
@@ -82,8 +87,21 @@ func main() {
 			walletRepo.UpdateCoinQuantity(2, trade.CoinSymbol, newQuantity)
 			orderRepo.UpdateOrderStatus(trade.SellOrderID, sellStatus, trade.Quantity)
 
-			// 오더북 스냅샷 브로드캐스트
-			snapshot := me.GetOrderBookSnapshot()
+			tradeJSON, _ := json.Marshal(map[string]interface{}{
+				"type": "trade",
+				"data": map[string]interface{}{
+					"price":    trade.Price,
+					"quantity": trade.Quantity,
+					"time":     trade.TradedAt,
+				},
+			})
+			hub.Broadcast <- tradeJSON
+		}
+	}()
+
+	// SnapshotCh 감시 고루틴
+	go func() {
+		for snapshot := range me.SnapshotCh {
 			snapshotJSON, _ := json.Marshal(map[string]interface{}{
 				"type": "orderbook",
 				"data": snapshot,
@@ -93,6 +111,13 @@ func main() {
 	}()
 
 	r := gin.Default()
+
+	r.Use(cors.New(cors.Config{
+		AllowOrigins: []string{"http://localhost:3000"},
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE"},
+		AllowHeaders: []string{"Content-Type"},
+	}))
+
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"message": "pong",

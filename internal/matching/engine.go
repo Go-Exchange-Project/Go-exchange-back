@@ -14,7 +14,6 @@ package matching
 
 import (
 	"time"
-
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
 )
@@ -23,6 +22,8 @@ type MatchingEngine struct {
 	OrderBook *OrderBook        // 오더북
 	OrderCh   chan *Order       // 주문 받을 채널
 	TradeCh   chan *model.Trade // 체결 결과 내보낼 채널
+	SnapshotCh chan OrderBookSnapshot 
+
 }
 
 type OrderBookSnapshot struct {
@@ -42,6 +43,7 @@ func NewMatchingEngine() *MatchingEngine {
 		OrderBook: NewOrderBook(),
 		OrderCh:   make(chan *Order, 1024),
 		TradeCh:   make(chan *model.Trade, 1024),
+		SnapshotCh: make(chan OrderBookSnapshot, 256),
 	}
 }
 
@@ -59,6 +61,7 @@ func (me *MatchingEngine) Start() {
 			// 2
 			me.OrderBook.AddOrder(order)
 			me.Match(order)
+			me.SnapshotCh <- me.GetOrderBookSnapshot()
 		}
 	}()
 }

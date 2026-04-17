@@ -33,7 +33,7 @@ func (c *UpbitClient) Subscribe(codes []string) error {
     return c.Conn.WriteJSON(msg)
 }
 
-func (c *UpbitClient) Listen(onTicker func(price float64)) {
+func (c *UpbitClient) Listen(onTicker func(code string, price float64)) {
     for {
         _, msg, err := c.Conn.ReadMessage()
         if err != nil {
@@ -43,6 +43,6 @@ func (c *UpbitClient) Listen(onTicker func(price float64)) {
         if err := json.Unmarshal(msg, &ticker); err != nil {
             continue
         }
-        onTicker(ticker.TradePrice)
+        onTicker(ticker.Code, ticker.TradePrice)
     }
 }
