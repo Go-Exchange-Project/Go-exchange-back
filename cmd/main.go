@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
@@ -24,16 +27,56 @@ func main() {
 		&model.Order{},
 		&model.Wallet{},
 		&model.Trade{},
+		&model.FailedSettlement{},
 	)
 
 	me := matching.NewMatchingEngine()
 	me.Start()
 
-	// Hub 생성 및 실행
 	hub := ws.NewHub()
 	go hub.Run()
 
-	// 업비트 WebSocket 연결
+	orderRepo := repository.NewOrderRepository(config.DB)
+	walletRepo := repository.NewWalletRepository(config.DB)
+	orderService := service.NewOrderService(orderRepo, walletRepo, me)
+	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
+	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
+	orderHandler := handler.NewOrderHandler(orderService)
+
+	go func() {
+		for trade := range me.TradeCh {
+			processTradeSettlement(trade, settlementService, failedSettlementService, func(msg []byte) {
+				hub.Broadcast <- msg
+			}, log.Default())
+		}
+	}()
+
+	go func() {
+		for snapshot := range me.SnapshotCh {
+			snapshotJSON, _ := json.Marshal(map[string]interface{}{
+				"type": "orderbook",
+				"data": snapshot,
+			})
+			hub.Broadcast <- snapshotJSON
+		}
+	}()
+
+	bootstrapService := service.NewMatchingBootstrapService(orderRepo, me)
+	bootstrapCtx, cancelBootstrap := context.WithTimeout(context.Background(), 30*time.Second)
+	bootstrapResult, err := bootstrapService.BootstrapOpenOrders(bootstrapCtx)
+	cancelBootstrap()
+	if err != nil {
+		log.Fatal("matching bootstrap failed: ", err)
+	}
+	log.Printf(
+		"matching bootstrap completed: loaded=%d submitted=%d skipped=%d pending=%d partial=%d",
+		bootstrapResult.Loaded,
+		bootstrapResult.Submitted,
+		bootstrapResult.Skipped,
+		bootstrapResult.StatusCounts[model.OrderStatusPending],
+		bootstrapResult.StatusCounts[model.OrderStatusPartial],
+	)
+
 	upbitClient, err := upbit.NewUpbitClient()
 	if err != nil {
 		panic(err)
@@ -45,70 +88,10 @@ func main() {
 		"KRW-SHIB", "KRW-TRX",
 	})
 
-	// 업비트 시세를 Hub로 브로드캐스트
 	go upbitClient.Listen(func(code string, price float64) {
 		msg := fmt.Sprintf(`{"type":"ticker","code":"%s","price":%f}`, code, price)
 		hub.Broadcast <- []byte(msg)
 	})
-	// 의존성 주입
-	orderRepo := repository.NewOrderRepository(config.DB)
-	walletRepo := repository.NewWalletRepository(config.DB)
-	orderService := service.NewOrderService(orderRepo, walletRepo, me)
-	orderHandler := handler.NewOrderHandler(orderService)
-
-	// TradeCh 결과를 DB에 저장하는 고루틴
-	go func() {
-		for trade := range me.TradeCh {
-			config.DB.Create(trade)
-
-			// 매수 주문 상태 업데이트
-			buyOrder, _ := orderRepo.FindByID(trade.BuyOrderID)
-			buyStatus := model.OrderStatusFilled
-			if trade.Quantity.LessThan(buyOrder.Amount) {
-				buyStatus = model.OrderStatusPartial
-			}
-
-			// 매수자
-			buyWallet, _ := walletRepo.FindByUserID(1)
-			newKRW := buyWallet.KRW.Sub(trade.Price.Mul(trade.Quantity))
-			walletRepo.UpdateKRW(1, newKRW)
-			orderRepo.UpdateOrderStatus(trade.BuyOrderID, buyStatus, trade.Quantity)
-
-			// 매도 주문 상태 업데이트
-			sellOrder, _ := orderRepo.FindByID(trade.SellOrderID)
-			sellStatus := model.OrderStatusFilled
-			if trade.Quantity.LessThan(sellOrder.Amount) {
-				sellStatus = model.OrderStatusPartial
-			}
-
-			// 매도자
-			sellWallet, _ := walletRepo.FindByUserID(2)
-			newQuantity := sellWallet.Quantity.Sub(trade.Quantity)
-			walletRepo.UpdateCoinQuantity(2, trade.CoinSymbol, newQuantity)
-			orderRepo.UpdateOrderStatus(trade.SellOrderID, sellStatus, trade.Quantity)
-
-			tradeJSON, _ := json.Marshal(map[string]interface{}{
-				"type": "trade",
-				"data": map[string]interface{}{
-					"price":    trade.Price,
-					"quantity": trade.Quantity,
-					"time":     trade.TradedAt,
-				},
-			})
-			hub.Broadcast <- tradeJSON
-		}
-	}()
-
-	// SnapshotCh 감시 고루틴
-	go func() {
-		for snapshot := range me.SnapshotCh {
-			snapshotJSON, _ := json.Marshal(map[string]interface{}{
-				"type": "orderbook",
-				"data": snapshot,
-			})
-			hub.Broadcast <- snapshotJSON
-		}
-	}()
 
 	r := gin.Default()
 
@@ -124,12 +107,60 @@ func main() {
 		})
 	})
 
-	// WebSocket 라우터 등록
 	r.GET("/ws", func(c *gin.Context) {
 		ws.ServeWs(hub, c)
 	})
 
 	r.POST("/orders", orderHandler.CreateOrder)
+	r.DELETE("/orders/:id", orderHandler.CancelOrder)
 
 	r.Run(":8080")
+}
+
+type tradeSettler interface {
+	SettleTrade(trade *model.Trade) (service.SettlementResult, error)
+}
+
+type settlementFailureRecorder interface {
+	RecordFailure(trade *model.Trade, settlementErr error) (*model.FailedSettlement, error)
+}
+
+func processTradeSettlement(
+	trade *model.Trade,
+	settler tradeSettler,
+	failureRecorder settlementFailureRecorder,
+	broadcast func([]byte),
+	logger *log.Logger,
+) {
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	result, err := settler.SettleTrade(trade)
+	if err != nil {
+		if failureRecorder != nil {
+			if _, recordErr := failureRecorder.RecordFailure(trade, err); recordErr != nil {
+				logger.Printf("record failed settlement failed: %v", recordErr)
+			}
+		}
+		logger.Printf("settle trade failed: %v", err)
+		return
+	}
+	if !result.Applied {
+		return
+	}
+
+	tradeJSON, err := json.Marshal(map[string]interface{}{
+		"type": "trade",
+		"data": map[string]interface{}{
+			"price":    trade.Price,
+			"quantity": trade.Quantity,
+			"time":     trade.TradedAt,
+		},
+	})
+	if err != nil {
+		logger.Printf("marshal trade broadcast failed: %v", err)
+		return
+	}
+	broadcast(tradeJSON)
 }

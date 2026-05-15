@@ -12,18 +12,19 @@
 package matching
 
 import (
-	"time"	
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
+	"time"
 )
 
 type Order struct {
-	ID		  uint
-	Amount    decimal.Decimal // 주문 수량
-	CoinSymbol string
-	Side      model.OrderSide 
+	ID           uint
+	UserID       uint
+	Amount       decimal.Decimal // 주문 수량
+	CoinSymbol   string
+	Side         model.OrderSide
 	FilledAmount decimal.Decimal // 체결된 수량, 체결됬는지 판단도 하기 때문에 Status 없앰.
-	CreatedAt time.Time
-	OrderType	model.OrderType
-	Price	  decimal.Decimal
+	CreatedAt    time.Time
+	OrderType    model.OrderType
+	Price        decimal.Decimal
 }

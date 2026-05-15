@@ -1,66 +1,300 @@
-// 비즈니스 로직
-
 package service
 
 import (
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
-	"github.com/shopspring/decimal"
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"fmt"
+	"strings"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 type OrderService struct {
-	OrderRepository *repository.OrderRepository
+	OrderRepository  *repository.OrderRepository
 	WalletRepository *repository.WalletRepository
-	MatchingEngine *matching.MatchingEngine
+	MatchingEngine   *matching.MatchingEngine
+}
+
+type CreateOrderInput struct {
+	UserID     uint
+	CoinSymbol string
+	Side       string
+	OrderType  string
+	Price      string
+	Amount     string
+}
+
+type CancelOrderInput struct {
+	UserID  uint
+	OrderID uint
+}
+
+type CancelOrderResult struct {
+	OrderID        uint
+	Status         model.OrderStatus
+	ReleasedAsset  string
+	ReleasedAmount decimal.Decimal
+	EngineRemoved  bool
 }
 
 func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.WalletRepository, me *matching.MatchingEngine) *OrderService {
 	return &OrderService{
-		OrderRepository: repo,
+		OrderRepository:  repo,
 		WalletRepository: walletRepo,
-		MatchingEngine: me,
+		MatchingEngine:   me,
 	}
 }
 
-func (s *OrderService) CreateOrder(coinSymbol string, side string, price int64, amount int64) error {
-    wallet, err := s.WalletRepository.FindByUserID(1) // 임시로 user_id 1 고정
-    if err != nil {
-        return err
-    }
-
-    // 잔고 확인
-    if side == "BUY" {
-        required := decimal.NewFromInt(price * amount)
-        if wallet.KRW.LessThan(required) {
-            return fmt.Errorf("KRW 잔고 부족")
-        }
-    } else {
-        if wallet.Quantity.LessThan(decimal.NewFromInt(amount)) {
-            return fmt.Errorf("코인 잔고 부족")
-        }
-    }
-	order := &model.Order{
-        CoinSymbol: coinSymbol,
-        Side:       model.OrderSide(side),
-        Price:      decimal.NewFromInt(price),
-        Amount:     decimal.NewFromInt(amount),
-        Status:     model.OrderStatusPending,
-    }
-
-	if err := s.OrderRepository.CreateOrder(order); err != nil {
-        return err
-    }
-
-	s.MatchingEngine.OrderCh <- &matching.Order{
-		ID: 		order.ID,
-		CoinSymbol: order.CoinSymbol,
-        Side:       order.Side,
-        Price:      order.Price,
-        Amount:     order.Amount,
-        CreatedAt:  order.CreatedAt,
+func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error) {
+	order, err := BuildOrder(input)
+	if err != nil {
+		return nil, err
 	}
 
-    return nil
+	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+		if err := holdOrderAssets(walletRepo, order); err != nil {
+			return err
+		}
+		return orderRepo.CreateOrder(order)
+	}); err != nil {
+		return nil, err
+	}
+
+	if s.MatchingEngine != nil {
+		s.MatchingEngine.OrderCh <- &matching.Order{
+			ID:           order.ID,
+			UserID:       order.UserID,
+			CoinSymbol:   order.CoinSymbol,
+			Side:         order.Side,
+			Price:        order.Price,
+			Amount:       order.Amount,
+			CreatedAt:    order.CreatedAt,
+			OrderType:    order.OrderType,
+			FilledAmount: order.FilledAmount,
+		}
+	}
+
+	return order, nil
+}
+
+func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, error) {
+	if input.UserID == 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if input.OrderID == 0 {
+		return nil, fmt.Errorf("order_id is required")
+	}
+
+	var result *CancelOrderResult
+	var cancelCommand matching.CancelOrderCommand
+	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+
+		order, err := orderRepo.FindByIDForUpdate(input.OrderID)
+		if err != nil {
+			return err
+		}
+		if order.UserID != input.UserID {
+			return fmt.Errorf("order does not belong to user")
+		}
+		if !isCancellableOrderStatus(order.Status) {
+			return fmt.Errorf("order status %s cannot be cancelled", order.Status)
+		}
+
+		remaining, err := remainingOrderQuantity(order)
+		if err != nil {
+			return err
+		}
+
+		releasedAsset, releasedAmount, err := releaseOrderHold(walletRepo, order, remaining)
+		if err != nil {
+			return err
+		}
+
+		if err := orderRepo.UpdateOrderStatus(order.ID, model.OrderStatusCancelled, order.FilledAmount); err != nil {
+			return err
+		}
+
+		result = &CancelOrderResult{
+			OrderID:        order.ID,
+			Status:         model.OrderStatusCancelled,
+			ReleasedAsset:  releasedAsset,
+			ReleasedAmount: releasedAmount,
+		}
+		cancelCommand = matching.CancelOrderCommand{
+			CoinSymbol: order.CoinSymbol,
+			OrderID:    order.ID,
+			Side:       order.Side,
+			Price:      order.Price,
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if s.MatchingEngine != nil {
+		cancelResult := s.MatchingEngine.CancelOrder(cancelCommand)
+		if cancelResult.Err != nil {
+			return result, fmt.Errorf("order cancelled in DB but matching engine cancel failed: %w", cancelResult.Err)
+		}
+		result.EngineRemoved = cancelResult.Removed
+	}
+
+	return result, nil
+}
+
+func BuildOrder(input CreateOrderInput) (*model.Order, error) {
+	if input.UserID == 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+
+	coinSymbol := strings.TrimSpace(strings.ToUpper(input.CoinSymbol))
+	if coinSymbol == "" {
+		return nil, fmt.Errorf("coin_symbol is required")
+	}
+
+	side, err := parseOrderSide(input.Side)
+	if err != nil {
+		return nil, err
+	}
+
+	orderType, err := parseOrderType(input.OrderType)
+	if err != nil {
+		return nil, err
+	}
+
+	price, err := parsePositiveDecimal(input.Price, "price")
+	if err != nil {
+		return nil, err
+	}
+
+	amount, err := parsePositiveDecimal(input.Amount, "amount")
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.Order{
+		UserID:       input.UserID,
+		CoinSymbol:   coinSymbol,
+		Side:         side,
+		OrderType:    orderType,
+		Price:        price,
+		Amount:       amount,
+		Status:       model.OrderStatusPending,
+		FilledAmount: decimal.Zero,
+	}, nil
+}
+
+func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order) error {
+	switch order.Side {
+	case model.OrderSideBuy:
+		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
+		if err != nil {
+			return err
+		}
+		required := order.Price.Mul(order.Amount)
+		update, err := applyBuyOrderHold(wallet, required)
+		if err != nil {
+			return err
+		}
+		return walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance)
+	case model.OrderSideSell:
+		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
+		if err != nil {
+			return err
+		}
+		update, err := applySellOrderHold(wallet, order.Amount)
+		if err != nil {
+			return err
+		}
+		return walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance)
+	default:
+		return fmt.Errorf("invalid order side")
+	}
+}
+
+func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Order, remaining decimal.Decimal) (string, decimal.Decimal, error) {
+	switch order.Side {
+	case model.OrderSideBuy:
+		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
+		if err != nil {
+			return "", decimal.Zero, err
+		}
+		releaseAmount := order.Price.Mul(remaining)
+		update, err := releaseBuyOrderHold(wallet, releaseAmount)
+		if err != nil {
+			return "", decimal.Zero, err
+		}
+		return model.KRWAssetSymbol, releaseAmount, walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance)
+	case model.OrderSideSell:
+		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
+		if err != nil {
+			return "", decimal.Zero, err
+		}
+		update, err := releaseSellOrderHold(wallet, remaining)
+		if err != nil {
+			return "", decimal.Zero, err
+		}
+		return order.CoinSymbol, remaining, walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance)
+	default:
+		return "", decimal.Zero, fmt.Errorf("invalid order side")
+	}
+}
+
+func isCancellableOrderStatus(status model.OrderStatus) bool {
+	return status == model.OrderStatusPending || status == model.OrderStatusPartial
+}
+
+func remainingOrderQuantity(order *model.Order) (decimal.Decimal, error) {
+	if order == nil {
+		return decimal.Zero, fmt.Errorf("order is required")
+	}
+	remaining := order.Amount.Sub(order.FilledAmount)
+	if !remaining.GreaterThan(decimal.Zero) {
+		return decimal.Zero, fmt.Errorf("order has no remaining quantity")
+	}
+	return remaining, nil
+}
+
+func parseOrderSide(value string) (model.OrderSide, error) {
+	switch model.OrderSide(strings.ToUpper(strings.TrimSpace(value))) {
+	case model.OrderSideBuy:
+		return model.OrderSideBuy, nil
+	case model.OrderSideSell:
+		return model.OrderSideSell, nil
+	default:
+		return "", fmt.Errorf("invalid order side")
+	}
+}
+
+func parseOrderType(value string) (model.OrderType, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(value))
+	if normalized == "" {
+		return model.OrderTypeLimit, nil
+	}
+
+	switch model.OrderType(normalized) {
+	case model.OrderTypeLimit:
+		return model.OrderTypeLimit, nil
+	case model.OrderTypeMarket:
+		return "", fmt.Errorf("market orders are not supported yet")
+	default:
+		return "", fmt.Errorf("invalid order type")
+	}
+}
+
+func parsePositiveDecimal(value string, field string) (decimal.Decimal, error) {
+	parsed, err := decimal.NewFromString(strings.TrimSpace(value))
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("invalid %s", field)
+	}
+	if !parsed.GreaterThan(decimal.Zero) {
+		return decimal.Zero, fmt.Errorf("%s must be greater than zero", field)
+	}
+	return parsed, nil
 }

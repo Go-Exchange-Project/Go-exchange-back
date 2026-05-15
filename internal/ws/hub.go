@@ -1,8 +1,3 @@
-// hub란 연결된 브라우저들을 관리하는 중앙 관리자
-// hub가 하는 일
-// 브라우저 연결/해제 관리
-// 업비트 시세를 연결된 모든 브라우저에 전송
-
 package ws
 
 import "github.com/gorilla/websocket"
@@ -13,33 +8,53 @@ type Client struct {
 }
 
 type Hub struct {
-	Clients	map[*Client]bool
-	Broadcast	chan []byte
-	Register	chan *Client
-	Unregister	chan *Client
+	Clients    map[*Client]bool
+	Broadcast  chan []byte
+	Register   chan *Client
+	Unregister chan *Client
 }
 
 func NewHub() *Hub {
-    return &Hub{
-        Clients:    make(map[*Client]bool),
-        Broadcast:  make(chan []byte, 256),
-        Register:   make(chan *Client),
-        Unregister: make(chan *Client),
-    }
+	return &Hub{
+		Clients:    make(map[*Client]bool),
+		Broadcast:  make(chan []byte, 256),
+		Register:   make(chan *Client),
+		Unregister: make(chan *Client),
+	}
 }
 
 func (h *Hub) Run() {
-    // select는 여러 채널을 한 번에 관리하는 문법
-    for {
-        select {
-        case client := <-h.Register:
-            h.Clients[client] = true
-        case client := <-h.Unregister:
-            delete(h.Clients, client)
-        case msg := <-h.Broadcast:
-            for client := range h.Clients {
-                client.Send <- msg
-            }
-        }
-    }
+	for {
+		select {
+		case client := <-h.Register:
+			h.registerClient(client)
+		case client := <-h.Unregister:
+			h.unregisterClient(client)
+		case msg := <-h.Broadcast:
+			h.broadcast(msg)
+		}
+	}
+}
+
+func (h *Hub) registerClient(client *Client) {
+	h.Clients[client] = true
+}
+
+func (h *Hub) unregisterClient(client *Client) {
+	if _, ok := h.Clients[client]; !ok {
+		return
+	}
+
+	delete(h.Clients, client)
+	close(client.Send)
+}
+
+func (h *Hub) broadcast(msg []byte) {
+	for client := range h.Clients {
+		select {
+		case client.Send <- msg:
+		default:
+			h.unregisterClient(client)
+		}
+	}
 }

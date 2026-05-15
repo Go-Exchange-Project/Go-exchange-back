@@ -1,34 +1,46 @@
-/* 매칭엔진
-1. 채널로 주문을 받음
-2. 채널에서 주문을 꺼내서 오더북에 추가
-3. 매칭 시도(매수/매도 가격 비교)
-4. 조건 맞으면 체결 -> Trade 생성
-5. 조건 안 맞으면 오더북에 대기
-*/
-
-// 매칭엔진이 가져야 할 것들
-// 1. 오더북
-// 2. 주문을 받을 채널 (링버퍼 역할) -> 수신채널, 외부에서 매칭엔진으로 주문이 들어오는 통로(수신)
-// 3. 체결 결과를 내보낼 채널 -> 송신 채널, 매칭엔진에서 외부로 체결 결과가 나가는 통로(송신)
 package matching
 
 import (
+	"errors"
 	"time"
+
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
 )
 
-type MatchingEngine struct {
-	OrderBook *OrderBook        // 오더북
-	OrderCh   chan *Order       // 주문 받을 채널
-	TradeCh   chan *model.Trade // 체결 결과 내보낼 채널
-	SnapshotCh chan OrderBookSnapshot 
+var (
+	ErrCancelOrderNotFound          = errors.New("matching order not found")
+	ErrCancelOrderInvalidCommand    = errors.New("invalid matching cancel command")
+	ErrCancelOrderEngineUnavailable = errors.New("matching engine is unavailable")
+	ErrCancelOrderTimedOut          = errors.New("matching cancel timed out")
+)
 
+type MatchingEngine struct {
+	OrderBook  *OrderBook
+	OrderBooks map[string]*OrderBook
+	OrderCh    chan *Order
+	CancelCh   chan CancelOrderCommand
+	TradeCh    chan *model.Trade
+	SnapshotCh chan OrderBookSnapshot
+}
+
+type CancelOrderCommand struct {
+	CoinSymbol string
+	OrderID    uint
+	Side       model.OrderSide
+	Price      decimal.Decimal
+	ResponseCh chan CancelOrderResult
+}
+
+type CancelOrderResult struct {
+	Removed bool
+	Err     error
 }
 
 type OrderBookSnapshot struct {
-	Asks []PriceLevelData `json:"asks"` // 매도 호가
-	Bids []PriceLevelData `json:"bids"` // 매수 호가
+	CoinSymbol string           `json:"coin_symbol,omitempty"`
+	Asks       []PriceLevelData `json:"asks"`
+	Bids       []PriceLevelData `json:"bids"`
 }
 
 type PriceLevelData struct {
@@ -36,146 +48,246 @@ type PriceLevelData struct {
 	Quantity decimal.Decimal `json:"quantity"`
 }
 
-// 초기화 함수
-// 오더북과 주문이 들어갈 오더 채널, 체결된 정보가 들어갈 트레이드 채널
 func NewMatchingEngine() *MatchingEngine {
+	defaultBook := NewOrderBook()
 	return &MatchingEngine{
-		OrderBook: NewOrderBook(),
-		OrderCh:   make(chan *Order, 1024),
-		TradeCh:   make(chan *model.Trade, 1024),
+		OrderBook:  defaultBook,
+		OrderBooks: make(map[string]*OrderBook),
+		OrderCh:    make(chan *Order, 1024),
+		CancelCh:   make(chan CancelOrderCommand, 1024),
+		TradeCh:    make(chan *model.Trade, 1024),
 		SnapshotCh: make(chan OrderBookSnapshot, 256),
 	}
 }
 
-/*
-1. 고루틴 실행
-2. 채널에서 주문을 계속 기다리고 -> order가 들어올 때마다 실행
-3. 주문 들어오면 오더북에 추가하고
-4. 매칭 시도 하는 함수
-main.go에서 me.Start()가 호출되는 순간 고루틴이 백그라운데서 분리되어서 계속 돌아감.(Go런타임이 관리하는 아주 가벼운 것)
-*/
 func (me *MatchingEngine) Start() {
-	// 1
 	go func() {
-		for order := range me.OrderCh {
-			// 2
-			me.OrderBook.AddOrder(order)
-			me.Match(order)
-			me.SnapshotCh <- me.GetOrderBookSnapshot()
+		for {
+			select {
+			case order := <-me.OrderCh:
+				if order == nil {
+					continue
+				}
+				me.Match(order)
+				me.SnapshotCh <- me.GetOrderBookSnapshot(order.CoinSymbol)
+			case cmd := <-me.CancelCh:
+				result := me.handleCancel(cmd)
+				if cmd.ResponseCh != nil {
+					cmd.ResponseCh <- result
+				}
+				if result.Removed {
+					me.SnapshotCh <- me.GetOrderBookSnapshot(cmd.CoinSymbol)
+				}
+			}
 		}
 	}()
 }
 
-/*
-1. 매수 주문이면 -> 매도 오더북에서 가장 낮은 가격 찾기
-2. 매도 주문이면 -> 매수 오더북에서 가장 높은 가격 찾기
-3. 가격 조건 맞으면 -> 체결 (Trade 생성)
-4. 조건 안 맞으면 -> 오더북에서 대기(이미 AddOrder로 추가됨)
-*/
+func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {
+	if me == nil || me.CancelCh == nil {
+		return CancelOrderResult{Err: ErrCancelOrderEngineUnavailable}
+	}
+	if cmd.ResponseCh == nil {
+		cmd.ResponseCh = make(chan CancelOrderResult, 1)
+	}
+
+	select {
+	case me.CancelCh <- cmd:
+	case <-time.After(time.Second):
+		return CancelOrderResult{Err: ErrCancelOrderTimedOut}
+	}
+
+	select {
+	case result := <-cmd.ResponseCh:
+		return result
+	case <-time.After(time.Second):
+		return CancelOrderResult{Err: ErrCancelOrderTimedOut}
+	}
+}
+
+func (me *MatchingEngine) handleCancel(cmd CancelOrderCommand) CancelOrderResult {
+	if cmd.OrderID == 0 || cmd.CoinSymbol == "" || !cmd.Price.GreaterThanOrEqual(decimal.Zero) {
+		return CancelOrderResult{Err: ErrCancelOrderInvalidCommand}
+	}
+	if cmd.Side != model.OrderSideBuy && cmd.Side != model.OrderSideSell {
+		return CancelOrderResult{Err: ErrCancelOrderInvalidCommand}
+	}
+
+	book := me.GetOrderBook(cmd.CoinSymbol)
+	removed := book.RemoveOrder(&Order{
+		ID:         cmd.OrderID,
+		CoinSymbol: cmd.CoinSymbol,
+		Side:       cmd.Side,
+		Price:      cmd.Price,
+	})
+	if !removed {
+		return CancelOrderResult{Err: ErrCancelOrderNotFound}
+	}
+	return CancelOrderResult{Removed: true}
+}
+
+func (me *MatchingEngine) GetOrderBook(coinSymbol string) *OrderBook {
+	if coinSymbol == "" {
+		return me.OrderBook
+	}
+
+	if me.OrderBooks == nil {
+		me.OrderBooks = make(map[string]*OrderBook)
+	}
+
+	book, ok := me.OrderBooks[coinSymbol]
+	if ok {
+		return book
+	}
+
+	if len(me.OrderBooks) == 0 && me.OrderBook != nil {
+		me.OrderBooks[coinSymbol] = me.OrderBook
+		return me.OrderBook
+	}
+
+	book = NewOrderBook()
+	me.OrderBooks[coinSymbol] = book
+	return book
+}
 
 func (me *MatchingEngine) Match(order *Order) {
-	if order.Side == model.OrderSideBuy {
-		sellLevel, ok := me.OrderBook.SellOrders.Min()
-		if ok {
-			if order.Price.GreaterThanOrEqual(sellLevel.Price) {
-				// 1. 매도 주문 꺼내기
-				sellOrder := sellLevel.Orders.PopFront()
-				// 2. 체결 수량 계산(매수/매도 중 더 작은 쪽)
-				tradeQty := decimal.Min(order.Amount, sellOrder.Amount)
-				// 3. 트레이드 생성
-				trade := &model.Trade{
-					CoinSymbol:  order.CoinSymbol,
-					Price:       sellLevel.Price,
-					Quantity:    tradeQty,
-					TradedAt:    time.Now(),
-					BuyOrderID:  order.ID,
-					SellOrderID: sellOrder.ID,
-				}
-				// 4.TradeCh 채널로 체결 결과 내보내기
-				me.TradeCh <- trade
+	if order == nil || !order.Amount.GreaterThan(decimal.Zero) {
+		return
+	}
 
-				// 5. 남은 수량 처리
-				order.Amount = order.Amount.Sub(tradeQty)
-				order.FilledAmount = order.FilledAmount.Add(tradeQty)
-				sellOrder.Amount = sellOrder.Amount.Sub(tradeQty)
+	book := me.GetOrderBook(order.CoinSymbol)
 
-				if sellOrder.Amount.IsZero() {
-					if sellLevel.Orders.Len() == 0 {
-						me.OrderBook.SellOrders.Delete(sellLevel)
-					}
-				} else {
-					sellLevel.Orders.PushFront(sellOrder)
-				}
+	switch order.Side {
+	case model.OrderSideBuy:
+		me.matchBuy(book, order)
+	case model.OrderSideSell:
+		me.matchSell(book, order)
+	default:
+		return
+	}
 
-				if order.Amount.IsZero() {
-					me.OrderBook.RemoveOrder(order)
-				}
-			}
+	if order.Amount.GreaterThan(decimal.Zero) {
+		book.AddOrder(order)
+	}
+}
+
+func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
+	for order.Amount.GreaterThan(decimal.Zero) {
+		sellLevel, ok := book.SellOrders.Min()
+		if !ok || order.Price.LessThan(sellLevel.Price) {
+			return
 		}
-	} else if order.Side == model.OrderSideSell {
-		buyLevel, ok := me.OrderBook.BuyOrders.Max()
-		if ok {
-			if buyLevel.Price.GreaterThanOrEqual(order.Price) {
-				buyOrder := buyLevel.Orders.PopFront()
-				tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
-				trade := &model.Trade{
-					CoinSymbol:  order.CoinSymbol,
-					Price:       buyLevel.Price,
-					Quantity:    tradeQty,
-					TradedAt:    time.Now(),
-					BuyOrderID:  buyOrder.ID,
-					SellOrderID: order.ID,
-				}
-				me.TradeCh <- trade
 
-				order.Amount = order.Amount.Sub(tradeQty)
-				order.FilledAmount = order.FilledAmount.Add(tradeQty)
-				buyOrder.Amount = buyOrder.Amount.Sub(tradeQty)
+		sellOrder := sellLevel.Orders.PopFront()
+		tradeQty := decimal.Min(order.Amount, sellOrder.Amount)
+		if !tradeQty.GreaterThan(decimal.Zero) {
+			return
+		}
 
-				if buyOrder.Amount.IsZero() {
-					if buyLevel.Orders.Len() == 0 {
-						me.OrderBook.BuyOrders.Delete(buyLevel)
-					}
-				} else {
-					buyLevel.Orders.PushFront(buyOrder)
-				}
+		order.Amount = order.Amount.Sub(tradeQty)
+		order.FilledAmount = order.FilledAmount.Add(tradeQty)
+		sellOrder.Amount = sellOrder.Amount.Sub(tradeQty)
+		sellOrder.FilledAmount = sellOrder.FilledAmount.Add(tradeQty)
 
-				if order.Amount.IsZero() {
-					me.OrderBook.RemoveOrder(order)
-				}
-			}
+		if sellOrder.Amount.GreaterThan(decimal.Zero) {
+			sellLevel.Orders.PushFront(sellOrder)
+		}
+		if sellLevel.Orders.Len() == 0 {
+			book.SellOrders.Delete(sellLevel)
+		}
+
+		me.TradeCh <- &model.Trade{
+			CoinSymbol:  order.CoinSymbol,
+			Price:       sellLevel.Price,
+			Quantity:    tradeQty,
+			TradedAt:    time.Now(),
+			BuyOrderID:  order.ID,
+			SellOrderID: sellOrder.ID,
 		}
 	}
 }
 
-func (me *MatchingEngine) GetOrderBookSnapshot() OrderBookSnapshot {
-    snapshot := OrderBookSnapshot{}
+func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
+	for order.Amount.GreaterThan(decimal.Zero) {
+		buyLevel, ok := book.BuyOrders.Max()
+		if !ok || buyLevel.Price.LessThan(order.Price) {
+			return
+		}
 
-    // 매도 호가 (낮은 가격부터)
-    me.OrderBook.SellOrders.Ascend(func(level *PriceLevel) bool {
-        qty := decimal.Zero
-        for i := 0; i < level.Orders.Len(); i++ {
-            qty = qty.Add(level.Orders.At(i).Amount)
-        }
-        snapshot.Asks = append(snapshot.Asks, PriceLevelData{
-            Price:    level.Price,
-            Quantity: qty,
-        })
-        return true
-    })
+		buyOrder := buyLevel.Orders.PopFront()
+		tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
+		if !tradeQty.GreaterThan(decimal.Zero) {
+			return
+		}
 
-    // 매수 호가 (높은 가격부터)
-    me.OrderBook.BuyOrders.Descend(func(level *PriceLevel) bool {
-        qty := decimal.Zero
-        for i := 0; i < level.Orders.Len(); i++ {
-            qty = qty.Add(level.Orders.At(i).Amount)
-        }
-        snapshot.Bids = append(snapshot.Bids, PriceLevelData{
-            Price:    level.Price,
-            Quantity: qty,
-        })
-        return true
-    })
+		order.Amount = order.Amount.Sub(tradeQty)
+		order.FilledAmount = order.FilledAmount.Add(tradeQty)
+		buyOrder.Amount = buyOrder.Amount.Sub(tradeQty)
+		buyOrder.FilledAmount = buyOrder.FilledAmount.Add(tradeQty)
 
-    return snapshot
+		if buyOrder.Amount.GreaterThan(decimal.Zero) {
+			buyLevel.Orders.PushFront(buyOrder)
+		}
+		if buyLevel.Orders.Len() == 0 {
+			book.BuyOrders.Delete(buyLevel)
+		}
+
+		me.TradeCh <- &model.Trade{
+			CoinSymbol:  order.CoinSymbol,
+			Price:       buyLevel.Price,
+			Quantity:    tradeQty,
+			TradedAt:    time.Now(),
+			BuyOrderID:  buyOrder.ID,
+			SellOrderID: order.ID,
+		}
+	}
+}
+
+func (me *MatchingEngine) GetOrderBookSnapshot(coinSymbols ...string) OrderBookSnapshot {
+	coinSymbol := ""
+	if len(coinSymbols) > 0 {
+		coinSymbol = coinSymbols[0]
+	}
+
+	book := me.OrderBook
+	if coinSymbol != "" {
+		book = me.GetOrderBook(coinSymbol)
+	}
+
+	snapshot := OrderBookSnapshot{
+		CoinSymbol: coinSymbol,
+	}
+	if book == nil {
+		return snapshot
+	}
+
+	book.SellOrders.Ascend(func(level *PriceLevel) bool {
+		qty := decimal.Zero
+		for i := 0; i < level.Orders.Len(); i++ {
+			qty = qty.Add(level.Orders.At(i).Amount)
+		}
+		if qty.GreaterThan(decimal.Zero) {
+			snapshot.Asks = append(snapshot.Asks, PriceLevelData{
+				Price:    level.Price,
+				Quantity: qty,
+			})
+		}
+		return true
+	})
+
+	book.BuyOrders.Descend(func(level *PriceLevel) bool {
+		qty := decimal.Zero
+		for i := 0; i < level.Orders.Len(); i++ {
+			qty = qty.Add(level.Orders.At(i).Amount)
+		}
+		if qty.GreaterThan(decimal.Zero) {
+			snapshot.Bids = append(snapshot.Bids, PriceLevelData{
+				Price:    level.Price,
+				Quantity: qty,
+			})
+		}
+		return true
+	})
+
+	return snapshot
 }

@@ -1,0 +1,80 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: .
+
+jobs:
+  unit-static:
+    name: Unit tests and vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Stress matching package
+        run: go test -count=20 ./internal/matching
+
+  postgres-integration:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: goexchange_test
+          POSTGRES_PASSWORD: goexchange_test_password
+          POSTGRES_DB: goexchange_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U goexchange_test -d goexchange_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 5s
+
+    env:
+      GOEXCHANGE_TEST_DATABASE_DSN: host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=5432 sslmode=disable
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run Postgres integration tests
+        run: go test -run Integration -v ./internal/repository ./internal/service
