@@ -104,6 +104,29 @@ func TestSettlementParticipantsUsesOrderUserIDs(t *testing.T) {
 	assert.Equal(t, uint(20), participants.SellerUserID)
 }
 
+func TestSettlementParticipantsRejectsSelfTrade(t *testing.T) {
+	buyOrder := &model.Order{
+		ID:     1,
+		UserID: 10,
+		Side:   model.OrderSideBuy,
+	}
+	sellOrder := &model.Order{
+		ID:     2,
+		UserID: 10,
+		Side:   model.OrderSideSell,
+	}
+
+	_, err := settlementParticipants(buyOrder, sellOrder)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "self-trade settlement is not allowed")
+}
+
+func TestValidateDistinctSettlementParticipantsRejectsMissingUserIDs(t *testing.T) {
+	require.Error(t, validateDistinctSettlementParticipants(0, 1))
+	require.Error(t, validateDistinctSettlementParticipants(1, 0))
+}
+
 func TestTradeQuoteAmount(t *testing.T) {
 	trade := &model.Trade{
 		Price:    decimal.RequireFromString("50000.25"),

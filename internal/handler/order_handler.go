@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
@@ -40,7 +41,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	var req CreateOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBindingError(c, err)
 		return
 	}
 
@@ -53,7 +54,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		Amount:     req.Amount,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeServiceError(c, err)
 		return
 	}
 
@@ -174,6 +175,8 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		status := http.StatusBadRequest
 		if result != nil && result.Status == "CANCELLED" {
 			status = http.StatusInternalServerError
+		} else {
+			status = serviceErrorStatus(err)
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
@@ -287,11 +290,51 @@ func parseLimitQuery(c *gin.Context) int {
 }
 
 func writeServiceError(c *gin.Context, err error) {
+	status := serviceErrorStatus(err)
+	message := err.Error()
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
+		message = "not found"
 	}
-	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	c.JSON(status, gin.H{"error": message})
+}
+
+func writeBindingError(c *gin.Context, err error) {
+	c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+}
+
+func serviceErrorStatus(err error) int {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return http.StatusNotFound
+	}
+
+	if kind, ok := service.DomainErrorKind(err); ok {
+		switch kind {
+		case service.ErrorKindValidation:
+			return http.StatusUnprocessableEntity
+		case service.ErrorKindConflict:
+			return http.StatusConflict
+		case service.ErrorKindForbidden:
+			return http.StatusForbidden
+		}
+	}
+
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "does not belong"):
+		return http.StatusForbidden
+	case strings.Contains(message, "insufficient"),
+		strings.Contains(message, "cannot be cancelled"),
+		strings.Contains(message, "no remaining quantity"),
+		strings.Contains(message, "already registered"):
+		return http.StatusConflict
+	case strings.Contains(message, "invalid"),
+		strings.Contains(message, "required"),
+		strings.Contains(message, "must be"),
+		strings.Contains(message, "not supported"):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func authenticatedUserID(c *gin.Context) (uint, bool) {

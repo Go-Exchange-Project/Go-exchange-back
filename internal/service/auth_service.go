@@ -68,7 +68,7 @@ func (s *AuthService) Register(input RegisterInput) (AuthResult, error) {
 
 	existing, err := s.UserRepository.FindByEmail(email)
 	if err == nil && existing.ID != 0 {
-		return AuthResult{}, fmt.Errorf("email is already registered")
+		return AuthResult{}, NewConflictErrorf("email is already registered")
 	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return AuthResult{}, err
@@ -125,10 +125,10 @@ func (s *AuthService) Login(input LoginInput) (AuthResult, error) {
 func validateRegisterInput(input RegisterInput) (string, string, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
-		return "", "", fmt.Errorf("name is required")
+		return "", "", NewValidationErrorf("name is required")
 	}
 	if len(name) > maxNameLength {
-		return "", "", fmt.Errorf("name must be at most %d characters", maxNameLength)
+		return "", "", NewValidationErrorf("name must be at most %d characters", maxNameLength)
 	}
 
 	email, err := normalizeEmail(input.Email)
@@ -136,7 +136,7 @@ func validateRegisterInput(input RegisterInput) (string, string, error) {
 		return "", "", err
 	}
 	if len(input.Password) < minPasswordLength {
-		return "", "", fmt.Errorf("password must be at least %d characters", minPasswordLength)
+		return "", "", NewValidationErrorf("password must be at least %d characters", minPasswordLength)
 	}
 	return name, email, nil
 }
@@ -144,13 +144,13 @@ func validateRegisterInput(input RegisterInput) (string, string, error) {
 func normalizeEmail(email string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
-		return "", fmt.Errorf("email is required")
+		return "", NewValidationErrorf("email is required")
 	}
 	if len(email) > maxEmailLength {
-		return "", fmt.Errorf("email must be at most %d characters", maxEmailLength)
+		return "", NewValidationErrorf("email must be at most %d characters", maxEmailLength)
 	}
 	if _, err := mail.ParseAddress(email); err != nil {
-		return "", fmt.Errorf("email is invalid")
+		return "", NewValidationErrorf("email is invalid")
 	}
 	return email, nil
 }

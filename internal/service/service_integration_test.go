@@ -183,6 +183,64 @@ func TestIntegrationCreateSellOrderHoldsCoin(t *testing.T) {
 	assert.True(t, btcWallet.Quantity.Equal(decimal.NewFromInt(5)))
 }
 
+func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(4)
+	defer cleanupServiceUsers(t, db, userID)
+
+	require.NoError(t, db.Create(&model.Wallet{
+		UserID:           userID,
+		CoinSymbol:       model.KRWAssetSymbol,
+		KRW:              decimal.NewFromInt(1000),
+		AvailableBalance: decimal.NewFromInt(1000),
+		LockedBalance:    decimal.Zero,
+	}).Error)
+	require.NoError(t, db.Create(&model.Order{
+		UserID:       userID,
+		CoinSymbol:   "BTC",
+		Side:         model.OrderSideSell,
+		OrderType:    model.OrderTypeLimit,
+		Status:       model.OrderStatusPending,
+		Price:        decimal.NewFromInt(100),
+		Amount:       decimal.NewFromInt(2),
+		FilledAmount: decimal.Zero,
+	}).Error)
+
+	me := matching.NewMatchingEngine()
+	orderService := newIntegrationOrderService(db, me)
+
+	order, err := orderService.CreateOrder(CreateOrderInput{
+		UserID:     userID,
+		CoinSymbol: "BTC",
+		Side:       "BUY",
+		Price:      "100",
+		Amount:     "1",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, order)
+
+	wallet, err := repository.NewWalletRepository(db).FindKRWWalletByUserID(userID)
+	require.NoError(t, err)
+	assert.True(t, wallet.AvailableBalance.Equal(decimal.NewFromInt(900)))
+	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(100)))
+
+	var buyOrderCount int64
+	require.NoError(t, db.Model(&model.Order{}).
+		Where("user_id = ? AND side = ?", userID, model.OrderSideBuy).
+		Count(&buyOrderCount).Error)
+	assert.Equal(t, int64(1), buyOrderCount)
+
+	select {
+	case engineOrder := <-me.OrderCh:
+		assert.Equal(t, order.ID, engineOrder.ID)
+		assert.Equal(t, userID, engineOrder.UserID)
+		assert.Equal(t, model.OrderSideBuy, engineOrder.Side)
+	case <-time.After(time.Second):
+		t.Fatal("expected order to be submitted to matching engine")
+	}
+}
+
 func TestIntegrationBootstrapOpenOrdersRestoresOrderBook(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	buyerID := serviceTestUserID(28)

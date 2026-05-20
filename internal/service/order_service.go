@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -106,10 +107,10 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 
 func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, error) {
 	if input.UserID == 0 {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, NewValidationErrorf("user_id is required")
 	}
 	if input.OrderID == 0 {
-		return nil, fmt.Errorf("order_id is required")
+		return nil, NewValidationErrorf("order_id is required")
 	}
 
 	var result *CancelOrderResult
@@ -123,10 +124,10 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 			return err
 		}
 		if order.UserID != input.UserID {
-			return fmt.Errorf("order does not belong to user")
+			return NewForbiddenErrorf("order does not belong to user")
 		}
 		if !isCancellableOrderStatus(order.Status) {
-			return fmt.Errorf("order status %s cannot be cancelled", order.Status)
+			return NewConflictErrorf("order status %s cannot be cancelled", order.Status)
 		}
 
 		remaining, err := remainingOrderQuantity(order)
@@ -173,7 +174,7 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 
 func (s *OrderService) ListOrders(input ListOrdersInput) ([]model.Order, error) {
 	if input.UserID == 0 {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, NewValidationErrorf("user_id is required")
 	}
 	if s == nil || s.OrderRepository == nil {
 		return nil, fmt.Errorf("order repository is required")
@@ -197,10 +198,10 @@ func (s *OrderService) ListOrders(input ListOrdersInput) ([]model.Order, error) 
 
 func (s *OrderService) GetOrder(userID uint, orderID uint) (*model.Order, error) {
 	if userID == 0 {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, NewValidationErrorf("user_id is required")
 	}
 	if orderID == 0 {
-		return nil, fmt.Errorf("order_id is required")
+		return nil, NewValidationErrorf("order_id is required")
 	}
 	if s == nil || s.OrderRepository == nil {
 		return nil, fmt.Errorf("order repository is required")
@@ -210,7 +211,7 @@ func (s *OrderService) GetOrder(userID uint, orderID uint) (*model.Order, error)
 
 func (s *OrderService) ListWallets(userID uint) ([]model.Wallet, error) {
 	if userID == 0 {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, NewValidationErrorf("user_id is required")
 	}
 	if s == nil || s.WalletRepository == nil {
 		return nil, fmt.Errorf("wallet repository is required")
@@ -220,7 +221,7 @@ func (s *OrderService) ListWallets(userID uint) ([]model.Wallet, error) {
 
 func (s *OrderService) ListTrades(input ListTradesInput) ([]repository.UserTrade, error) {
 	if input.UserID == 0 {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, NewValidationErrorf("user_id is required")
 	}
 	if s == nil || s.TradeRepository == nil {
 		return nil, fmt.Errorf("trade repository is required")
@@ -233,12 +234,12 @@ func (s *OrderService) ListTrades(input ListTradesInput) ([]repository.UserTrade
 
 func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 	if input.UserID == 0 {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, NewValidationErrorf("user_id is required")
 	}
 
 	coinSymbol := normalizeCoinSymbol(input.CoinSymbol)
 	if coinSymbol == "" {
-		return nil, fmt.Errorf("coin_symbol is required")
+		return nil, NewValidationErrorf("coin_symbol is required")
 	}
 
 	side, err := parseOrderSide(input.Side)
@@ -278,6 +279,9 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order
 	case model.OrderSideBuy:
 		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return NewConflictErrorf("insufficient available KRW balance")
+			}
 			return err
 		}
 		required := order.Price.Mul(order.Amount)
@@ -289,6 +293,9 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order
 	case model.OrderSideSell:
 		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return NewConflictErrorf("insufficient available coin balance")
+			}
 			return err
 		}
 		update, err := applySellOrderHold(wallet, order.Amount)
@@ -297,7 +304,7 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order
 		}
 		return walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance)
 	default:
-		return fmt.Errorf("invalid order side")
+		return NewValidationErrorf("invalid order side")
 	}
 }
 
@@ -306,6 +313,9 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Orde
 	case model.OrderSideBuy:
 		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return "", decimal.Zero, NewConflictErrorf("locked KRW wallet not found")
+			}
 			return "", decimal.Zero, err
 		}
 		releaseAmount := order.Price.Mul(remaining)
@@ -317,6 +327,9 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Orde
 	case model.OrderSideSell:
 		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return "", decimal.Zero, NewConflictErrorf("locked coin wallet not found")
+			}
 			return "", decimal.Zero, err
 		}
 		update, err := releaseSellOrderHold(wallet, remaining)
@@ -325,7 +338,7 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Orde
 		}
 		return order.CoinSymbol, remaining, walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance)
 	default:
-		return "", decimal.Zero, fmt.Errorf("invalid order side")
+		return "", decimal.Zero, NewValidationErrorf("invalid order side")
 	}
 }
 
@@ -335,11 +348,11 @@ func isCancellableOrderStatus(status model.OrderStatus) bool {
 
 func remainingOrderQuantity(order *model.Order) (decimal.Decimal, error) {
 	if order == nil {
-		return decimal.Zero, fmt.Errorf("order is required")
+		return decimal.Zero, NewValidationErrorf("order is required")
 	}
 	remaining := order.Amount.Sub(order.FilledAmount)
 	if !remaining.GreaterThan(decimal.Zero) {
-		return decimal.Zero, fmt.Errorf("order has no remaining quantity")
+		return decimal.Zero, NewConflictErrorf("order has no remaining quantity")
 	}
 	return remaining, nil
 }
@@ -351,7 +364,7 @@ func parseOrderSide(value string) (model.OrderSide, error) {
 	case model.OrderSideSell:
 		return model.OrderSideSell, nil
 	default:
-		return "", fmt.Errorf("invalid order side")
+		return "", NewValidationErrorf("invalid order side")
 	}
 }
 
@@ -365,9 +378,9 @@ func parseOrderType(value string) (model.OrderType, error) {
 	case model.OrderTypeLimit:
 		return model.OrderTypeLimit, nil
 	case model.OrderTypeMarket:
-		return "", fmt.Errorf("market orders are not supported yet")
+		return "", NewValidationErrorf("market orders are not supported yet")
 	default:
-		return "", fmt.Errorf("invalid order type")
+		return "", NewValidationErrorf("invalid order type")
 	}
 }
 
@@ -382,7 +395,7 @@ func parseOrderStatus(value string) (model.OrderStatus, error) {
 	case model.OrderStatusCancelled:
 		return model.OrderStatusCancelled, nil
 	default:
-		return "", fmt.Errorf("invalid order status")
+		return "", NewValidationErrorf("invalid order status")
 	}
 }
 
@@ -403,10 +416,10 @@ func normalizeQueryLimit(limit int) int {
 func parsePositiveDecimal(value string, field string) (decimal.Decimal, error) {
 	parsed, err := decimal.NewFromString(strings.TrimSpace(value))
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("invalid %s", field)
+		return decimal.Zero, NewValidationErrorf("invalid %s", field)
 	}
 	if !parsed.GreaterThan(decimal.Zero) {
-		return decimal.Zero, fmt.Errorf("%s must be greater than zero", field)
+		return decimal.Zero, NewValidationErrorf("%s must be greater than zero", field)
 	}
 	return parsed, nil
 }

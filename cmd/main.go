@@ -184,9 +184,10 @@ func processTradeSettlement(
 	tradeJSON, err := json.Marshal(map[string]interface{}{
 		"type": "trade",
 		"data": map[string]interface{}{
-			"price":    trade.Price,
-			"quantity": trade.Quantity,
-			"time":     trade.TradedAt,
+			"coin_symbol": trade.CoinSymbol,
+			"price":       trade.Price,
+			"quantity":    trade.Quantity,
+			"time":        trade.TradedAt,
 		},
 	})
 	if err != nil {

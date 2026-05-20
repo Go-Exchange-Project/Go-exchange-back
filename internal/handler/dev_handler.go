@@ -29,7 +29,7 @@ func (h *DevHandler) FundWallet(c *gin.Context) {
 
 	var req FundWalletRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBindingError(c, err)
 		return
 	}
 
@@ -39,7 +39,7 @@ func (h *DevHandler) FundWallet(c *gin.Context) {
 		Amount:     req.Amount,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeServiceError(c, err)
 		return
 	}
 

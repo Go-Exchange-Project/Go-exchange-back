@@ -84,6 +84,7 @@ func TestProcessTradeSettlementBroadcastsAppliedTrade(t *testing.T) {
 
 	require.NotEmpty(t, broadcast)
 	assert.Contains(t, string(broadcast), `"type":"trade"`)
+	assert.Contains(t, string(broadcast), `"coin_symbol":"BTC"`)
 	assert.Contains(t, string(broadcast), `"price":"90"`)
 }
 

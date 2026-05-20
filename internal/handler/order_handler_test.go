@@ -1,15 +1,19 @@
 package handler
 
 import (
+	"errors"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
+	"gorm.io/gorm"
 )
 
 func TestAuthenticatedUserIDReadsGinContext(t *testing.T) {
@@ -86,4 +90,24 @@ func TestTradeResponseUsesUserSideAndDecimalStrings(t *testing.T) {
 	assert.Equal(t, model.OrderSideSell, response.Side)
 	assert.Equal(t, "2000.5", response.Price)
 	assert.Equal(t, "0.75", response.Quantity)
+}
+
+func TestServiceErrorStatusMapsDomainErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "validation", err: service.NewValidationErrorf("invalid price"), want: http.StatusUnprocessableEntity},
+		{name: "conflict", err: service.NewConflictErrorf("insufficient available KRW balance"), want: http.StatusConflict},
+		{name: "forbidden", err: service.NewForbiddenErrorf("order does not belong to user"), want: http.StatusForbidden},
+		{name: "not found", err: gorm.ErrRecordNotFound, want: http.StatusNotFound},
+		{name: "fallback bad request", err: errors.New("unexpected client error"), want: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, serviceErrorStatus(tt.err))
+		})
+	}
 }

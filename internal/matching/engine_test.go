@@ -22,6 +22,12 @@ func testOrder(id uint, symbol string, side model.OrderSide, price int64, amount
 	}
 }
 
+func testUserOrder(id uint, userID uint, symbol string, side model.OrderSide, price int64, amount int64) *Order {
+	order := testOrder(id, symbol, side, price, amount)
+	order.UserID = userID
+	return order
+}
+
 func submitAndWaitSnapshot(t *testing.T, me *MatchingEngine, order *Order) OrderBookSnapshot {
 	t.Helper()
 
@@ -158,6 +164,62 @@ func TestMatch_FIFOWithinSamePriceLevel(t *testing.T) {
 	buyLevel, ok := me.GetOrderBook("BTC").BuyOrders.Max()
 	require.True(t, ok)
 	assert.Equal(t, uint(2), buyLevel.Orders.Front().ID)
+}
+
+func TestMatch_BuySkipsOwnSellOrderAndMatchesOtherUser(t *testing.T) {
+	me := NewMatchingEngine()
+	me.Start()
+
+	ownSell := testUserOrder(1, 10, "BTC", model.OrderSideSell, 50000, 1)
+	otherSell := testUserOrder(2, 20, "BTC", model.OrderSideSell, 50000, 1)
+	incomingBuy := testUserOrder(3, 10, "BTC", model.OrderSideBuy, 50000, 1)
+	submitAndWaitSnapshot(t, me, ownSell)
+	submitAndWaitSnapshot(t, me, otherSell)
+	submitAndWaitSnapshot(t, me, incomingBuy)
+
+	trade := requireNextTrade(t, me)
+
+	assert.Equal(t, incomingBuy.ID, trade.BuyOrderID)
+	assert.Equal(t, otherSell.ID, trade.SellOrderID)
+	assertNoTrade(t, me)
+	sellLevel, ok := me.GetOrderBook("BTC").SellOrders.Min()
+	require.True(t, ok)
+	require.Equal(t, 1, sellLevel.Orders.Len())
+	assert.Equal(t, ownSell.ID, sellLevel.Orders.Front().ID)
+}
+
+func TestMatch_SellSkipsOwnBuyOrderAndMatchesOtherUser(t *testing.T) {
+	me := NewMatchingEngine()
+	me.Start()
+
+	ownBuy := testUserOrder(1, 10, "BTC", model.OrderSideBuy, 50000, 1)
+	otherBuy := testUserOrder(2, 20, "BTC", model.OrderSideBuy, 50000, 1)
+	incomingSell := testUserOrder(3, 10, "BTC", model.OrderSideSell, 50000, 1)
+	submitAndWaitSnapshot(t, me, ownBuy)
+	submitAndWaitSnapshot(t, me, otherBuy)
+	submitAndWaitSnapshot(t, me, incomingSell)
+
+	trade := requireNextTrade(t, me)
+
+	assert.Equal(t, otherBuy.ID, trade.BuyOrderID)
+	assert.Equal(t, incomingSell.ID, trade.SellOrderID)
+	assertNoTrade(t, me)
+	buyLevel, ok := me.GetOrderBook("BTC").BuyOrders.Max()
+	require.True(t, ok)
+	require.Equal(t, 1, buyLevel.Orders.Len())
+	assert.Equal(t, ownBuy.ID, buyLevel.Orders.Front().ID)
+}
+
+func TestMatch_SelfTradeOnlyDoesNotEmitTrade(t *testing.T) {
+	me := NewMatchingEngine()
+	me.Start()
+
+	submitAndWaitSnapshot(t, me, testUserOrder(1, 10, "BTC", model.OrderSideSell, 50000, 1))
+	submitAndWaitSnapshot(t, me, testUserOrder(2, 10, "BTC", model.OrderSideBuy, 60000, 1))
+
+	assertNoTrade(t, me)
+	assert.Equal(t, 1, me.GetOrderBook("BTC").SellOrders.Len())
+	assert.Equal(t, 1, me.GetOrderBook("BTC").BuyOrders.Len())
 }
 
 func TestMatch_LargeBuyMatchesMultipleSellOrders(t *testing.T) {

@@ -173,12 +173,12 @@ func (me *MatchingEngine) Match(order *Order) {
 
 func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
 	for order.Amount.GreaterThan(decimal.Zero) {
-		sellLevel, ok := book.SellOrders.Min()
-		if !ok || order.Price.LessThan(sellLevel.Price) {
+		sellLevel, orderIndex, ok := bestMatchableSellOrder(book, order)
+		if !ok {
 			return
 		}
 
-		sellOrder := sellLevel.Orders.PopFront()
+		sellOrder := sellLevel.Orders.At(orderIndex)
 		tradeQty := decimal.Min(order.Amount, sellOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
 			return
@@ -189,8 +189,8 @@ func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
 		sellOrder.Amount = sellOrder.Amount.Sub(tradeQty)
 		sellOrder.FilledAmount = sellOrder.FilledAmount.Add(tradeQty)
 
-		if sellOrder.Amount.GreaterThan(decimal.Zero) {
-			sellLevel.Orders.PushFront(sellOrder)
+		if !sellOrder.Amount.GreaterThan(decimal.Zero) {
+			sellLevel.Orders.Remove(orderIndex)
 		}
 		if sellLevel.Orders.Len() == 0 {
 			book.SellOrders.Delete(sellLevel)
@@ -209,12 +209,12 @@ func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
 
 func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
 	for order.Amount.GreaterThan(decimal.Zero) {
-		buyLevel, ok := book.BuyOrders.Max()
-		if !ok || buyLevel.Price.LessThan(order.Price) {
+		buyLevel, orderIndex, ok := bestMatchableBuyOrder(book, order)
+		if !ok {
 			return
 		}
 
-		buyOrder := buyLevel.Orders.PopFront()
+		buyOrder := buyLevel.Orders.At(orderIndex)
 		tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
 			return
@@ -225,8 +225,8 @@ func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
 		buyOrder.Amount = buyOrder.Amount.Sub(tradeQty)
 		buyOrder.FilledAmount = buyOrder.FilledAmount.Add(tradeQty)
 
-		if buyOrder.Amount.GreaterThan(decimal.Zero) {
-			buyLevel.Orders.PushFront(buyOrder)
+		if !buyOrder.Amount.GreaterThan(decimal.Zero) {
+			buyLevel.Orders.Remove(orderIndex)
 		}
 		if buyLevel.Orders.Len() == 0 {
 			book.BuyOrders.Delete(buyLevel)
@@ -241,6 +241,64 @@ func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
 			SellOrderID: order.ID,
 		}
 	}
+}
+
+func bestMatchableSellOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, bool) {
+	var matchLevel *PriceLevel
+	matchIndex := -1
+
+	book.SellOrders.Ascend(func(level *PriceLevel) bool {
+		if incoming.Price.LessThan(level.Price) {
+			return false
+		}
+		if index := firstNonSelfOrderIndex(level, incoming); index >= 0 {
+			matchLevel = level
+			matchIndex = index
+			return false
+		}
+		return true
+	})
+
+	return matchLevel, matchIndex, matchLevel != nil
+}
+
+func bestMatchableBuyOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, bool) {
+	var matchLevel *PriceLevel
+	matchIndex := -1
+
+	book.BuyOrders.Descend(func(level *PriceLevel) bool {
+		if level.Price.LessThan(incoming.Price) {
+			return false
+		}
+		if index := firstNonSelfOrderIndex(level, incoming); index >= 0 {
+			matchLevel = level
+			matchIndex = index
+			return false
+		}
+		return true
+	})
+
+	return matchLevel, matchIndex, matchLevel != nil
+}
+
+func firstNonSelfOrderIndex(level *PriceLevel, incoming *Order) int {
+	if level == nil || level.Orders == nil || incoming == nil {
+		return -1
+	}
+	for i := 0; i < level.Orders.Len(); i++ {
+		if !isSelfTrade(incoming, level.Orders.At(i)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func isSelfTrade(incoming *Order, resting *Order) bool {
+	return incoming != nil &&
+		resting != nil &&
+		incoming.UserID != 0 &&
+		resting.UserID != 0 &&
+		incoming.UserID == resting.UserID
 }
 
 func (me *MatchingEngine) GetOrderBookSnapshot(coinSymbols ...string) OrderBookSnapshot {

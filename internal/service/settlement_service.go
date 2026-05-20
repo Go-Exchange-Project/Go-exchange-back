@@ -232,7 +232,17 @@ func settlementParticipants(buyOrder *model.Order, sellOrder *model.Order) (Sett
 	return SettlementParticipants{
 		BuyerUserID:  buyOrder.UserID,
 		SellerUserID: sellOrder.UserID,
-	}, nil
+	}, validateDistinctSettlementParticipants(buyOrder.UserID, sellOrder.UserID)
+}
+
+func validateDistinctSettlementParticipants(buyerUserID uint, sellerUserID uint) error {
+	if buyerUserID == 0 || sellerUserID == 0 {
+		return fmt.Errorf("settlement participants must have user IDs")
+	}
+	if buyerUserID == sellerUserID {
+		return fmt.Errorf("self-trade settlement is not allowed for user %d", buyerUserID)
+	}
+	return nil
 }
 
 func tradeQuoteAmount(trade *model.Trade) decimal.Decimal {

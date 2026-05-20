@@ -50,12 +50,12 @@ func (s *DevWalletService) FundWallet(input FundWalletInput) (*model.Wallet, err
 
 func normalizeFundWalletInput(input FundWalletInput) (uint, string, decimal.Decimal, error) {
 	if input.UserID == 0 {
-		return 0, "", decimal.Zero, fmt.Errorf("user_id is required")
+		return 0, "", decimal.Zero, NewValidationErrorf("user_id is required")
 	}
 
 	coinSymbol := normalizeCoinSymbol(input.CoinSymbol)
 	if coinSymbol == "" {
-		return 0, "", decimal.Zero, fmt.Errorf("coin_symbol is required")
+		return 0, "", decimal.Zero, NewValidationErrorf("coin_symbol is required")
 	}
 
 	amount, err := parsePositiveDecimal(input.Amount, "amount")

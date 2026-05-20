@@ -1,8 +1,6 @@
 package service
 
 import (
-	"fmt"
-
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
 )
@@ -16,19 +14,19 @@ type WalletBalanceUpdate struct {
 
 func applyBuyOrderHold(wallet *model.Wallet, holdAmount decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if wallet.CoinSymbol != model.KRWAssetSymbol {
-		return WalletBalanceUpdate{}, fmt.Errorf("buy hold requires KRW wallet")
+		return WalletBalanceUpdate{}, NewValidationErrorf("buy hold requires KRW wallet")
 	}
 	if !holdAmount.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("hold amount must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("hold amount must be greater than zero")
 	}
 
 	available := walletAvailableBalance(wallet)
 	locked := wallet.LockedBalance
 	if available.LessThan(holdAmount) {
-		return WalletBalanceUpdate{}, fmt.Errorf("insufficient available KRW balance")
+		return WalletBalanceUpdate{}, NewConflictErrorf("insufficient available KRW balance")
 	}
 
 	return walletBalanceUpdate(wallet, available.Sub(holdAmount), locked.Add(holdAmount)), nil
@@ -36,19 +34,19 @@ func applyBuyOrderHold(wallet *model.Wallet, holdAmount decimal.Decimal) (Wallet
 
 func applySellOrderHold(wallet *model.Wallet, holdQuantity decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if wallet.CoinSymbol == model.KRWAssetSymbol {
-		return WalletBalanceUpdate{}, fmt.Errorf("sell hold requires coin wallet")
+		return WalletBalanceUpdate{}, NewValidationErrorf("sell hold requires coin wallet")
 	}
 	if !holdQuantity.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("hold quantity must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("hold quantity must be greater than zero")
 	}
 
 	available := walletAvailableBalance(wallet)
 	locked := wallet.LockedBalance
 	if available.LessThan(holdQuantity) {
-		return WalletBalanceUpdate{}, fmt.Errorf("insufficient available coin balance")
+		return WalletBalanceUpdate{}, NewConflictErrorf("insufficient available coin balance")
 	}
 
 	return walletBalanceUpdate(wallet, available.Sub(holdQuantity), locked.Add(holdQuantity)), nil
@@ -56,16 +54,16 @@ func applySellOrderHold(wallet *model.Wallet, holdQuantity decimal.Decimal) (Wal
 
 func releaseBuyOrderHold(wallet *model.Wallet, releaseAmount decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if wallet.CoinSymbol != model.KRWAssetSymbol {
-		return WalletBalanceUpdate{}, fmt.Errorf("buy release requires KRW wallet")
+		return WalletBalanceUpdate{}, NewValidationErrorf("buy release requires KRW wallet")
 	}
 	if !releaseAmount.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("release amount must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("release amount must be greater than zero")
 	}
 	if wallet.LockedBalance.LessThan(releaseAmount) {
-		return WalletBalanceUpdate{}, fmt.Errorf("insufficient locked KRW balance")
+		return WalletBalanceUpdate{}, NewConflictErrorf("insufficient locked KRW balance")
 	}
 
 	available := walletAvailableBalance(wallet).Add(releaseAmount)
@@ -75,16 +73,16 @@ func releaseBuyOrderHold(wallet *model.Wallet, releaseAmount decimal.Decimal) (W
 
 func releaseSellOrderHold(wallet *model.Wallet, releaseQuantity decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if wallet.CoinSymbol == model.KRWAssetSymbol {
-		return WalletBalanceUpdate{}, fmt.Errorf("sell release requires coin wallet")
+		return WalletBalanceUpdate{}, NewValidationErrorf("sell release requires coin wallet")
 	}
 	if !releaseQuantity.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("release quantity must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("release quantity must be greater than zero")
 	}
 	if wallet.LockedBalance.LessThan(releaseQuantity) {
-		return WalletBalanceUpdate{}, fmt.Errorf("insufficient locked coin balance")
+		return WalletBalanceUpdate{}, NewConflictErrorf("insufficient locked coin balance")
 	}
 
 	available := walletAvailableBalance(wallet).Add(releaseQuantity)
@@ -94,19 +92,19 @@ func releaseSellOrderHold(wallet *model.Wallet, releaseQuantity decimal.Decimal)
 
 func settleBuyerKRW(wallet *model.Wallet, reservedAmount decimal.Decimal, executionAmount decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if wallet.CoinSymbol != model.KRWAssetSymbol {
-		return WalletBalanceUpdate{}, fmt.Errorf("buyer quote settlement requires KRW wallet")
+		return WalletBalanceUpdate{}, NewValidationErrorf("buyer quote settlement requires KRW wallet")
 	}
 	if !reservedAmount.GreaterThan(decimal.Zero) || !executionAmount.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("settlement amounts must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("settlement amounts must be greater than zero")
 	}
 	if reservedAmount.LessThan(executionAmount) {
-		return WalletBalanceUpdate{}, fmt.Errorf("reserved amount is less than execution amount")
+		return WalletBalanceUpdate{}, NewValidationErrorf("reserved amount is less than execution amount")
 	}
 	if wallet.LockedBalance.LessThan(reservedAmount) {
-		return WalletBalanceUpdate{}, fmt.Errorf("buyer has insufficient locked KRW balance")
+		return WalletBalanceUpdate{}, NewConflictErrorf("buyer has insufficient locked KRW balance")
 	}
 
 	available := walletAvailableBalance(wallet).Add(reservedAmount.Sub(executionAmount))
@@ -116,16 +114,16 @@ func settleBuyerKRW(wallet *model.Wallet, reservedAmount decimal.Decimal, execut
 
 func settleSellerCoin(wallet *model.Wallet, quantity decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if wallet.CoinSymbol == model.KRWAssetSymbol {
-		return WalletBalanceUpdate{}, fmt.Errorf("seller base settlement requires coin wallet")
+		return WalletBalanceUpdate{}, NewValidationErrorf("seller base settlement requires coin wallet")
 	}
 	if !quantity.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("settlement quantity must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("settlement quantity must be greater than zero")
 	}
 	if wallet.LockedBalance.LessThan(quantity) {
-		return WalletBalanceUpdate{}, fmt.Errorf("seller has insufficient locked coin balance")
+		return WalletBalanceUpdate{}, NewConflictErrorf("seller has insufficient locked coin balance")
 	}
 
 	return walletBalanceUpdate(wallet, walletAvailableBalance(wallet), wallet.LockedBalance.Sub(quantity)), nil
@@ -133,10 +131,10 @@ func settleSellerCoin(wallet *model.Wallet, quantity decimal.Decimal) (WalletBal
 
 func creditAvailable(wallet *model.Wallet, amount decimal.Decimal) (WalletBalanceUpdate, error) {
 	if wallet == nil {
-		return WalletBalanceUpdate{}, fmt.Errorf("wallet is required")
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
 	}
 	if !amount.GreaterThan(decimal.Zero) {
-		return WalletBalanceUpdate{}, fmt.Errorf("credit amount must be greater than zero")
+		return WalletBalanceUpdate{}, NewValidationErrorf("credit amount must be greater than zero")
 	}
 
 	return walletBalanceUpdate(wallet, walletAvailableBalance(wallet).Add(amount), wallet.LockedBalance), nil
