@@ -19,7 +19,7 @@ func TestDatabaseDSNFromEnvBuildsDefaultDSN(t *testing.T) {
 	clearDatabaseEnv(t)
 
 	got := DatabaseDSNFromEnv()
-	want := "host=localhost user=postgres dbname=goexchange port=5432 sslmode=disable"
+	want := "host=localhost user=postgres dbname=goexchange port=5432 sslmode=disable connect_timeout=5"
 
 	if got != want {
 		t.Fatalf("DatabaseDSNFromEnv() = %q, want %q", got, want)
@@ -34,9 +34,10 @@ func TestDatabaseDSNFromEnvBuildsDSNFromIndividualEnv(t *testing.T) {
 	t.Setenv(EnvDBName, "exchange")
 	t.Setenv(EnvDBPort, "6543")
 	t.Setenv(EnvDBSSLMode, "require")
+	t.Setenv(EnvDBTimeout, "2")
 
 	got := DatabaseDSNFromEnv()
-	want := "host=postgres.internal user=goexchange password=env-password dbname=exchange port=6543 sslmode=require"
+	want := "host=postgres.internal user=goexchange password=env-password dbname=exchange port=6543 sslmode=require connect_timeout=2"
 
 	if got != want {
 		t.Fatalf("DatabaseDSNFromEnv() = %q, want %q", got, want)
@@ -50,8 +51,9 @@ func TestBuildDatabaseDSNOmitsEmptyPassword(t *testing.T) {
 		Name:    "goexchange",
 		Port:    "5432",
 		SSLMode: "disable",
+		Timeout: "5",
 	})
-	want := "host=localhost user=postgres dbname=goexchange port=5432 sslmode=disable"
+	want := "host=localhost user=postgres dbname=goexchange port=5432 sslmode=disable connect_timeout=5"
 
 	if got != want {
 		t.Fatalf("BuildDatabaseDSN() = %q, want %q", got, want)
@@ -69,6 +71,7 @@ func clearDatabaseEnv(t *testing.T) {
 		EnvDBName,
 		EnvDBPort,
 		EnvDBSSLMode,
+		EnvDBTimeout,
 	} {
 		t.Setenv(key, "")
 	}

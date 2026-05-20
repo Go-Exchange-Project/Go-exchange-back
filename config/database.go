@@ -19,6 +19,7 @@ const (
 	EnvDBName      = "GOEXCHANGE_DB_NAME"
 	EnvDBPort      = "GOEXCHANGE_DB_PORT"
 	EnvDBSSLMode   = "GOEXCHANGE_DB_SSLMODE"
+	EnvDBTimeout   = "GOEXCHANGE_DB_CONNECT_TIMEOUT"
 )
 
 type DatabaseDSNConfig struct {
@@ -28,6 +29,7 @@ type DatabaseDSNConfig struct {
 	Name     string
 	Port     string
 	SSLMode  string
+	Timeout  string
 }
 
 func ConnectDB() {
@@ -54,6 +56,7 @@ func DatabaseDSNFromEnv() string {
 		Name:     envOrDefault(EnvDBName, "goexchange"),
 		Port:     envOrDefault(EnvDBPort, "5432"),
 		SSLMode:  envOrDefault(EnvDBSSLMode, "disable"),
+		Timeout:  envOrDefault(EnvDBTimeout, "5"),
 	})
 }
 
@@ -72,6 +75,9 @@ func BuildDatabaseDSN(cfg DatabaseDSNConfig) string {
 		"port="+strings.TrimSpace(cfg.Port),
 		"sslmode="+strings.TrimSpace(cfg.SSLMode),
 	)
+	if timeout := strings.TrimSpace(cfg.Timeout); timeout != "" {
+		parts = append(parts, "connect_timeout="+timeout)
+	}
 
 	return strings.Join(parts, " ")
 }

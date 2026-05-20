@@ -15,7 +15,13 @@ type OrderService struct {
 	OrderRepository  *repository.OrderRepository
 	WalletRepository *repository.WalletRepository
 	MatchingEngine   *matching.MatchingEngine
+	TradeRepository  *repository.TradeRepository
 }
+
+const (
+	DefaultQueryLimit = 50
+	MaxQueryLimit     = 200
+)
 
 type CreateOrderInput struct {
 	UserID     uint
@@ -31,6 +37,19 @@ type CancelOrderInput struct {
 	OrderID uint
 }
 
+type ListOrdersInput struct {
+	UserID     uint
+	Status     string
+	CoinSymbol string
+	Limit      int
+}
+
+type ListTradesInput struct {
+	UserID     uint
+	CoinSymbol string
+	Limit      int
+}
+
 type CancelOrderResult struct {
 	OrderID        uint
 	Status         model.OrderStatus
@@ -40,11 +59,15 @@ type CancelOrderResult struct {
 }
 
 func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.WalletRepository, me *matching.MatchingEngine) *OrderService {
-	return &OrderService{
+	service := &OrderService{
 		OrderRepository:  repo,
 		WalletRepository: walletRepo,
 		MatchingEngine:   me,
 	}
+	if repo != nil && repo.DB != nil {
+		service.TradeRepository = repository.NewTradeRepository(repo.DB)
+	}
+	return service
 }
 
 func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error) {
@@ -148,12 +171,72 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 	return result, nil
 }
 
+func (s *OrderService) ListOrders(input ListOrdersInput) ([]model.Order, error) {
+	if input.UserID == 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.OrderRepository == nil {
+		return nil, fmt.Errorf("order repository is required")
+	}
+
+	var status *model.OrderStatus
+	if strings.TrimSpace(input.Status) != "" {
+		parsedStatus, err := parseOrderStatus(input.Status)
+		if err != nil {
+			return nil, err
+		}
+		status = &parsedStatus
+	}
+
+	return s.OrderRepository.ListByUserID(input.UserID, repository.OrderListFilter{
+		Status:     status,
+		CoinSymbol: normalizeCoinSymbol(input.CoinSymbol),
+		Limit:      normalizeQueryLimit(input.Limit),
+	})
+}
+
+func (s *OrderService) GetOrder(userID uint, orderID uint) (*model.Order, error) {
+	if userID == 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if orderID == 0 {
+		return nil, fmt.Errorf("order_id is required")
+	}
+	if s == nil || s.OrderRepository == nil {
+		return nil, fmt.Errorf("order repository is required")
+	}
+	return s.OrderRepository.FindByUserIDAndID(userID, orderID)
+}
+
+func (s *OrderService) ListWallets(userID uint) ([]model.Wallet, error) {
+	if userID == 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.WalletRepository == nil {
+		return nil, fmt.Errorf("wallet repository is required")
+	}
+	return s.WalletRepository.ListByUserID(userID)
+}
+
+func (s *OrderService) ListTrades(input ListTradesInput) ([]repository.UserTrade, error) {
+	if input.UserID == 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.TradeRepository == nil {
+		return nil, fmt.Errorf("trade repository is required")
+	}
+	return s.TradeRepository.ListByUserID(input.UserID, repository.TradeListFilter{
+		CoinSymbol: normalizeCoinSymbol(input.CoinSymbol),
+		Limit:      normalizeQueryLimit(input.Limit),
+	})
+}
+
 func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 	if input.UserID == 0 {
 		return nil, fmt.Errorf("user_id is required")
 	}
 
-	coinSymbol := strings.TrimSpace(strings.ToUpper(input.CoinSymbol))
+	coinSymbol := normalizeCoinSymbol(input.CoinSymbol)
 	if coinSymbol == "" {
 		return nil, fmt.Errorf("coin_symbol is required")
 	}
@@ -286,6 +369,35 @@ func parseOrderType(value string) (model.OrderType, error) {
 	default:
 		return "", fmt.Errorf("invalid order type")
 	}
+}
+
+func parseOrderStatus(value string) (model.OrderStatus, error) {
+	switch model.OrderStatus(strings.ToUpper(strings.TrimSpace(value))) {
+	case model.OrderStatusPending:
+		return model.OrderStatusPending, nil
+	case model.OrderStatusPartial:
+		return model.OrderStatusPartial, nil
+	case model.OrderStatusFilled:
+		return model.OrderStatusFilled, nil
+	case model.OrderStatusCancelled:
+		return model.OrderStatusCancelled, nil
+	default:
+		return "", fmt.Errorf("invalid order status")
+	}
+}
+
+func normalizeCoinSymbol(value string) string {
+	return strings.ToUpper(strings.TrimSpace(value))
+}
+
+func normalizeQueryLimit(limit int) int {
+	if limit <= 0 {
+		return DefaultQueryLimit
+	}
+	if limit > MaxQueryLimit {
+		return MaxQueryLimit
+	}
+	return limit
 }
 
 func parsePositiveDecimal(value string, field string) (decimal.Decimal, error) {

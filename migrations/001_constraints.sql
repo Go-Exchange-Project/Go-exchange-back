@@ -59,6 +59,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_failed_settlements_trade_idempotency_key
 CREATE INDEX IF NOT EXISTS idx_orders_open_bootstrap
     ON orders (status, created_at, id);
 
+CREATE INDEX IF NOT EXISTS idx_orders_user_status_created_at
+    ON orders (user_id, status, created_at DESC, id DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_non_empty
+    ON users (lower(email))
+    WHERE length(btrim(coalesce(email, ''))) > 0;
+
 CREATE INDEX IF NOT EXISTS idx_failed_settlements_open_triage
     ON failed_settlements (status, occurred_at, id);
 

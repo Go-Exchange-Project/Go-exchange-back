@@ -53,6 +53,48 @@ func TestIntegrationFindOpenOrdersForBootstrapFiltersAndOrders(t *testing.T) {
 	assert.Equal(t, []uint{partial.ID, sameTimeFirst.ID, sameTimeSecond.ID, pending.ID}, found)
 }
 
+func TestIntegrationListOrdersByUserIDScopesFiltersAndOrders(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(31)
+	otherUserID := repositoryTestUserID(32)
+	coinSymbol := "ORDER-LIST"
+	defer cleanupRepositoryUsers(t, db, userID, otherUserID)
+
+	base := time.Now().UTC().Add(-time.Hour)
+	older := bootstrapRepositoryOrder(userID, coinSymbol, model.OrderStatusPending, base, decimal.NewFromInt(5), decimal.Zero)
+	newer := bootstrapRepositoryOrder(userID, coinSymbol, model.OrderStatusFilled, base.Add(time.Minute), decimal.NewFromInt(5), decimal.NewFromInt(5))
+	otherCoin := bootstrapRepositoryOrder(userID, "OTHER-LIST", model.OrderStatusPending, base.Add(2*time.Minute), decimal.NewFromInt(5), decimal.Zero)
+	otherUser := bootstrapRepositoryOrder(otherUserID, coinSymbol, model.OrderStatusPending, base.Add(3*time.Minute), decimal.NewFromInt(5), decimal.Zero)
+	for _, order := range []*model.Order{&older, &newer, &otherCoin, &otherUser} {
+		require.NoError(t, db.Create(order).Error)
+	}
+
+	status := model.OrderStatusPending
+	got, err := NewOrderRepository(db).ListByUserID(userID, OrderListFilter{
+		Status:     &status,
+		CoinSymbol: coinSymbol,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, older.ID, got[0].ID)
+}
+
+func TestIntegrationFindOrderByUserIDAndIDDoesNotReturnOtherUsersOrder(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(33)
+	otherUserID := repositoryTestUserID(34)
+	defer cleanupRepositoryUsers(t, db, userID, otherUserID)
+
+	order := bootstrapRepositoryOrder(otherUserID, "ORDER-SCOPE", model.OrderStatusPending, time.Now().UTC(), decimal.NewFromInt(5), decimal.Zero)
+	require.NoError(t, db.Create(&order).Error)
+
+	_, err := NewOrderRepository(db).FindByUserIDAndID(userID, order.ID)
+
+	require.Error(t, err)
+}
+
 func bootstrapRepositoryOrder(userID uint, coinSymbol string, status model.OrderStatus, createdAt time.Time, amount decimal.Decimal, filled decimal.Decimal) model.Order {
 	return model.Order{
 		UserID:       userID,

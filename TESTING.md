@@ -11,6 +11,8 @@ If `GOEXCHANGE_TEST_DATABASE_DSN` is empty, the repository and service integrati
 
 Production and local runtime settings should be supplied through environment variables. Do not hard-code real database passwords in source code, tests, scripts, or committed docs.
 
+For local development, the backend also loads `.env.local` and then `.env` from the current working directory before connecting to the database. Existing process environment variables still take precedence over values in those files. Keep `.env.local` uncommitted; use `.env.example` as the committed template.
+
 Database configuration priority:
 
 1. `GOEXCHANGE_DATABASE_DSN` is used as-is when set. It may be a PostgreSQL keyword DSN or another format accepted by the GORM PostgreSQL driver.
@@ -24,6 +26,8 @@ Database configuration priority:
 | `GOEXCHANGE_DB_NAME` | `goexchange` | PostgreSQL database name. |
 | `GOEXCHANGE_DB_PORT` | `5432` | PostgreSQL port. |
 | `GOEXCHANGE_DB_SSLMODE` | `disable` | PostgreSQL SSL mode. Use `require` or stronger settings where appropriate outside local development. |
+| `GOEXCHANGE_DB_CONNECT_TIMEOUT` | `5` | PostgreSQL connection timeout in seconds. |
+| `GOEXCHANGE_CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated browser origins allowed to call the HTTP API. Add your LAN Vite URL, for example `http://192.168.219.100:3000`, when opening the frontend through a network address. |
 
 Local development example:
 
@@ -34,6 +38,11 @@ $env:GOEXCHANGE_DB_PASSWORD="<local-only-password>"
 $env:GOEXCHANGE_DB_NAME="goexchange"
 $env:GOEXCHANGE_DB_PORT="5432"
 $env:GOEXCHANGE_DB_SSLMODE="disable"
+$env:GOEXCHANGE_DB_CONNECT_TIMEOUT="5"
+$env:GOEXCHANGE_ENABLE_DEV_TOOLS="true"
+$env:GOEXCHANGE_ENABLE_UPBIT="false"
+$env:GOEXCHANGE_CORS_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+go run ./cmd
 ```
 
 ```bash
@@ -43,7 +52,51 @@ export GOEXCHANGE_DB_PASSWORD="<local-only-password>"
 export GOEXCHANGE_DB_NAME="goexchange"
 export GOEXCHANGE_DB_PORT="5432"
 export GOEXCHANGE_DB_SSLMODE="disable"
+export GOEXCHANGE_DB_CONNECT_TIMEOUT="5"
+export GOEXCHANGE_ENABLE_DEV_TOOLS="true"
+export GOEXCHANGE_ENABLE_UPBIT="false"
+export GOEXCHANGE_CORS_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+go run ./cmd
 ```
+
+Authentication configuration:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GOEXCHANGE_JWT_SECRET` | `dev-only-change-me` | HMAC secret used to sign access tokens. Set a strong secret outside local development. |
+
+Development-only tools:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GOEXCHANGE_ENABLE_DEV_TOOLS` | `false` | Enables authenticated development helper routes such as `POST /dev/wallets/fund`. Never enable this in production. |
+| `GOEXCHANGE_ENABLE_UPBIT` | `true` | Enables the Upbit WebSocket ticker feed. Set to `false` for local API/order testing when external network startup is slow or unavailable. |
+
+Auth endpoints:
+
+- `POST /auth/register` with `name`, `email`, and `password` creates a user and returns a bearer token.
+- `POST /auth/login` with `email` and `password` returns a bearer token.
+- `POST /orders` and `DELETE /orders/:id` require `Authorization: Bearer <token>` and use the authenticated user ID instead of a hard-coded user.
+- `GET /orders`, `GET /orders/:id`, `GET /wallets`, and `GET /trades` also require `Authorization: Bearer <token>` and only return data scoped to the authenticated user.
+
+When `GOEXCHANGE_ENABLE_DEV_TOOLS=true`, local development can fund the authenticated user's test wallet:
+
+```http
+POST /dev/wallets/fund
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"coin_symbol":"KRW","amount":"1000000"}
+```
+
+This endpoint creates or increments only the caller's wallet balance and exists only to make local end-to-end order testing possible without building an admin back office. It is disabled by default and is not an operational deposit or accounting path.
+
+Read API query parameters:
+
+- `GET /orders?status=PENDING&coin_symbol=BTC&limit=50`
+- `GET /trades?coin_symbol=BTC&limit=50`
+
+Decimal values in read responses are returned as JSON strings so clients do not lose precision by parsing them as floating point numbers.
 
 WebSocket origin configuration:
 

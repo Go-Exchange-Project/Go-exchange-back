@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/middleware"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
@@ -20,6 +22,9 @@ import (
 )
 
 func main() {
+	if err := config.LoadLocalEnvFiles(); err != nil {
+		log.Fatal("load local env failed: ", err)
+	}
 	config.ConnectDB()
 
 	config.DB.AutoMigrate(
@@ -38,9 +43,16 @@ func main() {
 
 	orderRepo := repository.NewOrderRepository(config.DB)
 	walletRepo := repository.NewWalletRepository(config.DB)
+	userRepo := repository.NewUserRepository(config.DB)
+	tokenManager, err := auth.NewTokenManagerFromEnv()
+	if err != nil {
+		log.Fatal("auth token manager failed: ", err)
+	}
+	authService := service.NewAuthService(userRepo, tokenManager)
 	orderService := service.NewOrderService(orderRepo, walletRepo, me)
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
+	authHandler := handler.NewAuthHandler(authService)
 	orderHandler := handler.NewOrderHandler(orderService)
 
 	go func() {
@@ -77,28 +89,34 @@ func main() {
 		bootstrapResult.StatusCounts[model.OrderStatusPartial],
 	)
 
-	upbitClient, err := upbit.NewUpbitClient()
-	if err != nil {
-		panic(err)
-	}
-	upbitClient.Subscribe([]string{
-		"KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL",
-		"KRW-DOGE", "KRW-ADA", "KRW-DOT", "KRW-AVAX",
-		"KRW-MATIC", "KRW-LINK", "KRW-ATOM", "KRW-UNI",
-		"KRW-SHIB", "KRW-TRX",
-	})
+	if config.UpbitEnabledFromEnv() {
+		upbitClient, err := upbit.NewUpbitClient()
+		if err != nil {
+			panic(err)
+		}
+		if err := upbitClient.Subscribe([]string{
+			"KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL",
+			"KRW-DOGE", "KRW-ADA", "KRW-DOT", "KRW-AVAX",
+			"KRW-MATIC", "KRW-LINK", "KRW-ATOM", "KRW-UNI",
+			"KRW-SHIB", "KRW-TRX",
+		}); err != nil {
+			panic(err)
+		}
 
-	go upbitClient.Listen(func(code string, price float64) {
-		msg := fmt.Sprintf(`{"type":"ticker","code":"%s","price":%f}`, code, price)
-		hub.Broadcast <- []byte(msg)
-	})
+		go upbitClient.Listen(func(code string, price float64) {
+			msg := fmt.Sprintf(`{"type":"ticker","code":"%s","price":%f}`, code, price)
+			hub.Broadcast <- []byte(msg)
+		})
+	} else {
+		log.Println("upbit feed disabled by GOEXCHANGE_ENABLE_UPBIT")
+	}
 
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins: []string{"http://localhost:3000"},
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE"},
-		AllowHeaders: []string{"Content-Type"},
+		AllowOrigins: config.CORSAllowedOriginsFromEnv(),
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders: []string{"Content-Type", "Authorization"},
 	}))
 
 	r.GET("/ping", func(c *gin.Context) {
@@ -111,8 +129,21 @@ func main() {
 		ws.ServeWs(hub, c)
 	})
 
-	r.POST("/orders", orderHandler.CreateOrder)
-	r.DELETE("/orders/:id", orderHandler.CancelOrder)
+	r.POST("/auth/register", authHandler.Register)
+	r.POST("/auth/login", authHandler.Login)
+
+	authenticated := r.Group("/")
+	authenticated.Use(middleware.AuthRequired(tokenManager))
+	authenticated.GET("/orders", orderHandler.ListOrders)
+	authenticated.GET("/orders/:id", orderHandler.GetOrder)
+	authenticated.POST("/orders", orderHandler.CreateOrder)
+	authenticated.DELETE("/orders/:id", orderHandler.CancelOrder)
+	authenticated.GET("/wallets", orderHandler.ListWallets)
+	authenticated.GET("/trades", orderHandler.ListTrades)
+	if config.DevToolsEnabledFromEnv() {
+		devHandler := handler.NewDevHandler(service.NewDevWalletService(config.DB))
+		authenticated.POST("/dev/wallets/fund", devHandler.FundWallet)
+	}
 
 	r.Run(":8080")
 }

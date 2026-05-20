@@ -114,6 +114,26 @@ func TestIntegrationUpdateBalancesScopesUserAndCoinSymbol(t *testing.T) {
 	assert.True(t, otherUserSameCoin.LockedBalance.Equal(decimal.Zero))
 }
 
+func TestIntegrationListWalletsByUserIDScopesAndOrders(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(8)
+	otherUserID := repositoryTestUserID(9)
+	defer cleanupRepositoryUsers(t, db, userID, otherUserID)
+
+	require.NoError(t, db.Create(&[]model.Wallet{
+		{UserID: userID, CoinSymbol: "ETH", Quantity: decimal.NewFromInt(2), AvailableBalance: decimal.NewFromInt(2)},
+		{UserID: userID, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(1), AvailableBalance: decimal.NewFromInt(1)},
+		{UserID: otherUserID, CoinSymbol: "ADA", Quantity: decimal.NewFromInt(3), AvailableBalance: decimal.NewFromInt(3)},
+	}).Error)
+
+	wallets, err := NewWalletRepository(db).ListByUserID(userID)
+	require.NoError(t, err)
+
+	require.Len(t, wallets, 2)
+	assert.Equal(t, "BTC", wallets[0].CoinSymbol)
+	assert.Equal(t, "ETH", wallets[1].CoinSymbol)
+}
+
 func TestIntegrationTradeIdempotencyKeyUniqueIndex(t *testing.T) {
 	db := openRepositoryIntegrationDB(t)
 	key := fmt.Sprintf("repo-trade-key-%d", time.Now().UnixNano())

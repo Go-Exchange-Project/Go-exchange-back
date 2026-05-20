@@ -35,6 +35,15 @@ func (r *WalletRepository) FindByUserIDAndCoinSymbol(userID uint, coinSymbol str
 	return &wallet, err
 }
 
+func (r *WalletRepository) ListByUserID(userID uint) ([]model.Wallet, error) {
+	var wallets []model.Wallet
+	err := r.DB.
+		Where("user_id = ?", userID).
+		Order("coin_symbol ASC").
+		Find(&wallets).Error
+	return wallets, err
+}
+
 func (r *WalletRepository) FindByUserIDAndCoinSymbolForUpdate(userID uint, coinSymbol string) (*model.Wallet, error) {
 	var wallet model.Wallet
 	err := r.walletByUserAndCoin(userID, coinSymbol).

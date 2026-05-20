@@ -13,6 +13,12 @@ type OrderRepository struct {
 	DB *gorm.DB
 }
 
+type OrderListFilter struct {
+	Status     *model.OrderStatus
+	CoinSymbol string
+	Limit      int
+}
+
 func NewOrderRepository(db *gorm.DB) *OrderRepository {
 	return &OrderRepository{DB: db}
 }
@@ -47,6 +53,29 @@ func (r *OrderRepository) FindByID(orderID uint) (*model.Order, error) {
 	var order model.Order
 	err := r.DB.First(&order, orderID).Error
 	return &order, err
+}
+
+func (r *OrderRepository) FindByUserIDAndID(userID uint, orderID uint) (*model.Order, error) {
+	var order model.Order
+	err := r.DB.Where("user_id = ? AND id = ?", userID, orderID).First(&order).Error
+	return &order, err
+}
+
+func (r *OrderRepository) ListByUserID(userID uint, filter OrderListFilter) ([]model.Order, error) {
+	var orders []model.Order
+	query := r.DB.Where("user_id = ?", userID)
+	if filter.Status != nil {
+		query = query.Where("status = ?", *filter.Status)
+	}
+	if filter.CoinSymbol != "" {
+		query = query.Where("coin_symbol = ?", filter.CoinSymbol)
+	}
+	err := query.
+		Order("created_at DESC").
+		Order("id DESC").
+		Limit(filter.Limit).
+		Find(&orders).Error
+	return orders, err
 }
 
 func (r *OrderRepository) FindByIDForUpdate(orderID uint) (*model.Order, error) {

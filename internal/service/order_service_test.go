@@ -123,6 +123,22 @@ func TestBuildOrderRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+func TestParseOrderStatus(t *testing.T) {
+	status, err := parseOrderStatus(" partial ")
+
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderStatusPartial, status)
+
+	_, err = parseOrderStatus("BROKEN")
+	require.Error(t, err)
+}
+
+func TestNormalizeQueryLimit(t *testing.T) {
+	assert.Equal(t, DefaultQueryLimit, normalizeQueryLimit(0))
+	assert.Equal(t, 25, normalizeQueryLimit(25))
+	assert.Equal(t, MaxQueryLimit, normalizeQueryLimit(MaxQueryLimit+1))
+}
+
 func TestRemainingOrderQuantityUsesAmountMinusFilledAmount(t *testing.T) {
 	order := &model.Order{
 		Amount:       decimal.RequireFromString("10.5"),
