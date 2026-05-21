@@ -125,11 +125,11 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 		if err != nil {
 			return err
 		}
-		buyerCoin, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(participants.BuyerUserID, trade.CoinSymbol)
+		buyerCoin, err := walletRepo.FindOrCreateByUserIDAndCoinSymbolForUpdate(participants.BuyerUserID, trade.CoinSymbol)
 		if err != nil {
 			return err
 		}
-		sellerKRW, err := walletRepo.FindKRWWalletByUserIDForUpdate(participants.SellerUserID)
+		sellerKRW, err := walletRepo.FindOrCreateKRWWalletByUserIDForUpdate(participants.SellerUserID)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -56,6 +57,25 @@ func (r *WalletRepository) FindKRWWalletByUserIDForUpdate(userID uint) (*model.W
 	return r.FindByUserIDAndCoinSymbolForUpdate(userID, model.KRWAssetSymbol)
 }
 
+func (r *WalletRepository) FindOrCreateByUserIDAndCoinSymbolForUpdate(userID uint, coinSymbol string) (*model.Wallet, error) {
+	wallet, err := r.FindByUserIDAndCoinSymbolForUpdate(userID, coinSymbol)
+	if err == nil {
+		return wallet, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	if err := r.createZeroBalanceWallet(userID, coinSymbol); err != nil {
+		return nil, err
+	}
+	return r.FindByUserIDAndCoinSymbolForUpdate(userID, coinSymbol)
+}
+
+func (r *WalletRepository) FindOrCreateKRWWalletByUserIDForUpdate(userID uint) (*model.Wallet, error) {
+	return r.FindOrCreateByUserIDAndCoinSymbolForUpdate(userID, model.KRWAssetSymbol)
+}
+
 func (r *WalletRepository) UpdateKRW(userID uint, krw decimal.Decimal) error {
 	return requireRowsAffected(r.updateKRWDB(userID, krw), "wallet KRW update")
 }
@@ -71,6 +91,26 @@ func (r *WalletRepository) UpdateBalances(userID uint, coinSymbol string, availa
 func (r *WalletRepository) walletByUserAndCoin(userID uint, coinSymbol string) *gorm.DB {
 	query, args := walletByUserAndCoinScope(userID, coinSymbol)
 	return r.DB.Where(query, args...)
+}
+
+func (r *WalletRepository) createZeroBalanceWallet(userID uint, coinSymbol string) error {
+	wallet := model.Wallet{
+		UserID:           userID,
+		CoinSymbol:       coinSymbol,
+		KRW:              decimal.Zero,
+		Quantity:         decimal.Zero,
+		AvailableBalance: decimal.Zero,
+		LockedBalance:    decimal.Zero,
+		AvgBuyPrice:      decimal.Zero,
+	}
+
+	return r.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "user_id"},
+			{Name: "coin_symbol"},
+		},
+		DoNothing: true,
+	}).Create(&wallet).Error
 }
 
 func (r *WalletRepository) updateKRWDB(userID uint, krw decimal.Decimal) *gorm.DB {

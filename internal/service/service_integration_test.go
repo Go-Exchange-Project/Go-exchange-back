@@ -354,6 +354,75 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.NewFromInt(450)))
 }
 
+func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	buyerID := serviceTestUserID(61)
+	sellerID := serviceTestUserID(62)
+	defer cleanupServiceUsers(t, db, buyerID, sellerID)
+
+	buyerKRW := model.Wallet{
+		UserID:           buyerID,
+		CoinSymbol:       model.KRWAssetSymbol,
+		KRW:              decimal.NewFromInt(100),
+		AvailableBalance: decimal.Zero,
+		LockedBalance:    decimal.NewFromInt(100),
+	}
+	sellerBTC := model.Wallet{
+		UserID:           sellerID,
+		CoinSymbol:       "BTC",
+		Quantity:         decimal.NewFromInt(1),
+		AvailableBalance: decimal.Zero,
+		LockedBalance:    decimal.NewFromInt(1),
+	}
+	require.NoError(t, db.Create(&[]model.Wallet{buyerKRW, sellerBTC}).Error)
+
+	buyOrder := model.Order{
+		UserID:       buyerID,
+		CoinSymbol:   "BTC",
+		Side:         model.OrderSideBuy,
+		OrderType:    model.OrderTypeLimit,
+		Price:        decimal.NewFromInt(100),
+		Amount:       decimal.NewFromInt(1),
+		Status:       model.OrderStatusPending,
+		FilledAmount: decimal.Zero,
+	}
+	sellOrder := model.Order{
+		UserID:       sellerID,
+		CoinSymbol:   "BTC",
+		Side:         model.OrderSideSell,
+		OrderType:    model.OrderTypeLimit,
+		Price:        decimal.NewFromInt(100),
+		Amount:       decimal.NewFromInt(1),
+		Status:       model.OrderStatusPending,
+		FilledAmount: decimal.Zero,
+	}
+	require.NoError(t, db.Create(&buyOrder).Error)
+	require.NoError(t, db.Create(&sellOrder).Error)
+
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+
+	_, err := settlementService.SettleTrade(&model.Trade{
+		CoinSymbol:  "BTC",
+		Price:       decimal.NewFromInt(100),
+		Quantity:    decimal.NewFromInt(1),
+		TradedAt:    time.Now(),
+		BuyOrderID:  buyOrder.ID,
+		SellOrderID: sellOrder.ID,
+	})
+
+	require.NoError(t, err)
+
+	walletRepo := repository.NewWalletRepository(db)
+	persistedBuyerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(buyerID, "BTC")
+	require.NoError(t, err)
+	persistedSellerKRW, err := walletRepo.FindKRWWalletByUserID(sellerID)
+	require.NoError(t, err)
+	assert.True(t, persistedBuyerBTC.AvailableBalance.Equal(decimal.NewFromInt(1)))
+	assert.True(t, persistedBuyerBTC.LockedBalance.Equal(decimal.Zero))
+	assert.True(t, persistedSellerKRW.AvailableBalance.Equal(decimal.NewFromInt(100)))
+	assert.True(t, persistedSellerKRW.LockedBalance.Equal(decimal.Zero))
+}
+
 func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	buyerID := serviceTestUserID(6)
