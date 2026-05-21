@@ -116,7 +116,7 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins: config.CORSAllowedOriginsFromEnv(),
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders: []string{"Content-Type", "Authorization"},
+		AllowHeaders: []string{"Content-Type", "Authorization", middleware.DevToolsTokenHeader},
 	}))
 
 	r.GET("/ping", func(c *gin.Context) {
@@ -142,7 +142,9 @@ func main() {
 	authenticated.GET("/trades", orderHandler.ListTrades)
 	if config.DevToolsEnabledFromEnv() {
 		devHandler := handler.NewDevHandler(service.NewDevWalletService(config.DB))
-		authenticated.POST("/dev/wallets/fund", devHandler.FundWallet)
+		dev := authenticated.Group("/dev")
+		dev.Use(middleware.DevToolsRequired(config.DevToolsTokenFromEnv()))
+		dev.POST("/wallets/fund", devHandler.FundWallet)
 	}
 
 	r.Run(":8080")

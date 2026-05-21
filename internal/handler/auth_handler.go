@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -58,7 +59,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		Password: req.Password,
 	})
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeInvalidCredentials, err.Error())
 		return
 	}
 

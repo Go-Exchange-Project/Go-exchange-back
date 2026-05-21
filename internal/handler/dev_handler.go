@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -23,7 +24,7 @@ func NewDevHandler(devWalletService *service.DevWalletService) *DevHandler {
 func (h *DevHandler) FundWallet(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 

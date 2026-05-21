@@ -7,6 +7,7 @@ import (
 
 const (
 	EnvGOExchangeEnableDevTools = "GOEXCHANGE_ENABLE_DEV_TOOLS"
+	EnvGOExchangeDevToolsToken  = "GOEXCHANGE_DEV_TOOLS_TOKEN"
 	EnvGOExchangeEnableUpbit    = "GOEXCHANGE_ENABLE_UPBIT"
 	EnvGOExchangeCORSOrigins    = "GOEXCHANGE_CORS_ALLOWED_ORIGINS"
 )
@@ -18,6 +19,10 @@ var defaultCORSAllowedOrigins = []string{
 
 func DevToolsEnabledFromEnv() bool {
 	return parseBoolEnv(os.Getenv(EnvGOExchangeEnableDevTools))
+}
+
+func DevToolsTokenFromEnv() string {
+	return strings.TrimSpace(os.Getenv(EnvGOExchangeDevToolsToken))
 }
 
 func UpbitEnabledFromEnv() bool {

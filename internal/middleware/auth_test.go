@@ -54,4 +54,29 @@ func TestAuthRequiredRejectsMissingBearerToken(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"AUTH_REQUIRED"`)
+}
+
+func TestAuthRequiredRejectsExpiredBearerTokenWithCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokenManager, err := auth.NewTokenManager("test-secret", time.Nanosecond)
+	require.NoError(t, err)
+	token, err := tokenManager.Generate(7)
+	require.NoError(t, err)
+	time.Sleep(time.Millisecond)
+
+	router := gin.New()
+	router.Use(AuthRequired(tokenManager))
+	router.GET("/protected", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"AUTH_EXPIRED_TOKEN"`)
 }

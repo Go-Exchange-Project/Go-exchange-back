@@ -40,6 +40,7 @@ $env:GOEXCHANGE_DB_PORT="5432"
 $env:GOEXCHANGE_DB_SSLMODE="disable"
 $env:GOEXCHANGE_DB_CONNECT_TIMEOUT="5"
 $env:GOEXCHANGE_ENABLE_DEV_TOOLS="true"
+$env:GOEXCHANGE_DEV_TOOLS_TOKEN="<local-dev-tools-token>"
 $env:GOEXCHANGE_ENABLE_UPBIT="false"
 $env:GOEXCHANGE_CORS_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
 go run ./cmd
@@ -54,6 +55,7 @@ export GOEXCHANGE_DB_PORT="5432"
 export GOEXCHANGE_DB_SSLMODE="disable"
 export GOEXCHANGE_DB_CONNECT_TIMEOUT="5"
 export GOEXCHANGE_ENABLE_DEV_TOOLS="true"
+export GOEXCHANGE_DEV_TOOLS_TOKEN="<local-dev-tools-token>"
 export GOEXCHANGE_ENABLE_UPBIT="false"
 export GOEXCHANGE_CORS_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
 go run ./cmd
@@ -70,6 +72,7 @@ Development-only tools:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `GOEXCHANGE_ENABLE_DEV_TOOLS` | `false` | Enables authenticated development helper routes such as `POST /dev/wallets/fund`. Never enable this in production. |
+| `GOEXCHANGE_DEV_TOOLS_TOKEN` | empty | Required header token for enabled development helper routes. Requests must send `X-GoExchange-Dev-Token: <token>`. |
 | `GOEXCHANGE_ENABLE_UPBIT` | `true` | Enables the Upbit WebSocket ticker feed. Set to `false` for local API/order testing when external network startup is slow or unavailable. |
 
 Auth endpoints:
@@ -84,12 +87,19 @@ When `GOEXCHANGE_ENABLE_DEV_TOOLS=true`, local development can fund the authenti
 ```http
 POST /dev/wallets/fund
 Authorization: Bearer <token>
+X-GoExchange-Dev-Token: <local-dev-tools-token>
 Content-Type: application/json
 
 {"coin_symbol":"KRW","amount":"1000000"}
 ```
 
-This endpoint creates or increments only the caller's wallet balance and exists only to make local end-to-end order testing possible without building an admin back office. It is disabled by default and is not an operational deposit or accounting path.
+This endpoint creates or increments only the caller's wallet balance and exists only to make local end-to-end order testing possible without building an admin back office. It is disabled by default, requires a separate development token when enabled, and is not an operational deposit or accounting path.
+
+Error responses use a structured shape:
+
+```json
+{"error":{"code":"VALIDATION_ERROR","message":"invalid price"}}
+```
 
 Read API query parameters:
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
@@ -35,7 +36,7 @@ func NewOrderHandler(service *service.OrderService) *OrderHandler {
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 
@@ -67,7 +68,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 func (h *OrderHandler) ListOrders(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 
@@ -92,13 +93,13 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 func (h *OrderHandler) GetOrder(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 
 	orderID, err := parseIDParam(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
+		httpapi.WriteError(c, http.StatusBadRequest, httpapi.CodeBadRequest, "invalid order id")
 		return
 	}
 
@@ -113,7 +114,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 func (h *OrderHandler) ListWallets(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 
@@ -133,7 +134,7 @@ func (h *OrderHandler) ListWallets(c *gin.Context) {
 func (h *OrderHandler) ListTrades(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 
@@ -157,13 +158,13 @@ func (h *OrderHandler) ListTrades(c *gin.Context) {
 func (h *OrderHandler) CancelOrder(c *gin.Context) {
 	userID, ok := authenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authenticated user is required"})
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
 		return
 	}
 
 	orderID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || orderID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
+		httpapi.WriteError(c, http.StatusBadRequest, httpapi.CodeBadRequest, "invalid order id")
 		return
 	}
 
@@ -178,7 +179,7 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		} else {
 			status = serviceErrorStatus(err)
 		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		httpapi.WriteError(c, status, errorCodeForStatus(status), err.Error())
 		return
 	}
 
@@ -295,11 +296,11 @@ func writeServiceError(c *gin.Context, err error) {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		message = "not found"
 	}
-	c.JSON(status, gin.H{"error": message})
+	httpapi.WriteError(c, status, errorCodeForStatus(status), message)
 }
 
 func writeBindingError(c *gin.Context, err error) {
-	c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+	httpapi.WriteError(c, http.StatusUnprocessableEntity, httpapi.CodeValidation, err.Error())
 }
 
 func serviceErrorStatus(err error) int {
@@ -335,6 +336,10 @@ func serviceErrorStatus(err error) int {
 	default:
 		return http.StatusBadRequest
 	}
+}
+
+func errorCodeForStatus(status int) string {
+	return httpapi.CodeForStatus(status)
 }
 
 func authenticatedUserID(c *gin.Context) (uint, bool) {
