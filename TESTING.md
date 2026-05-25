@@ -274,7 +274,7 @@ go test -run Integration -v ./internal/repository ./internal/service
 go test -run Integration -v ./internal/repository ./internal/service
 ```
 
-The integration test setup runs `AutoMigrate` first, then applies `migrations/001_constraints.sql` so the tests exercise the explicit DB constraints as well as the model structs.
+The integration test setup runs `AutoMigrate` first, then runs the goose migration runner so the tests exercise the explicit DB constraints as well as the model structs.
 
 Run all backend tests:
 
@@ -313,24 +313,44 @@ host=localhost user=goexchange_test password=goexchange_test_password dbname=goe
 
 Because the integration job always sets `GOEXCHANGE_TEST_DATABASE_DSN`, repository and service integration tests connect to Postgres instead of taking the skip path.
 
-## Constraint Migration
+## Goose Migration Runner
 
-`AutoMigrate` is still kept for development convenience. The SQL file in `migrations/001_constraints.sql` is the first explicit schema contract for constraints and indexes. Keep applying it after `AutoMigrate` until a migration runner is introduced.
+`AutoMigrate` is still kept for development convenience, but explicit constraints and indexes now run through the goose migration runner in `internal/dbmigration`.
 
-Apply the constraint SQL manually with `psql`:
+Current startup/test flow:
+
+1. GORM `AutoMigrate` creates or updates the base tables from the current model structs.
+2. `dbmigration.Up(db)` runs goose migrations from `migrations/`.
+3. Goose records applied versions in its DB version table so the same migration is not re-applied as a raw script every startup.
+
+The first migration, `migrations/001_constraints.sql`, is a baseline migration for the constraints and indexes accumulated so far. It is intentionally idempotent because existing local databases may already have some of these constraints from earlier manual runs.
+
+Apply migrations manually through Go instead of feeding the SQL file directly to `psql`:
 
 ```powershell
-psql "$env:GOEXCHANGE_TEST_DATABASE_DSN" -f migrations/001_constraints.sql
+go run ./cmd
 ```
 
 ```bash
-psql "$GOEXCHANGE_TEST_DATABASE_DSN" -f migrations/001_constraints.sql
+go run ./cmd
 ```
 
-The migration is safe to run repeatedly, but existing data must already satisfy the constraints. It will fail if, for example, there are duplicate `wallets(user_id, coin_symbol)` rows, NULL or blank `trades.idempotency_key` values, negative balances, non-positive trade price/quantity values, or non-positive order amounts.
+For integration tests, set `GOEXCHANGE_TEST_DATABASE_DSN` and run:
+
+```powershell
+go test -run Integration -v ./internal/repository ./internal/service
+```
+
+```bash
+go test -run Integration -v ./internal/repository ./internal/service
+```
+
+The baseline migration is safe to run repeatedly through goose, but existing data must already satisfy the constraints. It will fail if, for example, there are duplicate `wallets(user_id, coin_symbol)` rows, NULL or blank `trades.idempotency_key` values, negative balances, non-positive trade price/quantity values, or non-positive order amounts.
+
+The `Down` section of the baseline migration is intentionally a no-op. Rolling it back safely would require deciding which existing columns and constraints came from earlier AutoMigrate/manual runs. Future migrations should provide concrete `Down` statements when they can be reversed without data loss.
 
 ## Integration Test Behavior
 
-The integration tests call `AutoMigrate` for the current model structs before running, then apply `migrations/001_constraints.sql`. They do not introduce a full migration framework.
+The integration tests call `AutoMigrate` for the current model structs before running, then apply goose migrations through `internal/dbmigration`. This is still a transitional setup; a later phase can remove `AutoMigrate` once the full schema is represented by versioned migrations.
 
 Each integration test uses generated user IDs and removes rows for those user IDs from `trades`, `orders`, `wallets`, and `users` during cleanup. The tests are intended to be run without `t.Parallel`; avoid forcing package-level parallelism against the same test database until the cleanup strategy is expanded.

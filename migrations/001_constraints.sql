@@ -1,3 +1,4 @@
+-- +goose Up
 -- Phase 2F: minimal DB constraints for wallet, order, and trade invariants.
 -- Apply after AutoMigrate has created the base tables.
 --
@@ -103,6 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_ledger_entries_type_reference
 CREATE INDEX IF NOT EXISTS idx_ledger_entries_reference_key
     ON ledger_entries (reference_key);
 
+-- +goose StatementBegin
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -331,3 +333,11 @@ BEGIN
             ADD CONSTRAINT ck_ledger_entries_locked_after_non_negative CHECK (locked_balance_after >= 0);
     END IF;
 END $$;
+-- +goose StatementEnd
+
+-- +goose Down
+-- This baseline migration is intentionally not reversible. It is written to be
+-- idempotent for existing development databases, and rollback would risk
+-- dropping data-bearing constraints/columns that earlier AutoMigrate already
+-- created. Future migrations should provide concrete Down statements when safe.
+SELECT 1;

@@ -2,10 +2,9 @@ package testdb
 
 import (
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -30,26 +29,8 @@ func OpenIntegrationDB(t testing.TB) *gorm.DB {
 	})
 
 	fatalIfErr(t, db.AutoMigrate(&model.User{}, &model.Order{}, &model.Wallet{}, &model.Trade{}, &model.FailedSettlement{}, &model.LedgerEntry{}))
-	ApplyConstraints(t, db)
+	fatalIfErr(t, dbmigration.Up(db))
 	return db
-}
-
-func ApplyConstraints(t testing.TB, db *gorm.DB) {
-	t.Helper()
-
-	sqlBytes, err := os.ReadFile(constraintsMigrationPath(t))
-	fatalIfErr(t, err)
-	fatalIfErr(t, db.Exec(string(sqlBytes)).Error)
-}
-
-func constraintsMigrationPath(t testing.TB) string {
-	t.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("failed to locate integration test helper")
-	}
-	return filepath.Join(filepath.Dir(file), "..", "..", "migrations", "001_constraints.sql")
 }
 
 func fatalIfErr(t testing.TB, err error) {

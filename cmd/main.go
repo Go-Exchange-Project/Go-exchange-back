@@ -9,6 +9,7 @@ import (
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/middleware"
@@ -27,14 +28,19 @@ func main() {
 	}
 	config.ConnectDB()
 
-	config.DB.AutoMigrate(
+	if err := config.DB.AutoMigrate(
 		&model.User{},
 		&model.Order{},
 		&model.Wallet{},
 		&model.Trade{},
 		&model.FailedSettlement{},
 		&model.LedgerEntry{},
-	)
+	); err != nil {
+		log.Fatal("auto migrate failed: ", err)
+	}
+	if err := dbmigration.Up(config.DB); err != nil {
+		log.Fatal("db migration failed: ", err)
+	}
 
 	me := matching.NewMatchingEngine()
 	me.Start()
