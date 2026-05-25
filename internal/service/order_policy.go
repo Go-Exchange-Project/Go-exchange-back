@@ -1,6 +1,21 @@
 package service
 
-import "github.com/shopspring/decimal"
+import (
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/shopspring/decimal"
+)
+
+type MarketRules struct {
+	CoinSymbol       string
+	QuoteSymbol      string
+	MinOrderNotional decimal.Decimal
+	TickRules        []MarketTickRule
+}
+
+type MarketTickRule struct {
+	UpperBound *decimal.Decimal
+	TickSize   decimal.Decimal
+}
 
 var minKRWOrderNotional = decimal.NewFromInt(5000)
 
@@ -48,4 +63,31 @@ func krwTickSize(price decimal.Decimal) decimal.Decimal {
 		}
 	}
 	return maxKRWTickSize
+}
+
+func KRWMarketRules(coinSymbol string) (MarketRules, error) {
+	normalizedSymbol := normalizeCoinSymbol(coinSymbol)
+	if normalizedSymbol == "" {
+		return MarketRules{}, NewValidationErrorf("coin_symbol is required")
+	}
+
+	tickRules := make([]MarketTickRule, 0, len(krwTickRules)+1)
+	for _, rule := range krwTickRules {
+		upperBound := rule.upperBound
+		tickRules = append(tickRules, MarketTickRule{
+			UpperBound: &upperBound,
+			TickSize:   rule.tickSize,
+		})
+	}
+	tickRules = append(tickRules, MarketTickRule{
+		UpperBound: nil,
+		TickSize:   maxKRWTickSize,
+	})
+
+	return MarketRules{
+		CoinSymbol:       normalizedSymbol,
+		QuoteSymbol:      model.KRWAssetSymbol,
+		MinOrderNotional: minKRWOrderNotional,
+		TickRules:        tickRules,
+	}, nil
 }

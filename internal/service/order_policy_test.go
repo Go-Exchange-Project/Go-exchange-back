@@ -33,6 +33,29 @@ func TestKRWTickSizeUsesPriceBands(t *testing.T) {
 	}
 }
 
+func TestKRWMarketRulesReturnsSerializablePolicy(t *testing.T) {
+	rules, err := KRWMarketRules(" btc ")
+
+	require.NoError(t, err)
+	assert.Equal(t, "BTC", rules.CoinSymbol)
+	assert.Equal(t, "KRW", rules.QuoteSymbol)
+	assert.True(t, rules.MinOrderNotional.Equal(decimal.NewFromInt(5000)))
+	require.Len(t, rules.TickRules, len(krwTickRules)+1)
+	require.NotNil(t, rules.TickRules[0].UpperBound)
+	assert.True(t, rules.TickRules[0].UpperBound.Equal(decimal.NewFromInt(1)))
+	assert.True(t, rules.TickRules[0].TickSize.Equal(decimal.RequireFromString("0.00001")))
+	assert.Nil(t, rules.TickRules[len(rules.TickRules)-1].UpperBound)
+	assert.True(t, rules.TickRules[len(rules.TickRules)-1].TickSize.Equal(decimal.NewFromInt(1000)))
+}
+
+func TestKRWMarketRulesRejectsMissingCoinSymbol(t *testing.T) {
+	rules, err := KRWMarketRules(" ")
+
+	require.Error(t, err)
+	assert.Empty(t, rules.CoinSymbol)
+	assert.Contains(t, err.Error(), "coin_symbol is required")
+}
+
 func TestValidateLimitOrderPolicyAcceptsValidTickAndNotional(t *testing.T) {
 	err := validateLimitOrderPolicy(
 		decimal.RequireFromString("50000"),
