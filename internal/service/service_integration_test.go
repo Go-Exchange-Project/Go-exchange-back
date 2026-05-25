@@ -65,8 +65,8 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 	require.NoError(t, db.Create(&model.Wallet{
 		UserID:           userID,
 		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(1000),
-		AvailableBalance: decimal.NewFromInt(1000),
+		KRW:              decimal.NewFromInt(10000),
+		AvailableBalance: decimal.NewFromInt(10000),
 		LockedBalance:    decimal.Zero,
 	}).Error)
 
@@ -77,8 +77,8 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
-		Price:      "100",
-		Amount:     "2",
+		Price:      "5000",
+		Amount:     "1",
 	})
 
 	require.NoError(t, err)
@@ -91,12 +91,12 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 	walletRepo := repository.NewWalletRepository(db)
 	krwWallet, err := walletRepo.FindKRWWalletByUserID(userID)
 	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(800)))
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.NewFromInt(200)))
-	assert.True(t, krwWallet.KRW.Equal(decimal.NewFromInt(1000)))
+	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(5000)))
+	assert.True(t, krwWallet.LockedBalance.Equal(decimal.NewFromInt(5000)))
+	assert.True(t, krwWallet.KRW.Equal(decimal.NewFromInt(10000)))
 	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID)
 	require.Len(t, entries, 1)
-	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "-200", "200", "800", "200")
+	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "-5000", "5000", "5000", "5000")
 
 	select {
 	case engineOrder := <-me.OrderCh:
@@ -127,7 +127,7 @@ func TestIntegrationCreateBuyOrderHoldFailureRollsBackAndDoesNotSubmit(t *testin
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
-		Price:      "100",
+		Price:      "5000",
 		Amount:     "1",
 	})
 
@@ -173,7 +173,7 @@ func TestIntegrationCreateSellOrderHoldsCoin(t *testing.T) {
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "SELL",
-		Price:      "100",
+		Price:      "5000",
 		Amount:     "2",
 	})
 
@@ -199,8 +199,8 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 	require.NoError(t, db.Create(&model.Wallet{
 		UserID:           userID,
 		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(1000),
-		AvailableBalance: decimal.NewFromInt(1000),
+		KRW:              decimal.NewFromInt(10000),
+		AvailableBalance: decimal.NewFromInt(10000),
 		LockedBalance:    decimal.Zero,
 	}).Error)
 	require.NoError(t, db.Create(&model.Order{
@@ -209,7 +209,7 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 		Side:         model.OrderSideSell,
 		OrderType:    model.OrderTypeLimit,
 		Status:       model.OrderStatusPending,
-		Price:        decimal.NewFromInt(100),
+		Price:        decimal.NewFromInt(5000),
 		Amount:       decimal.NewFromInt(2),
 		FilledAmount: decimal.Zero,
 	}).Error)
@@ -221,7 +221,7 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
-		Price:      "100",
+		Price:      "5000",
 		Amount:     "1",
 	})
 
@@ -230,8 +230,8 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 
 	wallet, err := repository.NewWalletRepository(db).FindKRWWalletByUserID(userID)
 	require.NoError(t, err)
-	assert.True(t, wallet.AvailableBalance.Equal(decimal.NewFromInt(900)))
-	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(100)))
+	assert.True(t, wallet.AvailableBalance.Equal(decimal.NewFromInt(5000)))
+	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(5000)))
 
 	var buyOrderCount int64
 	require.NoError(t, db.Model(&model.Order{}).

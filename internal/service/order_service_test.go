@@ -14,7 +14,7 @@ func TestBuildOrderSetsUserIDAndDefaultOrderType(t *testing.T) {
 		UserID:     7,
 		CoinSymbol: "btc",
 		Side:       "buy",
-		Price:      "50000.25",
+		Price:      "50000",
 		Amount:     "0.125",
 	})
 
@@ -33,13 +33,13 @@ func TestBuildOrderParsesDecimalStringsExactly(t *testing.T) {
 		CoinSymbol: "ETH",
 		Side:       "SELL",
 		OrderType:  "LIMIT",
-		Price:      "12345.67890123",
-		Amount:     "0.00000001",
+		Price:      "99.9",
+		Amount:     "60.00000001",
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, decimal.RequireFromString("12345.67890123"), order.Price)
-	assert.Equal(t, decimal.RequireFromString("0.00000001"), order.Amount)
+	assert.Equal(t, decimal.RequireFromString("99.9"), order.Price)
+	assert.Equal(t, decimal.RequireFromString("60.00000001"), order.Amount)
 }
 
 func TestBuildOrderRejectsInvalidInputs(t *testing.T) {

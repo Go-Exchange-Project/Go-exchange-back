@@ -265,6 +265,9 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateLimitOrderPolicy(price, amount); err != nil {
+		return nil, err
+	}
 
 	return &model.Order{
 		UserID:       input.UserID,
