@@ -42,6 +42,7 @@ func cleanupRepositoryUsers(t *testing.T, db *gorm.DB, userIDs ...uint) {
 		require.NoError(t, db.Where("buy_order_id IN ? OR sell_order_id IN ?", orderIDs, orderIDs).Delete(&model.Trade{}).Error)
 	}
 
+	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.LedgerEntry{}).Error)
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Order{}).Error)
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Wallet{}).Error)
 	require.NoError(t, db.Where("id IN ?", userIDs).Delete(&model.User{}).Error)

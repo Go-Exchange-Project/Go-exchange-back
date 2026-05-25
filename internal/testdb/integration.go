@@ -29,7 +29,7 @@ func OpenIntegrationDB(t testing.TB) *gorm.DB {
 		fatalIfErr(t, sqlDB.Close())
 	})
 
-	fatalIfErr(t, db.AutoMigrate(&model.User{}, &model.Order{}, &model.Wallet{}, &model.Trade{}, &model.FailedSettlement{}))
+	fatalIfErr(t, db.AutoMigrate(&model.User{}, &model.Order{}, &model.Wallet{}, &model.Trade{}, &model.FailedSettlement{}, &model.LedgerEntry{}))
 	ApplyConstraints(t, db)
 	return db
 }

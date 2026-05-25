@@ -38,6 +38,11 @@ func TestIntegrationDevFundWalletCreatesAndIncrementsKRW(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&model.Wallet{}).Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).Count(&count).Error)
 	assert.Equal(t, int64(1), count)
+
+	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeDevFund, model.LedgerReferenceTypeDevFund, 0)
+	require.Len(t, entries, 2)
+	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "25.5", "0", "1025.5", "0")
+	assertLedgerDelta(t, entries[1], model.KRWAssetSymbol, "1000", "0", "1000", "0")
 }
 
 func TestIntegrationDevFundWalletCreatesCoinWallet(t *testing.T) {
@@ -59,4 +64,7 @@ func TestIntegrationDevFundWalletCreatesCoinWallet(t *testing.T) {
 	assert.True(t, wallet.LockedBalance.Equal(decimal.Zero))
 	assert.True(t, wallet.Quantity.Equal(decimal.RequireFromString("0.25")))
 	assert.True(t, wallet.KRW.Equal(decimal.Zero))
+	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeDevFund, model.LedgerReferenceTypeDevFund, 0)
+	require.Len(t, entries, 1)
+	assertLedgerDelta(t, entries[0], "BTC", "0.25", "0", "0.25", "0")
 }

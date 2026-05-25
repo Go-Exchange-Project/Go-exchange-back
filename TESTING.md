@@ -95,6 +95,8 @@ Content-Type: application/json
 
 This endpoint creates or increments only the caller's wallet balance and exists only to make local end-to-end order testing possible without building an admin back office. It is disabled by default, requires a separate development token when enabled, and is not an operational deposit or accounting path.
 
+Development wallet funding also writes a `DEV_FUND` ledger entry so local balance changes remain auditable during tests.
+
 Error responses use a structured shape:
 
 ```json
@@ -107,6 +109,33 @@ Read API query parameters:
 - `GET /trades?coin_symbol=BTC&limit=50`
 
 Decimal values in read responses are returned as JSON strings so clients do not lose precision by parsing them as floating point numbers.
+
+## Wallet Ledger Entries
+
+`ledger_entries` records wallet balance changes in the same database transaction that changes the wallet. It is a wallet event ledger, not a full double-entry accounting system yet.
+
+Each row records:
+
+- `user_id` and `coin_symbol`.
+- `entry_type`: `DEV_FUND`, `ORDER_HOLD`, `ORDER_RELEASE`, or `TRADE_SETTLEMENT`.
+- `available_delta` and `locked_delta`.
+- `available_balance_after` and `locked_balance_after`.
+- `reference_type`, `reference_id`, and optional `reference_key`.
+
+Current write points:
+
+- `POST /dev/wallets/fund`: credits available balance and writes `DEV_FUND`.
+- `POST /orders`: moves available to locked and writes `ORDER_HOLD`.
+- `DELETE /orders/:id`: releases remaining locked balance and writes `ORDER_RELEASE`.
+- successful settlement: writes four `TRADE_SETTLEMENT` rows, one for buyer KRW, buyer coin, seller coin, and seller KRW.
+
+Settlement duplicates do not write extra ledger rows because `SettleTrade` returns before wallet mutation when it sees an existing idempotent trade. Failed settlements also do not write ledger rows because the wallet transaction rolls back.
+
+Known limits:
+
+- There is no public ledger API yet.
+- Fees are not modeled.
+- The ledger is per wallet balance change; a later accounting phase should introduce exchange-level double-entry accounts and stronger reconciliation reports.
 
 WebSocket origin configuration:
 

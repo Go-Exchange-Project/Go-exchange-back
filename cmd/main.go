@@ -33,6 +33,7 @@ func main() {
 		&model.Wallet{},
 		&model.Trade{},
 		&model.FailedSettlement{},
+		&model.LedgerEntry{},
 	)
 
 	me := matching.NewMatchingEngine()

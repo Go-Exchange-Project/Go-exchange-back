@@ -45,6 +45,7 @@ func cleanupServiceUsers(t *testing.T, db *gorm.DB, userIDs ...uint) {
 		require.NoError(t, db.Where("buy_order_id IN ? OR sell_order_id IN ?", orderIDs, orderIDs).Delete(&model.Trade{}).Error)
 	}
 
+	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.LedgerEntry{}).Error)
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Order{}).Error)
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Wallet{}).Error)
 	require.NoError(t, db.Where("id IN ?", userIDs).Delete(&model.User{}).Error)
@@ -93,6 +94,9 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(800)))
 	assert.True(t, krwWallet.LockedBalance.Equal(decimal.NewFromInt(200)))
 	assert.True(t, krwWallet.KRW.Equal(decimal.NewFromInt(1000)))
+	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID)
+	require.Len(t, entries, 1)
+	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "-200", "200", "800", "200")
 
 	select {
 	case engineOrder := <-me.OrderCh:
@@ -140,6 +144,7 @@ func TestIntegrationCreateBuyOrderHoldFailureRollsBackAndDoesNotSubmit(t *testin
 	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(50)))
 	assert.True(t, krwWallet.LockedBalance.Equal(decimal.Zero))
 	assert.True(t, krwWallet.KRW.Equal(decimal.NewFromInt(50)))
+	assertLedgerCount(t, db, userID, 0)
 
 	select {
 	case engineOrder := <-me.OrderCh:
@@ -181,6 +186,9 @@ func TestIntegrationCreateSellOrderHoldsCoin(t *testing.T) {
 	assert.True(t, btcWallet.AvailableBalance.Equal(decimal.NewFromInt(3)))
 	assert.True(t, btcWallet.LockedBalance.Equal(decimal.NewFromInt(2)))
 	assert.True(t, btcWallet.Quantity.Equal(decimal.NewFromInt(5)))
+	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID)
+	require.Len(t, entries, 1)
+	assertLedgerDelta(t, entries[0], "BTC", "-2", "2", "3", "2")
 }
 
 func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testing.T) {
@@ -352,6 +360,7 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.Zero))
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.NewFromInt(450)))
+	assertSettlementLedgerEntries(t, db, result.TradeID, trade.IdempotencyKey, buyerID, sellerID)
 }
 
 func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
@@ -464,6 +473,8 @@ func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.NewFromInt(500)))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(1)))
+	assertLedgerCount(t, db, buyerID, 0)
+	assertLedgerCount(t, db, sellerID, 0)
 }
 
 func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
@@ -529,6 +540,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(5)))
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.NewFromInt(450)))
+	assertSettlementLedgerEntries(t, db, firstResult.TradeID, trade.IdempotencyKey, buyerID, sellerID)
 }
 
 func TestIntegrationSettleTradeSameIdempotencyKeyDifferentPayloadReturnsConflict(t *testing.T) {
@@ -764,6 +776,9 @@ func TestIntegrationCancelPendingBuyOrderReleasesKRWAndRemovesFromEngine(t *test
 	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
 
 	assertCancelledOrderAndWallet(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.NewFromInt(500), decimal.Zero)
+	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID)
+	require.Len(t, entries, 1)
+	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "500", "-500", "500", "0")
 }
 
 func TestIntegrationCancelPartialBuyOrderReleasesRemainingKRW(t *testing.T) {
@@ -824,6 +839,9 @@ func TestIntegrationCancelPendingSellOrderReleasesCoin(t *testing.T) {
 	requireIntegrationSnapshot(t, me)
 	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
 	assertCancelledOrderAndWallet(t, db, order.ID, userID, "BTC", decimal.NewFromInt(5), decimal.Zero)
+	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID)
+	require.Len(t, entries, 1)
+	assertLedgerDelta(t, entries[0], "BTC", "5", "-5", "5", "0")
 }
 
 func TestIntegrationCancelFilledOrderIsRejected(t *testing.T) {
@@ -1115,4 +1133,58 @@ func assertCancelledOrderAndWallet(t *testing.T, db *gorm.DB, orderID uint, user
 	require.NoError(t, err)
 	assert.True(t, wallet.AvailableBalance.Equal(available))
 	assert.True(t, wallet.LockedBalance.Equal(locked))
+}
+
+func requireLedgerEntries(t *testing.T, db *gorm.DB, userID uint, entryType model.LedgerEntryType, referenceType model.LedgerReferenceType, referenceID uint) []model.LedgerEntry {
+	t.Helper()
+
+	var entries []model.LedgerEntry
+	require.NoError(t, db.
+		Where("user_id = ? AND entry_type = ? AND reference_type = ? AND reference_id = ?", userID, entryType, referenceType, referenceID).
+		Order("created_at DESC").
+		Order("id DESC").
+		Find(&entries).Error)
+	return entries
+}
+
+func assertLedgerCount(t *testing.T, db *gorm.DB, userID uint, expected int64) {
+	t.Helper()
+
+	var count int64
+	require.NoError(t, db.Model(&model.LedgerEntry{}).Where("user_id = ?", userID).Count(&count).Error)
+	assert.Equal(t, expected, count)
+}
+
+func assertLedgerDelta(t *testing.T, entry model.LedgerEntry, asset string, availableDelta string, lockedDelta string, availableAfter string, lockedAfter string) {
+	t.Helper()
+
+	assert.Equal(t, asset, entry.CoinSymbol)
+	assert.True(t, entry.AvailableDelta.Equal(decimal.RequireFromString(availableDelta)), "available_delta=%s", entry.AvailableDelta.String())
+	assert.True(t, entry.LockedDelta.Equal(decimal.RequireFromString(lockedDelta)), "locked_delta=%s", entry.LockedDelta.String())
+	assert.True(t, entry.AvailableBalanceAfter.Equal(decimal.RequireFromString(availableAfter)), "available_after=%s", entry.AvailableBalanceAfter.String())
+	assert.True(t, entry.LockedBalanceAfter.Equal(decimal.RequireFromString(lockedAfter)), "locked_after=%s", entry.LockedBalanceAfter.String())
+}
+
+func assertSettlementLedgerEntries(t *testing.T, db *gorm.DB, tradeID uint, idempotencyKey string, buyerID uint, sellerID uint) {
+	t.Helper()
+
+	var entries []model.LedgerEntry
+	require.NoError(t, db.
+		Where("entry_type = ? AND reference_type = ? AND reference_id = ?", model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, tradeID).
+		Order("user_id ASC").
+		Order("coin_symbol ASC").
+		Find(&entries).Error)
+	require.Len(t, entries, 4)
+	for _, entry := range entries {
+		assert.Equal(t, idempotencyKey, entry.ReferenceKey)
+	}
+
+	byUserAsset := make(map[string]model.LedgerEntry, len(entries))
+	for _, entry := range entries {
+		byUserAsset[fmt.Sprintf("%d/%s", entry.UserID, entry.CoinSymbol)] = entry
+	}
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "50", "-500", "50", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, "BTC")], "BTC", "5", "0", "5", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, "BTC")], "BTC", "0", "-5", "0", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "450", "0", "450", "0")
 }

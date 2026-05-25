@@ -17,6 +17,7 @@ type OrderService struct {
 	WalletRepository *repository.WalletRepository
 	MatchingEngine   *matching.MatchingEngine
 	TradeRepository  *repository.TradeRepository
+	LedgerRepository *repository.LedgerRepository
 }
 
 const (
@@ -67,6 +68,7 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 	}
 	if repo != nil && repo.DB != nil {
 		service.TradeRepository = repository.NewTradeRepository(repo.DB)
+		service.LedgerRepository = repository.NewLedgerRepository(repo.DB)
 	}
 	return service
 }
@@ -80,10 +82,11 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := s.OrderRepository.WithTx(tx)
 		walletRepo := s.WalletRepository.WithTx(tx)
-		if err := holdOrderAssets(walletRepo, order); err != nil {
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
+		if err := orderRepo.CreateOrder(order); err != nil {
 			return err
 		}
-		return orderRepo.CreateOrder(order)
+		return holdOrderAssets(walletRepo, ledgerRepo, order)
 	}); err != nil {
 		return nil, err
 	}
@@ -118,6 +121,7 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := s.OrderRepository.WithTx(tx)
 		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
 
 		order, err := orderRepo.FindByIDForUpdate(input.OrderID)
 		if err != nil {
@@ -135,7 +139,7 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 			return err
 		}
 
-		releasedAsset, releasedAmount, err := releaseOrderHold(walletRepo, order, remaining)
+		releasedAsset, releasedAmount, err := releaseOrderHold(walletRepo, ledgerRepo, order, remaining)
 		if err != nil {
 			return err
 		}
@@ -274,7 +278,7 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 	}, nil
 }
 
-func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order) error {
+func holdOrderAssets(walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
 	switch order.Side {
 	case model.OrderSideBuy:
 		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
@@ -289,7 +293,11 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order
 		if err != nil {
 			return err
 		}
-		return walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance)
+		if err := walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID, "")
+		return ledgerRepo.Create(&entry)
 	case model.OrderSideSell:
 		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
 		if err != nil {
@@ -302,13 +310,17 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, order *model.Order
 		if err != nil {
 			return err
 		}
-		return walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance)
+		if err := walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID, "")
+		return ledgerRepo.Create(&entry)
 	default:
 		return NewValidationErrorf("invalid order side")
 	}
 }
 
-func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Order, remaining decimal.Decimal) (string, decimal.Decimal, error) {
+func releaseOrderHold(walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order, remaining decimal.Decimal) (string, decimal.Decimal, error) {
 	switch order.Side {
 	case model.OrderSideBuy:
 		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
@@ -323,7 +335,11 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Orde
 		if err != nil {
 			return "", decimal.Zero, err
 		}
-		return model.KRWAssetSymbol, releaseAmount, walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance)
+		if err := walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return "", decimal.Zero, err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID, "")
+		return model.KRWAssetSymbol, releaseAmount, ledgerRepo.Create(&entry)
 	case model.OrderSideSell:
 		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
 		if err != nil {
@@ -336,7 +352,11 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, order *model.Orde
 		if err != nil {
 			return "", decimal.Zero, err
 		}
-		return order.CoinSymbol, remaining, walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance)
+		if err := walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return "", decimal.Zero, err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID, "")
+		return order.CoinSymbol, remaining, ledgerRepo.Create(&entry)
 	default:
 		return "", decimal.Zero, NewValidationErrorf("invalid order side")
 	}

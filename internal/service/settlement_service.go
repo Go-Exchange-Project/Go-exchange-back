@@ -18,6 +18,7 @@ type SettlementService struct {
 	DB               *gorm.DB
 	OrderRepository  *repository.OrderRepository
 	WalletRepository *repository.WalletRepository
+	LedgerRepository *repository.LedgerRepository
 }
 
 type SettlementParticipants struct {
@@ -36,6 +37,7 @@ func NewSettlementService(db *gorm.DB, orderRepo *repository.OrderRepository, wa
 		DB:               db,
 		OrderRepository:  orderRepo,
 		WalletRepository: walletRepo,
+		LedgerRepository: repository.NewLedgerRepository(db),
 	}
 }
 
@@ -82,6 +84,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 
 		orderRepo := s.OrderRepository.WithTx(tx)
 		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
 
 		buyOrder, err := orderRepo.FindByIDForUpdate(trade.BuyOrderID)
 		if err != nil {
@@ -177,7 +180,16 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 			return err
 		}
 
-		// TODO: A future ledger phase should write double-entry records and apply fees atomically here.
+		entries := []model.LedgerEntry{
+			ledgerEntryFromWalletUpdate(buyerKRW, buyerKRWUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
+			ledgerEntryFromWalletUpdate(buyerCoin, buyerCoinUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
+			ledgerEntryFromWalletUpdate(sellerCoin, sellerCoinUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
+			ledgerEntryFromWalletUpdate(sellerKRW, sellerKRWUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
+		}
+		if err := ledgerRepo.CreateMany(entries); err != nil {
+			return err
+		}
+
 		result = SettlementResult{Applied: true, TradeID: trade.ID}
 		return nil
 	})

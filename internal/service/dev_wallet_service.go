@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -38,9 +39,13 @@ func (s *DevWalletService) FundWallet(input FundWalletInput) (*model.Wallet, err
 		if err := upsertFundedWallet(tx, userID, coinSymbol, amount); err != nil {
 			return err
 		}
-		return tx.
+		if err := tx.
 			Where("user_id = ? AND coin_symbol = ?", userID, coinSymbol).
-			First(&wallet).Error
+			First(&wallet).Error; err != nil {
+			return err
+		}
+		entry := devFundLedgerEntry(&wallet, amount)
+		return repository.NewLedgerRepository(tx).Create(&entry)
 	}); err != nil {
 		return nil, err
 	}
