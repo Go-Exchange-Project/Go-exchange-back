@@ -195,13 +195,18 @@ func processTradeSettlement(
 	tradeJSON, err := json.Marshal(map[string]interface{}{
 		"type": "trade",
 		"data": map[string]interface{}{
-			"coin_symbol":     trade.CoinSymbol,
-			"engine_sequence": trade.EngineSequence,
-			"engine_event_id": trade.EngineEventID,
-			"idempotency_key": trade.IdempotencyKey,
-			"price":           trade.Price,
-			"quantity":        trade.Quantity,
-			"time":            trade.TradedAt,
+			"coin_symbol":      trade.CoinSymbol,
+			"engine_sequence":  trade.EngineSequence,
+			"engine_event_id":  trade.EngineEventID,
+			"idempotency_key":  trade.IdempotencyKey,
+			"price":            trade.Price,
+			"quantity":         trade.Quantity,
+			"fee_rate":         trade.FeeRate,
+			"buyer_fee":        trade.BuyerFee,
+			"buyer_fee_asset":  trade.BuyerFeeAsset,
+			"seller_fee":       trade.SellerFee,
+			"seller_fee_asset": trade.SellerFeeAsset,
+			"time":             trade.TradedAt,
 		},
 	})
 	if err != nil {

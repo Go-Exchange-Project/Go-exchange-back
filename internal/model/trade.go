@@ -14,6 +14,11 @@ type Trade struct {
 	CoinSymbol     string          `gorm:"not null"`
 	Price          decimal.Decimal `gorm:"type:numeric;not null;check:ck_trades_price_positive,price > 0"`
 	Quantity       decimal.Decimal `gorm:"type:numeric;not null;check:ck_trades_quantity_positive,quantity > 0"`
+	FeeRate        decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_trades_fee_rate_non_negative,fee_rate >= 0"`
+	BuyerFee       decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_trades_buyer_fee_non_negative,buyer_fee >= 0"`
+	BuyerFeeAsset  string          `gorm:"size:32;not null;default:''"`
+	SellerFee      decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_trades_seller_fee_non_negative,seller_fee >= 0"`
+	SellerFeeAsset string          `gorm:"size:32;not null;default:''"`
 	TradedAt       time.Time       `gorm:"not null"`
 	BuyOrderID     uint            `gorm:"not null"`
 	SellOrderID    uint            `gorm:"not null"`

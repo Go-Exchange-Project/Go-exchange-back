@@ -9,6 +9,7 @@ type MarketRules struct {
 	CoinSymbol       string
 	QuoteSymbol      string
 	MinOrderNotional decimal.Decimal
+	FeeRate          decimal.Decimal
 	TickRules        []MarketTickRule
 }
 
@@ -18,6 +19,7 @@ type MarketTickRule struct {
 }
 
 var minKRWOrderNotional = decimal.NewFromInt(5000)
+var defaultTradingFeeRate = decimal.RequireFromString("0.0005")
 
 type krwTickRule struct {
 	upperBound decimal.Decimal
@@ -88,6 +90,7 @@ func KRWMarketRules(coinSymbol string) (MarketRules, error) {
 		CoinSymbol:       normalizedSymbol,
 		QuoteSymbol:      model.KRWAssetSymbol,
 		MinOrderNotional: minKRWOrderNotional,
+		FeeRate:          defaultTradingFeeRate,
 		TickRules:        tickRules,
 	}, nil
 }

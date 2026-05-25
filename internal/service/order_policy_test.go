@@ -40,6 +40,7 @@ func TestKRWMarketRulesReturnsSerializablePolicy(t *testing.T) {
 	assert.Equal(t, "BTC", rules.CoinSymbol)
 	assert.Equal(t, "KRW", rules.QuoteSymbol)
 	assert.True(t, rules.MinOrderNotional.Equal(decimal.NewFromInt(5000)))
+	assert.True(t, rules.FeeRate.Equal(decimal.RequireFromString("0.0005")))
 	require.Len(t, rules.TickRules, len(krwTickRules)+1)
 	require.NotNil(t, rules.TickRules[0].UpperBound)
 	assert.True(t, rules.TickRules[0].UpperBound.Equal(decimal.NewFromInt(1)))

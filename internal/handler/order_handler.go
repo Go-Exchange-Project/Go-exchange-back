@@ -224,6 +224,11 @@ type TradeResponse struct {
 	Side           model.OrderSide `json:"side"`
 	Price          string          `json:"price"`
 	Quantity       string          `json:"quantity"`
+	FeeRate        string          `json:"fee_rate"`
+	BuyerFee       string          `json:"buyer_fee"`
+	BuyerFeeAsset  string          `json:"buyer_fee_asset"`
+	SellerFee      string          `json:"seller_fee"`
+	SellerFeeAsset string          `json:"seller_fee_asset"`
 	TradedAt       time.Time       `json:"traded_at"`
 	BuyOrderID     uint            `json:"buy_order_id"`
 	SellOrderID    uint            `json:"sell_order_id"`
@@ -270,6 +275,11 @@ func tradeResponse(trade repository.UserTrade) TradeResponse {
 		Side:           trade.Side,
 		Price:          trade.Price.String(),
 		Quantity:       trade.Quantity.String(),
+		FeeRate:        trade.FeeRate.String(),
+		BuyerFee:       trade.BuyerFee.String(),
+		BuyerFeeAsset:  trade.BuyerFeeAsset,
+		SellerFee:      trade.SellerFee.String(),
+		SellerFeeAsset: trade.SellerFeeAsset,
 		TradedAt:       trade.TradedAt,
 		BuyOrderID:     trade.BuyOrderID,
 		SellOrderID:    trade.SellOrderID,

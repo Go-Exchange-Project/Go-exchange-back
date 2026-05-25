@@ -48,6 +48,9 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 	if err := prepareTradeForSettlement(trade); err != nil {
 		return SettlementResult{}, err
 	}
+	if err := applyTradeFeePolicy(trade); err != nil {
+		return SettlementResult{}, err
+	}
 
 	var result SettlementResult
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
@@ -143,11 +146,19 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 
 		executionQuote := tradeQuoteAmount(trade)
 		reservedQuote := reservedQuoteAmount(buyOrder, trade.Quantity)
+		buyerCoinNet, err := amountAfterFee(trade.Quantity, trade.BuyerFee, "buyer")
+		if err != nil {
+			return err
+		}
+		sellerQuoteNet, err := amountAfterFee(executionQuote, trade.SellerFee, "seller")
+		if err != nil {
+			return err
+		}
 		buyerKRWUpdate, err := settleBuyerKRW(buyerKRW, reservedQuote, executionQuote)
 		if err != nil {
 			return err
 		}
-		buyerCoinUpdate, err := creditAvailable(buyerCoin, trade.Quantity)
+		buyerCoinUpdate, err := creditAvailable(buyerCoin, buyerCoinNet)
 		if err != nil {
 			return err
 		}
@@ -155,7 +166,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 		if err != nil {
 			return err
 		}
-		sellerKRWUpdate, err := creditAvailable(sellerKRW, executionQuote)
+		sellerKRWUpdate, err := creditAvailable(sellerKRW, sellerQuoteNet)
 		if err != nil {
 			return err
 		}
@@ -328,7 +339,12 @@ func validateIdempotentTradePayload(existing *model.Trade, incoming *model.Trade
 		existing.BuyOrderID != incoming.BuyOrderID ||
 		existing.SellOrderID != incoming.SellOrderID ||
 		!existing.Price.Equal(incoming.Price) ||
-		!existing.Quantity.Equal(incoming.Quantity) {
+		!existing.Quantity.Equal(incoming.Quantity) ||
+		!existing.FeeRate.Equal(incoming.FeeRate) ||
+		!existing.BuyerFee.Equal(incoming.BuyerFee) ||
+		strings.TrimSpace(existing.BuyerFeeAsset) != strings.TrimSpace(incoming.BuyerFeeAsset) ||
+		!existing.SellerFee.Equal(incoming.SellerFee) ||
+		strings.TrimSpace(existing.SellerFeeAsset) != strings.TrimSpace(incoming.SellerFeeAsset) {
 		return fmt.Errorf("idempotency key conflict for %q: existing trade payload differs", incoming.IdempotencyKey)
 	}
 	return nil

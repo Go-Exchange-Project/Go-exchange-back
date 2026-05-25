@@ -21,6 +21,7 @@ func TestMarketRulesResponseUsesDecimalStringsAndOpenEndedFinalTick(t *testing.T
 	assert.Equal(t, "BTC", response.CoinSymbol)
 	assert.Equal(t, "KRW", response.QuoteSymbol)
 	assert.Equal(t, "5000", response.MinOrderNotional)
+	assert.Equal(t, "0.0005", response.FeeRate)
 	require.NotEmpty(t, response.TickRules)
 	assert.Equal(t, "1", *response.TickRules[0].UpperBound)
 	assert.Equal(t, "0.00001", response.TickRules[0].TickSize)
@@ -43,6 +44,7 @@ func TestMarketHandlerGetRules(t *testing.T) {
 	assert.Equal(t, "BTC", body.CoinSymbol)
 	assert.Equal(t, "KRW", body.QuoteSymbol)
 	assert.Equal(t, "5000", body.MinOrderNotional)
+	assert.Equal(t, "0.0005", body.FeeRate)
 	require.Len(t, body.TickRules, 10)
 }
 

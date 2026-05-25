@@ -343,6 +343,11 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	require.NoError(t, db.Where("idempotency_key = ?", trade.IdempotencyKey).First(&persistedTrade).Error)
 	assert.Equal(t, trade.EngineSequence, persistedTrade.EngineSequence)
 	assert.Equal(t, trade.EngineEventID, persistedTrade.EngineEventID)
+	assert.True(t, persistedTrade.FeeRate.Equal(decimal.RequireFromString("0.0005")))
+	assert.True(t, persistedTrade.BuyerFee.Equal(decimal.RequireFromString("0.0025")))
+	assert.Equal(t, "BTC", persistedTrade.BuyerFeeAsset)
+	assert.True(t, persistedTrade.SellerFee.Equal(decimal.RequireFromString("0.225")))
+	assert.Equal(t, model.KRWAssetSymbol, persistedTrade.SellerFeeAsset)
 
 	var persistedBuy model.Order
 	var persistedSell model.Order
@@ -365,9 +370,9 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 
 	assert.True(t, buyerKRW.AvailableBalance.Equal(decimal.NewFromInt(50)))
 	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
+	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.RequireFromString("4.9975")))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.NewFromInt(450)))
+	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
 	assertSettlementLedgerEntries(t, db, result.TradeID, trade.IdempotencyKey, buyerID, sellerID)
 }
 
@@ -434,9 +439,9 @@ func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
 	require.NoError(t, err)
 	persistedSellerKRW, err := walletRepo.FindKRWWalletByUserID(sellerID)
 	require.NoError(t, err)
-	assert.True(t, persistedBuyerBTC.AvailableBalance.Equal(decimal.NewFromInt(1)))
+	assert.True(t, persistedBuyerBTC.AvailableBalance.Equal(decimal.RequireFromString("0.9995")))
 	assert.True(t, persistedBuyerBTC.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, persistedSellerKRW.AvailableBalance.Equal(decimal.NewFromInt(100)))
+	assert.True(t, persistedSellerKRW.AvailableBalance.Equal(decimal.RequireFromString("99.95")))
 	assert.True(t, persistedSellerKRW.LockedBalance.Equal(decimal.Zero))
 }
 
@@ -550,9 +555,9 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 
 	assert.True(t, buyerKRW.AvailableBalance.Equal(decimal.NewFromInt(50)))
 	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.NewFromInt(500)))
-	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
+	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.RequireFromString("4.9975")))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(5)))
-	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.NewFromInt(450)))
+	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
 	assertSettlementLedgerEntries(t, db, firstResult.TradeID, trade.IdempotencyKey, buyerID, sellerID)
 }
 
@@ -1197,7 +1202,7 @@ func assertSettlementLedgerEntries(t *testing.T, db *gorm.DB, tradeID uint, idem
 		byUserAsset[fmt.Sprintf("%d/%s", entry.UserID, entry.CoinSymbol)] = entry
 	}
 	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "50", "-500", "50", "0")
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, "BTC")], "BTC", "5", "0", "5", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, "BTC")], "BTC", "4.9975", "0", "4.9975", "0")
 	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, "BTC")], "BTC", "0", "-5", "0", "0")
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "450", "0", "450", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "449.775", "0", "449.775", "0")
 }

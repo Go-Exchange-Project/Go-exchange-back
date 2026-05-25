@@ -26,6 +26,11 @@ type UserTrade struct {
 	CoinSymbol     string
 	Price          decimal.Decimal
 	Quantity       decimal.Decimal
+	FeeRate        decimal.Decimal
+	BuyerFee       decimal.Decimal
+	BuyerFeeAsset  string
+	SellerFee      decimal.Decimal
+	SellerFeeAsset string
 	TradedAt       time.Time
 	BuyOrderID     uint
 	SellOrderID    uint
@@ -40,7 +45,7 @@ func (r *TradeRepository) ListByUserID(userID uint, filter TradeListFilter) ([]U
 	var trades []UserTrade
 	query := r.DB.Table("trades").
 		Select(
-			"trades.id, trades.idempotency_key, trades.engine_sequence, trades.engine_event_id, trades.coin_symbol, trades.price, trades.quantity, trades.traded_at, trades.buy_order_id, trades.sell_order_id, CASE WHEN buy_orders.user_id = ? THEN ? ELSE ? END AS side",
+			"trades.id, trades.idempotency_key, trades.engine_sequence, trades.engine_event_id, trades.coin_symbol, trades.price, trades.quantity, trades.fee_rate, trades.buyer_fee, trades.buyer_fee_asset, trades.seller_fee, trades.seller_fee_asset, trades.traded_at, trades.buy_order_id, trades.sell_order_id, CASE WHEN buy_orders.user_id = ? THEN ? ELSE ? END AS side",
 			userID,
 			model.OrderSideBuy,
 			model.OrderSideSell,
