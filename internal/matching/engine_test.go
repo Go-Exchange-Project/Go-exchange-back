@@ -312,6 +312,42 @@ func TestGetOrderBookSnapshot_AsksAscendingBidsDescending(t *testing.T) {
 	assert.Equal(t, decimal.NewFromInt(40000), snapshot.Bids[1].Price)
 }
 
+func TestGetOrderBookSnapshot_LimitsDepth(t *testing.T) {
+	me := NewMatchingEngine()
+
+	for i := int64(0); i < int64(DefaultSnapshotDepth+5); i++ {
+		me.Match(testOrder(uint(i+1), "BTC", model.OrderSideSell, 1000+i, 1))
+		me.Match(testOrder(uint(i+100), "BTC", model.OrderSideBuy, 900-i, 1))
+	}
+
+	snapshot := me.GetOrderBookSnapshot("BTC")
+
+	require.Len(t, snapshot.Asks, DefaultSnapshotDepth)
+	require.Len(t, snapshot.Bids, DefaultSnapshotDepth)
+	assert.Equal(t, decimal.NewFromInt(1000), snapshot.Asks[0].Price)
+	assert.Equal(t, decimal.NewFromInt(int64(1000+DefaultSnapshotDepth-1)), snapshot.Asks[DefaultSnapshotDepth-1].Price)
+	assert.Equal(t, decimal.NewFromInt(900), snapshot.Bids[0].Price)
+	assert.Equal(t, decimal.NewFromInt(int64(900-DefaultSnapshotDepth+1)), snapshot.Bids[DefaultSnapshotDepth-1].Price)
+}
+
+func TestGetOrderBookSnapshotWithDepth_UsesCustomDepth(t *testing.T) {
+	me := NewMatchingEngine()
+
+	for i := int64(0); i < 5; i++ {
+		me.Match(testOrder(uint(i+1), "BTC", model.OrderSideSell, 1000+i, 1))
+		me.Match(testOrder(uint(i+100), "BTC", model.OrderSideBuy, 900-i, 1))
+	}
+
+	snapshot := me.GetOrderBookSnapshotWithDepth("BTC", 2)
+
+	require.Len(t, snapshot.Asks, 2)
+	require.Len(t, snapshot.Bids, 2)
+	assert.Equal(t, decimal.NewFromInt(1000), snapshot.Asks[0].Price)
+	assert.Equal(t, decimal.NewFromInt(1001), snapshot.Asks[1].Price)
+	assert.Equal(t, decimal.NewFromInt(900), snapshot.Bids[0].Price)
+	assert.Equal(t, decimal.NewFromInt(899), snapshot.Bids[1].Price)
+}
+
 func TestCancelOrder_RemovesOrderFromOrderBook(t *testing.T) {
 	me := NewMatchingEngine()
 	me.Start()

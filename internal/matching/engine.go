@@ -24,6 +24,8 @@ type MatchingEngine struct {
 	SnapshotCh chan OrderBookSnapshot
 }
 
+const DefaultSnapshotDepth = 30
+
 type CancelOrderCommand struct {
 	CoinSymbol string
 	OrderID    uint
@@ -306,7 +308,10 @@ func (me *MatchingEngine) GetOrderBookSnapshot(coinSymbols ...string) OrderBookS
 	if len(coinSymbols) > 0 {
 		coinSymbol = coinSymbols[0]
 	}
+	return me.GetOrderBookSnapshotWithDepth(coinSymbol, DefaultSnapshotDepth)
+}
 
+func (me *MatchingEngine) GetOrderBookSnapshotWithDepth(coinSymbol string, depth int) OrderBookSnapshot {
 	book := me.OrderBook
 	if coinSymbol != "" {
 		book = me.GetOrderBook(coinSymbol)
@@ -319,7 +324,11 @@ func (me *MatchingEngine) GetOrderBookSnapshot(coinSymbols ...string) OrderBookS
 		return snapshot
 	}
 
+	depth = normalizeSnapshotDepth(depth)
 	book.SellOrders.Ascend(func(level *PriceLevel) bool {
+		if len(snapshot.Asks) >= depth {
+			return false
+		}
 		qty := decimal.Zero
 		for i := 0; i < level.Orders.Len(); i++ {
 			qty = qty.Add(level.Orders.At(i).Amount)
@@ -334,6 +343,9 @@ func (me *MatchingEngine) GetOrderBookSnapshot(coinSymbols ...string) OrderBookS
 	})
 
 	book.BuyOrders.Descend(func(level *PriceLevel) bool {
+		if len(snapshot.Bids) >= depth {
+			return false
+		}
 		qty := decimal.Zero
 		for i := 0; i < level.Orders.Len(); i++ {
 			qty = qty.Add(level.Orders.At(i).Amount)
@@ -348,4 +360,11 @@ func (me *MatchingEngine) GetOrderBookSnapshot(coinSymbols ...string) OrderBookS
 	})
 
 	return snapshot
+}
+
+func normalizeSnapshotDepth(depth int) int {
+	if depth <= 0 {
+		return DefaultSnapshotDepth
+	}
+	return depth
 }
