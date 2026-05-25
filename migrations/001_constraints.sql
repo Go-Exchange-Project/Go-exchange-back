@@ -12,7 +12,13 @@ ALTER TABLE wallets
     ALTER COLUMN locked_balance SET NOT NULL;
 
 ALTER TABLE trades
+    ADD COLUMN IF NOT EXISTS engine_sequence bigint NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS engine_event_id varchar(128) NOT NULL DEFAULT '';
+
+ALTER TABLE trades
     ALTER COLUMN idempotency_key SET NOT NULL,
+    ALTER COLUMN engine_sequence SET NOT NULL,
+    ALTER COLUMN engine_event_id SET NOT NULL,
     ALTER COLUMN coin_symbol SET NOT NULL,
     ALTER COLUMN price SET NOT NULL,
     ALTER COLUMN quantity SET NOT NULL,
@@ -64,6 +70,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_user_id_coin_symbol
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency_key
     ON trades (idempotency_key);
+
+CREATE INDEX IF NOT EXISTS idx_trades_engine_sequence
+    ON trades (engine_sequence);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_engine_event_id
+    ON trades (engine_event_id)
+    WHERE length(btrim(engine_event_id)) > 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_failed_settlements_trade_idempotency_key
     ON failed_settlements (trade_idempotency_key);
@@ -135,6 +148,15 @@ BEGIN
     ) THEN
         ALTER TABLE trades
             ADD CONSTRAINT ck_trades_idempotency_key_not_empty CHECK (length(btrim(idempotency_key)) > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'trades'::regclass
+          AND conname = 'ck_trades_engine_sequence_non_negative'
+    ) THEN
+        ALTER TABLE trades
+            ADD CONSTRAINT ck_trades_engine_sequence_non_negative CHECK (engine_sequence >= 0);
     END IF;
 
     IF NOT EXISTS (

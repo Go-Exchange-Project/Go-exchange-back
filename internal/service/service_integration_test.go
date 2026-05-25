@@ -318,12 +318,14 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
 
 	trade := &model.Trade{
-		CoinSymbol:  "BTC",
-		Price:       decimal.NewFromInt(90),
-		Quantity:    decimal.NewFromInt(5),
-		TradedAt:    time.Now(),
-		BuyOrderID:  buyOrder.ID,
-		SellOrderID: sellOrder.ID,
+		EngineSequence: 12,
+		EngineEventID:  fmt.Sprintf("integration-engine-event-%d", time.Now().UnixNano()),
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		TradedAt:       time.Now(),
+		BuyOrderID:     buyOrder.ID,
+		SellOrderID:    sellOrder.ID,
 	}
 
 	result, err := settlementService.SettleTrade(trade)
@@ -331,10 +333,16 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	assert.True(t, result.Applied)
 	assert.False(t, result.Duplicate)
 	assert.NotEmpty(t, trade.IdempotencyKey)
+	assert.Equal(t, "engine:"+trade.EngineEventID, trade.IdempotencyKey)
 
 	var tradeCount int64
 	require.NoError(t, db.Model(&model.Trade{}).Where("buy_order_id = ? AND sell_order_id = ?", buyOrder.ID, sellOrder.ID).Count(&tradeCount).Error)
 	assert.Equal(t, int64(1), tradeCount)
+
+	var persistedTrade model.Trade
+	require.NoError(t, db.Where("idempotency_key = ?", trade.IdempotencyKey).First(&persistedTrade).Error)
+	assert.Equal(t, trade.EngineSequence, persistedTrade.EngineSequence)
+	assert.Equal(t, trade.EngineEventID, persistedTrade.EngineEventID)
 
 	var persistedBuy model.Order
 	var persistedSell model.Order
@@ -442,12 +450,14 @@ func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
 	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
 
 	trade := &model.Trade{
-		CoinSymbol:  "BTC",
-		Price:       decimal.NewFromInt(90),
-		Quantity:    decimal.NewFromInt(5),
-		TradedAt:    time.Now(),
-		BuyOrderID:  buyOrder.ID,
-		SellOrderID: sellOrder.ID,
+		EngineSequence: 20,
+		EngineEventID:  fmt.Sprintf("integration-failing-engine-event-%d", time.Now().UnixNano()),
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		TradedAt:       time.Now(),
+		BuyOrderID:     buyOrder.ID,
+		SellOrderID:    sellOrder.ID,
 	}
 
 	_, err := settlementService.SettleTrade(trade)
@@ -487,12 +497,14 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
 
 	trade := &model.Trade{
-		CoinSymbol:  "BTC",
-		Price:       decimal.NewFromInt(90),
-		Quantity:    decimal.NewFromInt(5),
-		TradedAt:    time.Now(),
-		BuyOrderID:  buyOrder.ID,
-		SellOrderID: sellOrder.ID,
+		EngineSequence: 30,
+		EngineEventID:  fmt.Sprintf("integration-duplicate-engine-event-%d", time.Now().UnixNano()),
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		TradedAt:       time.Now(),
+		BuyOrderID:     buyOrder.ID,
+		SellOrderID:    sellOrder.ID,
 	}
 
 	firstResult, err := settlementService.SettleTrade(trade)
@@ -500,6 +512,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	assert.True(t, firstResult.Applied)
 	assert.False(t, firstResult.Duplicate)
 	require.NotEmpty(t, trade.IdempotencyKey)
+	assert.Equal(t, "engine:"+trade.EngineEventID, trade.IdempotencyKey)
 
 	duplicate := *trade
 	duplicate.ID = 0

@@ -276,12 +276,23 @@ func prepareTradeForSettlement(trade *model.Trade) error {
 	if !trade.Price.GreaterThan(decimal.Zero) || !trade.Quantity.GreaterThan(decimal.Zero) {
 		return fmt.Errorf("trade price and quantity must be greater than zero")
 	}
+	if trade.EngineSequence < 0 {
+		return fmt.Errorf("trade engine_sequence must be greater than or equal to zero")
+	}
+	trade.EngineEventID = strings.TrimSpace(trade.EngineEventID)
 
 	trade.IdempotencyKey = strings.TrimSpace(trade.IdempotencyKey)
 	if trade.IdempotencyKey == "" {
-		trade.IdempotencyKey = deterministicTradeIdempotencyKey(trade)
+		trade.IdempotencyKey = tradeIdempotencyKey(trade)
 	}
 	return nil
+}
+
+func tradeIdempotencyKey(trade *model.Trade) string {
+	if engineEventID := strings.TrimSpace(trade.EngineEventID); engineEventID != "" {
+		return fmt.Sprintf("engine:%s", engineEventID)
+	}
+	return deterministicTradeIdempotencyKey(trade)
 }
 
 func deterministicTradeIdempotencyKey(trade *model.Trade) string {
@@ -312,6 +323,8 @@ func validateIdempotentTradePayload(existing *model.Trade, incoming *model.Trade
 		return fmt.Errorf("both trades are required")
 	}
 	if normalizeTradeCoinSymbol(existing.CoinSymbol) != normalizeTradeCoinSymbol(incoming.CoinSymbol) ||
+		existing.EngineSequence != incoming.EngineSequence ||
+		strings.TrimSpace(existing.EngineEventID) != strings.TrimSpace(incoming.EngineEventID) ||
 		existing.BuyOrderID != incoming.BuyOrderID ||
 		existing.SellOrderID != incoming.SellOrderID ||
 		!existing.Price.Equal(incoming.Price) ||

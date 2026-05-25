@@ -56,6 +56,24 @@ func TestFailedSettlementFromTradeFillsDeterministicIdempotencyKey(t *testing.T)
 	assert.Equal(t, failure.TradeIdempotencyKey, trade.IdempotencyKey)
 }
 
+func TestFailedSettlementFromTradeUsesEngineEventID(t *testing.T) {
+	trade := &model.Trade{
+		EngineSequence: 1,
+		EngineEventID:  "engine-test-1",
+		CoinSymbol:     "BTC",
+		BuyOrderID:     10,
+		SellOrderID:    20,
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+	}
+
+	failure, err := failedSettlementFromTrade(trade, assert.AnError, time.Unix(1000, 0))
+
+	require.NoError(t, err)
+	assert.Equal(t, "engine:engine-test-1", failure.TradeIdempotencyKey)
+	assert.Equal(t, failure.TradeIdempotencyKey, trade.IdempotencyKey)
+}
+
 func TestSettlementErrorMessageDefaultsWhenEmpty(t *testing.T) {
 	assert.Equal(t, "unknown settlement failure", settlementErrorMessage(nil))
 	assert.Equal(t, "unknown settlement failure", settlementErrorMessage(errors.New("  ")))

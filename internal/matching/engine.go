@@ -2,6 +2,8 @@ package matching
 
 import (
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -22,9 +24,13 @@ type MatchingEngine struct {
 	CancelCh   chan CancelOrderCommand
 	TradeCh    chan *model.Trade
 	SnapshotCh chan OrderBookSnapshot
+	engineID   string
+	tradeSeq   int64
 }
 
 const DefaultSnapshotDepth = 30
+
+var engineInstanceCounter uint64
 
 type CancelOrderCommand struct {
 	CoinSymbol string
@@ -59,6 +65,7 @@ func NewMatchingEngine() *MatchingEngine {
 		CancelCh:   make(chan CancelOrderCommand, 1024),
 		TradeCh:    make(chan *model.Trade, 1024),
 		SnapshotCh: make(chan OrderBookSnapshot, 256),
+		engineID:   newEngineID(),
 	}
 }
 
@@ -198,14 +205,7 @@ func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
 			book.SellOrders.Delete(sellLevel)
 		}
 
-		me.TradeCh <- &model.Trade{
-			CoinSymbol:  order.CoinSymbol,
-			Price:       sellLevel.Price,
-			Quantity:    tradeQty,
-			TradedAt:    time.Now(),
-			BuyOrderID:  order.ID,
-			SellOrderID: sellOrder.ID,
-		}
+		me.TradeCh <- me.newTrade(order.CoinSymbol, sellLevel.Price, tradeQty, order.ID, sellOrder.ID)
 	}
 }
 
@@ -234,15 +234,35 @@ func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
 			book.BuyOrders.Delete(buyLevel)
 		}
 
-		me.TradeCh <- &model.Trade{
-			CoinSymbol:  order.CoinSymbol,
-			Price:       buyLevel.Price,
-			Quantity:    tradeQty,
-			TradedAt:    time.Now(),
-			BuyOrderID:  buyOrder.ID,
-			SellOrderID: order.ID,
-		}
+		me.TradeCh <- me.newTrade(order.CoinSymbol, buyLevel.Price, tradeQty, buyOrder.ID, order.ID)
 	}
+}
+
+func (me *MatchingEngine) newTrade(coinSymbol string, price decimal.Decimal, quantity decimal.Decimal, buyOrderID uint, sellOrderID uint) *model.Trade {
+	sequence, eventID := me.nextTradeEvent()
+	return &model.Trade{
+		EngineSequence: sequence,
+		EngineEventID:  eventID,
+		CoinSymbol:     coinSymbol,
+		Price:          price,
+		Quantity:       quantity,
+		TradedAt:       time.Now(),
+		BuyOrderID:     buyOrderID,
+		SellOrderID:    sellOrderID,
+	}
+}
+
+func (me *MatchingEngine) nextTradeEvent() (int64, string) {
+	if me.engineID == "" {
+		me.engineID = newEngineID()
+	}
+	me.tradeSeq++
+	return me.tradeSeq, fmt.Sprintf("%s-%d", me.engineID, me.tradeSeq)
+}
+
+func newEngineID() string {
+	instance := atomic.AddUint64(&engineInstanceCounter, 1)
+	return fmt.Sprintf("engine-%d-%d", time.Now().UTC().UnixNano(), instance)
 }
 
 func bestMatchableSellOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, bool) {

@@ -206,6 +206,53 @@ func TestIntegrationTradeIdempotencyKeyCannotBeBlankOrNull(t *testing.T) {
 	).Error)
 }
 
+func TestIntegrationTradeEngineEventIDUniqueIndex(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	eventID := fmt.Sprintf("engine-event-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("engine_event_id = ?", eventID).Delete(&model.Trade{}).Error)
+	})
+
+	first := model.Trade{
+		IdempotencyKey: "trade-engine-event-first-" + eventID,
+		EngineSequence: 1,
+		EngineEventID:  eventID,
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(1),
+		Quantity:       decimal.NewFromInt(1),
+		TradedAt:       time.Now(),
+		BuyOrderID:     51,
+		SellOrderID:    52,
+	}
+	second := first
+	second.ID = 0
+	second.IdempotencyKey = "trade-engine-event-second-" + eventID
+
+	require.NoError(t, db.Create(&first).Error)
+	require.Error(t, db.Create(&second).Error)
+}
+
+func TestIntegrationTradeEngineSequenceCannotBeNegative(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	key := fmt.Sprintf("trade-negative-engine-sequence-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("idempotency_key = ?", key).Delete(&model.Trade{}).Error)
+	})
+
+	trade := model.Trade{
+		IdempotencyKey: key,
+		EngineSequence: -1,
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(1),
+		Quantity:       decimal.NewFromInt(1),
+		TradedAt:       time.Now(),
+		BuyOrderID:     53,
+		SellOrderID:    54,
+	}
+
+	require.Error(t, db.Create(&trade).Error)
+}
+
 func TestIntegrationWalletNegativeBalanceConstraint(t *testing.T) {
 	db := openRepositoryIntegrationDB(t)
 	userID := repositoryTestUserID(6)

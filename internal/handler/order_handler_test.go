@@ -75,19 +75,25 @@ func TestWalletResponseUsesAvailableLockedAndTotalStrings(t *testing.T) {
 
 func TestTradeResponseUsesUserSideAndDecimalStrings(t *testing.T) {
 	trade := repository.UserTrade{
-		ID:          2,
-		CoinSymbol:  "ETH",
-		Side:        model.OrderSideSell,
-		Price:       decimal.RequireFromString("2000.5"),
-		Quantity:    decimal.RequireFromString("0.75"),
-		TradedAt:    time.Unix(2000, 0),
-		BuyOrderID:  10,
-		SellOrderID: 11,
+		ID:             2,
+		IdempotencyKey: "engine:engine-test-2",
+		EngineSequence: 2,
+		EngineEventID:  "engine-test-2",
+		CoinSymbol:     "ETH",
+		Side:           model.OrderSideSell,
+		Price:          decimal.RequireFromString("2000.5"),
+		Quantity:       decimal.RequireFromString("0.75"),
+		TradedAt:       time.Unix(2000, 0),
+		BuyOrderID:     10,
+		SellOrderID:    11,
 	}
 
 	response := tradeResponse(trade)
 
 	assert.Equal(t, model.OrderSideSell, response.Side)
+	assert.Equal(t, "engine:engine-test-2", response.IdempotencyKey)
+	assert.Equal(t, int64(2), response.EngineSequence)
+	assert.Equal(t, "engine-test-2", response.EngineEventID)
 	assert.Equal(t, "2000.5", response.Price)
 	assert.Equal(t, "0.75", response.Quantity)
 }

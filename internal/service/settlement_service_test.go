@@ -165,6 +165,53 @@ func TestDeterministicTradeIdempotencyKeyIsStableForSamePayload(t *testing.T) {
 	assert.Equal(t, deterministicTradeIdempotencyKey(first), deterministicTradeIdempotencyKey(second))
 }
 
+func TestTradeIdempotencyKeyPrefersEngineEventID(t *testing.T) {
+	trade := &model.Trade{
+		EngineEventID: " engine-abc-1 ",
+		CoinSymbol:    "BTC",
+		Price:         decimal.NewFromInt(90),
+		Quantity:      decimal.NewFromInt(5),
+		BuyOrderID:    10,
+		SellOrderID:   20,
+	}
+
+	assert.Equal(t, "engine:engine-abc-1", tradeIdempotencyKey(trade))
+}
+
+func TestPrepareTradeForSettlementUsesEngineEventIDForIdempotency(t *testing.T) {
+	trade := &model.Trade{
+		EngineSequence: 7,
+		EngineEventID:  " engine-abc-7 ",
+		CoinSymbol:     "btc",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		BuyOrderID:     10,
+		SellOrderID:    20,
+	}
+
+	require.NoError(t, prepareTradeForSettlement(trade))
+
+	assert.Equal(t, "BTC", trade.CoinSymbol)
+	assert.Equal(t, "engine-abc-7", trade.EngineEventID)
+	assert.Equal(t, "engine:engine-abc-7", trade.IdempotencyKey)
+}
+
+func TestPrepareTradeForSettlementRejectsNegativeEngineSequence(t *testing.T) {
+	trade := &model.Trade{
+		EngineSequence: -1,
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		BuyOrderID:     10,
+		SellOrderID:    20,
+	}
+
+	err := prepareTradeForSettlement(trade)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "engine_sequence")
+}
+
 func TestDeterministicTradeIdempotencyKeyChangesWithPayload(t *testing.T) {
 	first := &model.Trade{
 		CoinSymbol:  "BTC",
@@ -197,6 +244,34 @@ func TestValidateIdempotentTradePayloadRejectsDifferentPayload(t *testing.T) {
 		IdempotencyKey: "shared-key",
 		CoinSymbol:     "BTC",
 		Price:          decimal.NewFromInt(91),
+		Quantity:       decimal.NewFromInt(5),
+		BuyOrderID:     10,
+		SellOrderID:    20,
+	}
+
+	err := validateIdempotentTradePayload(existing, incoming)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "idempotency key conflict")
+}
+
+func TestValidateIdempotentTradePayloadRejectsDifferentEngineEvent(t *testing.T) {
+	existing := &model.Trade{
+		IdempotencyKey: "engine:engine-a-1",
+		EngineSequence: 1,
+		EngineEventID:  "engine-a-1",
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		BuyOrderID:     10,
+		SellOrderID:    20,
+	}
+	incoming := &model.Trade{
+		IdempotencyKey: "engine:engine-a-1",
+		EngineSequence: 2,
+		EngineEventID:  "engine-a-2",
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
 		Quantity:       decimal.NewFromInt(5),
 		BuyOrderID:     10,
 		SellOrderID:    20,

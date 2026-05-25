@@ -122,7 +122,7 @@ func failedSettlementFromTrade(trade *model.Trade, settlementErr error, occurred
 
 	idempotencyKey := strings.TrimSpace(trade.IdempotencyKey)
 	if idempotencyKey == "" {
-		idempotencyKey = deterministicTradeIdempotencyKey(trade)
+		idempotencyKey = tradeIdempotencyKey(trade)
 	}
 	trade.IdempotencyKey = idempotencyKey
 

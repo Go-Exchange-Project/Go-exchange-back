@@ -216,14 +216,17 @@ type WalletResponse struct {
 }
 
 type TradeResponse struct {
-	ID          uint            `json:"id"`
-	CoinSymbol  string          `json:"coin_symbol"`
-	Side        model.OrderSide `json:"side"`
-	Price       string          `json:"price"`
-	Quantity    string          `json:"quantity"`
-	TradedAt    time.Time       `json:"traded_at"`
-	BuyOrderID  uint            `json:"buy_order_id"`
-	SellOrderID uint            `json:"sell_order_id"`
+	ID             uint            `json:"id"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	EngineSequence int64           `json:"engine_sequence"`
+	EngineEventID  string          `json:"engine_event_id"`
+	CoinSymbol     string          `json:"coin_symbol"`
+	Side           model.OrderSide `json:"side"`
+	Price          string          `json:"price"`
+	Quantity       string          `json:"quantity"`
+	TradedAt       time.Time       `json:"traded_at"`
+	BuyOrderID     uint            `json:"buy_order_id"`
+	SellOrderID    uint            `json:"sell_order_id"`
 }
 
 func orderResponse(order model.Order) OrderResponse {
@@ -259,14 +262,17 @@ func walletResponse(wallet model.Wallet) WalletResponse {
 
 func tradeResponse(trade repository.UserTrade) TradeResponse {
 	return TradeResponse{
-		ID:          trade.ID,
-		CoinSymbol:  trade.CoinSymbol,
-		Side:        trade.Side,
-		Price:       trade.Price.String(),
-		Quantity:    trade.Quantity.String(),
-		TradedAt:    trade.TradedAt,
-		BuyOrderID:  trade.BuyOrderID,
-		SellOrderID: trade.SellOrderID,
+		ID:             trade.ID,
+		IdempotencyKey: trade.IdempotencyKey,
+		EngineSequence: trade.EngineSequence,
+		EngineEventID:  trade.EngineEventID,
+		CoinSymbol:     trade.CoinSymbol,
+		Side:           trade.Side,
+		Price:          trade.Price.String(),
+		Quantity:       trade.Quantity.String(),
+		TradedAt:       trade.TradedAt,
+		BuyOrderID:     trade.BuyOrderID,
+		SellOrderID:    trade.SellOrderID,
 	}
 }
 

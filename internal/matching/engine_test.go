@@ -87,6 +87,8 @@ func TestMatch_BuyPriceCrossesAsk(t *testing.T) {
 	assert.Equal(t, "BTC", trade.CoinSymbol)
 	assert.Equal(t, decimal.NewFromInt(50000), trade.Price)
 	assert.Equal(t, decimal.NewFromInt(1), trade.Quantity)
+	assert.Equal(t, int64(1), trade.EngineSequence)
+	assert.NotEmpty(t, trade.EngineEventID)
 }
 
 func TestMatch_BuyPriceBelowAskDoesNotCross(t *testing.T) {
@@ -237,6 +239,9 @@ func TestMatch_LargeBuyMatchesMultipleSellOrders(t *testing.T) {
 	assert.Equal(t, decimal.NewFromInt(2), firstTrade.Quantity)
 	assert.Equal(t, uint(2), secondTrade.SellOrderID)
 	assert.Equal(t, decimal.NewFromInt(3), secondTrade.Quantity)
+	assert.Equal(t, int64(1), firstTrade.EngineSequence)
+	assert.Equal(t, int64(2), secondTrade.EngineSequence)
+	assert.NotEqual(t, firstTrade.EngineEventID, secondTrade.EngineEventID)
 	assertNoTrade(t, me)
 	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
 	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
@@ -257,6 +262,9 @@ func TestMatch_LargeSellMatchesMultipleBuyOrders(t *testing.T) {
 	assert.Equal(t, decimal.NewFromInt(2), firstTrade.Quantity)
 	assert.Equal(t, uint(2), secondTrade.BuyOrderID)
 	assert.Equal(t, decimal.NewFromInt(3), secondTrade.Quantity)
+	assert.Equal(t, int64(1), firstTrade.EngineSequence)
+	assert.Equal(t, int64(2), secondTrade.EngineSequence)
+	assert.NotEqual(t, firstTrade.EngineEventID, secondTrade.EngineEventID)
 	assertNoTrade(t, me)
 	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
 	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())

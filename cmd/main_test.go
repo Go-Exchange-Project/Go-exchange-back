@@ -85,16 +85,20 @@ func TestProcessTradeSettlementBroadcastsAppliedTrade(t *testing.T) {
 	require.NotEmpty(t, broadcast)
 	assert.Contains(t, string(broadcast), `"type":"trade"`)
 	assert.Contains(t, string(broadcast), `"coin_symbol":"BTC"`)
+	assert.Contains(t, string(broadcast), `"engine_sequence":3`)
+	assert.Contains(t, string(broadcast), `"engine_event_id":"engine-test-3"`)
 	assert.Contains(t, string(broadcast), `"price":"90"`)
 }
 
 func testTrade() *model.Trade {
 	return &model.Trade{
-		CoinSymbol:  "BTC",
-		Price:       decimal.NewFromInt(90),
-		Quantity:    decimal.NewFromInt(5),
-		BuyOrderID:  1,
-		SellOrderID: 2,
+		EngineSequence: 3,
+		EngineEventID:  "engine-test-3",
+		CoinSymbol:     "BTC",
+		Price:          decimal.NewFromInt(90),
+		Quantity:       decimal.NewFromInt(5),
+		BuyOrderID:     1,
+		SellOrderID:    2,
 	}
 }
 

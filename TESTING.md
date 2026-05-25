@@ -137,6 +137,23 @@ Known limits:
 - Fees are not modeled.
 - The ledger is per wallet balance change; a later accounting phase should introduce exchange-level double-entry accounts and stronger reconciliation reports.
 
+## Matching Trade Event Identity
+
+The matching engine assigns every emitted trade an engine event identity:
+
+- `engine_sequence`: a monotonically increasing sequence number within the running matching engine instance.
+- `engine_event_id`: a string containing the engine instance identity and sequence.
+
+When settlement receives a trade without an explicit idempotency key, it now prefers `engine_event_id` and creates the key as `engine:<engine_event_id>`. If a trade came from an older/manual path without an engine event id, settlement falls back to the deterministic payload hash based on `coin_symbol`, order IDs, price, and quantity.
+
+This improves duplicate/retry handling for the normal matching path because two distinct engine trade events from the same order pair are no longer collapsed just because their price and quantity are equal.
+
+Known limits:
+
+- The sequence is in-memory and restarts with the process.
+- `engine_event_id` includes an engine instance component, so it is suitable for event identity emitted by the current in-memory engine, but it is not yet a persisted global exchange sequence.
+- A future phase should persist a global event stream/outbox if exact replay across process crashes is required.
+
 WebSocket origin configuration:
 
 | Variable | Default | Description |
