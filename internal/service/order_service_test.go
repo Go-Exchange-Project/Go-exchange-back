@@ -42,6 +42,38 @@ func TestBuildOrderParsesDecimalStringsExactly(t *testing.T) {
 	assert.Equal(t, decimal.RequireFromString("60.00000001"), order.Amount)
 }
 
+func TestBuildOrderAcceptsMarketBuyQuoteAmount(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:      1,
+		CoinSymbol:  "BTC",
+		Side:        "BUY",
+		OrderType:   "MARKET",
+		QuoteAmount: "5000.25",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderTypeMarket, order.OrderType)
+	assert.True(t, order.Price.IsZero())
+	assert.True(t, order.Amount.IsZero())
+	assert.Equal(t, decimal.RequireFromString("5000.25"), order.QuoteAmount)
+}
+
+func TestBuildOrderAcceptsMarketSellAmount(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:     1,
+		CoinSymbol: "BTC",
+		Side:       "SELL",
+		OrderType:  "MARKET",
+		Amount:     "0.125",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderTypeMarket, order.OrderType)
+	assert.True(t, order.Price.IsZero())
+	assert.Equal(t, decimal.RequireFromString("0.125"), order.Amount)
+	assert.True(t, order.QuoteAmount.IsZero())
+}
+
 func TestBuildOrderRejectsInvalidInputs(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -59,14 +91,23 @@ func TestBuildOrderRejectsInvalidInputs(t *testing.T) {
 			},
 		},
 		{
-			name: "unsupported market order",
+			name: "market buy missing quote amount",
 			input: CreateOrderInput{
 				UserID:     1,
 				CoinSymbol: "BTC",
 				Side:       "BUY",
 				OrderType:  "MARKET",
-				Price:      "1",
 				Amount:     "1",
+			},
+		},
+		{
+			name: "market buy below minimum quote amount",
+			input: CreateOrderInput{
+				UserID:      1,
+				CoinSymbol:  "BTC",
+				Side:        "BUY",
+				OrderType:   "MARKET",
+				QuoteAmount: "4999",
 			},
 		},
 		{

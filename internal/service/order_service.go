@@ -26,12 +26,13 @@ const (
 )
 
 type CreateOrderInput struct {
-	UserID     uint
-	CoinSymbol string
-	Side       string
-	OrderType  string
-	Price      string
-	Amount     string
+	UserID      uint
+	CoinSymbol  string
+	Side        string
+	OrderType   string
+	Price       string
+	Amount      string
+	QuoteAmount string
 }
 
 type CancelOrderInput struct {
@@ -58,6 +59,12 @@ type CancelOrderResult struct {
 	ReleasedAsset  string
 	ReleasedAmount decimal.Decimal
 	EngineRemoved  bool
+}
+
+type CompleteMarketOrderInput struct {
+	OrderID           uint
+	FilledAmount      decimal.Decimal
+	FilledQuoteAmount decimal.Decimal
 }
 
 func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.WalletRepository, me *matching.MatchingEngine) *OrderService {
@@ -93,15 +100,17 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 
 	if s.MatchingEngine != nil {
 		s.MatchingEngine.OrderCh <- &matching.Order{
-			ID:           order.ID,
-			UserID:       order.UserID,
-			CoinSymbol:   order.CoinSymbol,
-			Side:         order.Side,
-			Price:        order.Price,
-			Amount:       order.Amount,
-			CreatedAt:    order.CreatedAt,
-			OrderType:    order.OrderType,
-			FilledAmount: order.FilledAmount,
+			ID:                order.ID,
+			UserID:            order.UserID,
+			CoinSymbol:        order.CoinSymbol,
+			Side:              order.Side,
+			Price:             order.Price,
+			Amount:            order.Amount,
+			QuoteAmount:       order.QuoteAmount,
+			CreatedAt:         order.CreatedAt,
+			OrderType:         order.OrderType,
+			FilledAmount:      order.FilledAmount,
+			FilledQuoteAmount: order.FilledQuoteAmount,
 		}
 	}
 
@@ -133,6 +142,9 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 		if !isCancellableOrderStatus(order.Status) {
 			return NewConflictErrorf("order status %s cannot be cancelled", order.Status)
 		}
+		if order.OrderType == model.OrderTypeMarket {
+			return NewConflictErrorf("market orders cannot be cancelled")
+		}
 
 		remaining, err := remainingOrderQuantity(order)
 		if err != nil {
@@ -144,7 +156,7 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 			return err
 		}
 
-		if err := orderRepo.UpdateOrderStatus(order.ID, model.OrderStatusCancelled, order.FilledAmount); err != nil {
+		if err := orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusCancelled); err != nil {
 			return err
 		}
 
@@ -174,6 +186,95 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 	}
 
 	return result, nil
+}
+
+func (s *OrderService) CompleteMarketOrder(input CompleteMarketOrderInput) error {
+	if input.OrderID == 0 {
+		return NewValidationErrorf("order_id is required")
+	}
+
+	return s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
+
+		order, err := orderRepo.FindByIDForUpdate(input.OrderID)
+		if err != nil {
+			return err
+		}
+		if order.OrderType != model.OrderTypeMarket {
+			return NewValidationErrorf("order %d is not a market order", order.ID)
+		}
+		if order.Status == model.OrderStatusFilled || order.Status == model.OrderStatusCancelled {
+			return nil
+		}
+		if order.FilledAmount.LessThan(input.FilledAmount) ||
+			order.FilledQuoteAmount.LessThan(input.FilledQuoteAmount) {
+			return NewConflictErrorf("market order %d settlement is not complete", order.ID)
+		}
+
+		switch order.Side {
+		case model.OrderSideBuy:
+			return completeMarketBuyOrder(orderRepo, walletRepo, ledgerRepo, order)
+		case model.OrderSideSell:
+			return completeMarketSellOrder(orderRepo, walletRepo, ledgerRepo, order)
+		default:
+			return NewValidationErrorf("invalid order side")
+		}
+	})
+}
+
+func completeMarketBuyOrder(orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
+	remainingQuote := order.QuoteAmount.Sub(order.FilledQuoteAmount)
+	if remainingQuote.GreaterThan(decimal.Zero) {
+		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
+		if err != nil {
+			return err
+		}
+		update, err := releaseBuyOrderHold(wallet, remainingQuote)
+		if err != nil {
+			return err
+		}
+		if err := walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID, "")
+		if err := ledgerRepo.Create(&entry); err != nil {
+			return err
+		}
+	}
+	if order.FilledQuoteAmount.Equal(order.QuoteAmount) {
+		return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusFilled)
+	}
+	return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusCancelled)
+}
+
+func completeMarketSellOrder(orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
+	remaining, err := remainingMarketSellQuantity(order)
+	if err != nil {
+		return err
+	}
+	if remaining.GreaterThan(decimal.Zero) {
+		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
+		if err != nil {
+			return err
+		}
+		update, err := releaseSellOrderHold(wallet, remaining)
+		if err != nil {
+			return err
+		}
+		if err := walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID, "")
+		if err := ledgerRepo.Create(&entry); err != nil {
+			return err
+		}
+	}
+	if order.FilledAmount.Equal(order.Amount) {
+		return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusFilled)
+	}
+	return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusCancelled)
 }
 
 func (s *OrderService) ListOrders(input ListOrdersInput) ([]model.Order, error) {
@@ -256,28 +357,56 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 		return nil, err
 	}
 
-	price, err := parsePositiveDecimal(input.Price, "price")
-	if err != nil {
-		return nil, err
-	}
+	price := decimal.Zero
+	amount := decimal.Zero
+	quoteAmount := decimal.Zero
 
-	amount, err := parsePositiveDecimal(input.Amount, "amount")
-	if err != nil {
-		return nil, err
-	}
-	if err := validateLimitOrderPolicy(price, amount); err != nil {
-		return nil, err
+	switch orderType {
+	case model.OrderTypeLimit:
+		var err error
+		price, err = parsePositiveDecimal(input.Price, "price")
+		if err != nil {
+			return nil, err
+		}
+		amount, err = parsePositiveDecimal(input.Amount, "amount")
+		if err != nil {
+			return nil, err
+		}
+		if err := validateLimitOrderPolicy(price, amount); err != nil {
+			return nil, err
+		}
+	case model.OrderTypeMarket:
+		var err error
+		switch side {
+		case model.OrderSideBuy:
+			quoteAmount, err = parsePositiveDecimal(input.QuoteAmount, "quote_amount")
+			if err != nil {
+				return nil, err
+			}
+			if err := validateMarketBuyOrderPolicy(quoteAmount); err != nil {
+				return nil, err
+			}
+		case model.OrderSideSell:
+			amount, err = parsePositiveDecimal(input.Amount, "amount")
+			if err != nil {
+				return nil, err
+			}
+		}
+	default:
+		return nil, NewValidationErrorf("invalid order type")
 	}
 
 	return &model.Order{
-		UserID:       input.UserID,
-		CoinSymbol:   coinSymbol,
-		Side:         side,
-		OrderType:    orderType,
-		Price:        price,
-		Amount:       amount,
-		Status:       model.OrderStatusPending,
-		FilledAmount: decimal.Zero,
+		UserID:            input.UserID,
+		CoinSymbol:        coinSymbol,
+		Side:              side,
+		OrderType:         orderType,
+		Price:             price,
+		Amount:            amount,
+		QuoteAmount:       quoteAmount,
+		Status:            model.OrderStatusPending,
+		FilledAmount:      decimal.Zero,
+		FilledQuoteAmount: decimal.Zero,
 	}, nil
 }
 
@@ -292,6 +421,9 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, ledgerRepo *reposi
 			return err
 		}
 		required := order.Price.Mul(order.Amount)
+		if order.OrderType == model.OrderTypeMarket {
+			required = order.QuoteAmount
+		}
 		update, err := applyBuyOrderHold(wallet, required)
 		if err != nil {
 			return err
@@ -380,6 +512,17 @@ func remainingOrderQuantity(order *model.Order) (decimal.Decimal, error) {
 	return remaining, nil
 }
 
+func remainingMarketSellQuantity(order *model.Order) (decimal.Decimal, error) {
+	if order == nil {
+		return decimal.Zero, NewValidationErrorf("order is required")
+	}
+	remaining := order.Amount.Sub(order.FilledAmount)
+	if remaining.IsNegative() {
+		return decimal.Zero, NewConflictErrorf("order filled amount exceeds order amount")
+	}
+	return remaining, nil
+}
+
 func parseOrderSide(value string) (model.OrderSide, error) {
 	switch model.OrderSide(strings.ToUpper(strings.TrimSpace(value))) {
 	case model.OrderSideBuy:
@@ -401,7 +544,7 @@ func parseOrderType(value string) (model.OrderType, error) {
 	case model.OrderTypeLimit:
 		return model.OrderTypeLimit, nil
 	case model.OrderTypeMarket:
-		return "", NewValidationErrorf("market orders are not supported yet")
+		return model.OrderTypeMarket, nil
 	default:
 		return "", NewValidationErrorf("invalid order type")
 	}

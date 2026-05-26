@@ -32,14 +32,16 @@ const (
 )
 
 type Order struct {
-	ID           uint            `gorm:"primaryKey"`
-	UserID       uint            `gorm:"not null"`
-	Amount       decimal.Decimal `gorm:"type:numeric;not null;check:ck_orders_amount_positive,amount > 0"`
-	CoinSymbol   string          `gorm:"not null"`
-	Side         OrderSide       `gorm:"not null"`
-	Status       OrderStatus     `gorm:"not null;default:PENDING"`
-	FilledAmount decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_orders_filled_amount_non_negative,filled_amount >= 0"`
-	CreatedAt    time.Time
-	OrderType    OrderType       `gorm:"not null"`
-	Price        decimal.Decimal `gorm:"type:numeric;not null;check:ck_orders_price_non_negative,price >= 0"`
+	ID                uint            `gorm:"primaryKey"`
+	UserID            uint            `gorm:"not null"`
+	Amount            decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_orders_amount_non_negative,amount >= 0"`
+	QuoteAmount       decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_orders_quote_amount_non_negative,quote_amount >= 0"`
+	CoinSymbol        string          `gorm:"not null"`
+	Side              OrderSide       `gorm:"not null"`
+	Status            OrderStatus     `gorm:"not null;default:PENDING"`
+	FilledAmount      decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_orders_filled_amount_non_negative,filled_amount >= 0"`
+	FilledQuoteAmount decimal.Decimal `gorm:"type:numeric;not null;default:0;check:ck_orders_filled_quote_amount_non_negative,filled_quote_amount >= 0"`
+	CreatedAt         time.Time
+	OrderType         OrderType       `gorm:"not null"`
+	Price             decimal.Decimal `gorm:"type:numeric;not null;check:ck_orders_price_non_negative,price >= 0"`
 }

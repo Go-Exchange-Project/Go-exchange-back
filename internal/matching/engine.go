@@ -18,14 +18,15 @@ var (
 )
 
 type MatchingEngine struct {
-	OrderBook  *OrderBook
-	OrderBooks map[string]*OrderBook
-	OrderCh    chan *Order
-	CancelCh   chan CancelOrderCommand
-	TradeCh    chan *model.Trade
-	SnapshotCh chan OrderBookSnapshot
-	engineID   string
-	tradeSeq   int64
+	OrderBook   *OrderBook
+	OrderBooks  map[string]*OrderBook
+	OrderCh     chan *Order
+	CancelCh    chan CancelOrderCommand
+	TradeCh     chan *model.Trade
+	ExecutionCh chan ExecutionEvent
+	SnapshotCh  chan OrderBookSnapshot
+	engineID    string
+	tradeSeq    int64
 }
 
 const DefaultSnapshotDepth = 30
@@ -45,6 +46,21 @@ type CancelOrderResult struct {
 	Err     error
 }
 
+type ExecutionEvent struct {
+	Trade           *model.Trade
+	MarketOrderDone *MarketOrderDone
+}
+
+type MarketOrderDone struct {
+	OrderID              uint
+	CoinSymbol           string
+	Side                 model.OrderSide
+	FilledAmount         decimal.Decimal
+	FilledQuoteAmount    decimal.Decimal
+	RemainingAmount      decimal.Decimal
+	RemainingQuoteAmount decimal.Decimal
+}
+
 type OrderBookSnapshot struct {
 	CoinSymbol string           `json:"coin_symbol,omitempty"`
 	Asks       []PriceLevelData `json:"asks"`
@@ -59,13 +75,14 @@ type PriceLevelData struct {
 func NewMatchingEngine() *MatchingEngine {
 	defaultBook := NewOrderBook()
 	return &MatchingEngine{
-		OrderBook:  defaultBook,
-		OrderBooks: make(map[string]*OrderBook),
-		OrderCh:    make(chan *Order, 1024),
-		CancelCh:   make(chan CancelOrderCommand, 1024),
-		TradeCh:    make(chan *model.Trade, 1024),
-		SnapshotCh: make(chan OrderBookSnapshot, 256),
-		engineID:   newEngineID(),
+		OrderBook:   defaultBook,
+		OrderBooks:  make(map[string]*OrderBook),
+		OrderCh:     make(chan *Order, 1024),
+		CancelCh:    make(chan CancelOrderCommand, 1024),
+		TradeCh:     make(chan *model.Trade, 1024),
+		ExecutionCh: make(chan ExecutionEvent, 1024),
+		SnapshotCh:  make(chan OrderBookSnapshot, 256),
+		engineID:    newEngineID(),
 	}
 }
 
@@ -160,7 +177,7 @@ func (me *MatchingEngine) GetOrderBook(coinSymbol string) *OrderBook {
 }
 
 func (me *MatchingEngine) Match(order *Order) {
-	if order == nil || !order.Amount.GreaterThan(decimal.Zero) {
+	if order == nil {
 		return
 	}
 
@@ -168,10 +185,29 @@ func (me *MatchingEngine) Match(order *Order) {
 
 	switch order.Side {
 	case model.OrderSideBuy:
-		me.matchBuy(book, order)
+		if order.OrderType == model.OrderTypeMarket {
+			me.matchMarketBuy(book, order)
+		} else {
+			if !order.Amount.GreaterThan(decimal.Zero) {
+				return
+			}
+			me.matchBuy(book, order)
+		}
 	case model.OrderSideSell:
-		me.matchSell(book, order)
+		if !order.Amount.GreaterThan(decimal.Zero) {
+			return
+		}
+		if order.OrderType == model.OrderTypeMarket {
+			me.matchMarketSell(book, order)
+		} else {
+			me.matchSell(book, order)
+		}
 	default:
+		return
+	}
+
+	if order.OrderType == model.OrderTypeMarket {
+		me.emitMarketOrderDone(order)
 		return
 	}
 
@@ -205,7 +241,7 @@ func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
 			book.SellOrders.Delete(sellLevel)
 		}
 
-		me.TradeCh <- me.newTrade(order.CoinSymbol, sellLevel.Price, tradeQty, order.ID, sellOrder.ID)
+		me.emitTrade(me.newTrade(order.CoinSymbol, sellLevel.Price, tradeQty, order.ID, sellOrder.ID))
 	}
 }
 
@@ -234,7 +270,97 @@ func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
 			book.BuyOrders.Delete(buyLevel)
 		}
 
-		me.TradeCh <- me.newTrade(order.CoinSymbol, buyLevel.Price, tradeQty, buyOrder.ID, order.ID)
+		me.emitTrade(me.newTrade(order.CoinSymbol, buyLevel.Price, tradeQty, buyOrder.ID, order.ID))
+	}
+}
+
+func (me *MatchingEngine) matchMarketBuy(book *OrderBook, order *Order) {
+	for order.QuoteAmount.GreaterThan(decimal.Zero) {
+		sellLevel, orderIndex, ok := bestMarketSellOrder(book, order)
+		if !ok {
+			return
+		}
+
+		sellOrder := sellLevel.Orders.At(orderIndex)
+		maxQtyByQuote := order.QuoteAmount.Div(sellLevel.Price)
+		tradeQty := decimal.Min(maxQtyByQuote, sellOrder.Amount)
+		if !tradeQty.GreaterThan(decimal.Zero) {
+			return
+		}
+		executionQuote := sellLevel.Price.Mul(tradeQty)
+
+		order.QuoteAmount = order.QuoteAmount.Sub(executionQuote)
+		order.FilledQuoteAmount = order.FilledQuoteAmount.Add(executionQuote)
+		order.FilledAmount = order.FilledAmount.Add(tradeQty)
+		sellOrder.Amount = sellOrder.Amount.Sub(tradeQty)
+		sellOrder.FilledAmount = sellOrder.FilledAmount.Add(tradeQty)
+
+		if !sellOrder.Amount.GreaterThan(decimal.Zero) {
+			sellLevel.Orders.Remove(orderIndex)
+		}
+		if sellLevel.Orders.Len() == 0 {
+			book.SellOrders.Delete(sellLevel)
+		}
+
+		me.emitTrade(me.newTrade(order.CoinSymbol, sellLevel.Price, tradeQty, order.ID, sellOrder.ID))
+	}
+}
+
+func (me *MatchingEngine) matchMarketSell(book *OrderBook, order *Order) {
+	for order.Amount.GreaterThan(decimal.Zero) {
+		buyLevel, orderIndex, ok := bestMarketBuyOrder(book, order)
+		if !ok {
+			return
+		}
+
+		buyOrder := buyLevel.Orders.At(orderIndex)
+		tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
+		if !tradeQty.GreaterThan(decimal.Zero) {
+			return
+		}
+		executionQuote := buyLevel.Price.Mul(tradeQty)
+
+		order.Amount = order.Amount.Sub(tradeQty)
+		order.FilledAmount = order.FilledAmount.Add(tradeQty)
+		order.FilledQuoteAmount = order.FilledQuoteAmount.Add(executionQuote)
+		buyOrder.Amount = buyOrder.Amount.Sub(tradeQty)
+		buyOrder.FilledAmount = buyOrder.FilledAmount.Add(tradeQty)
+
+		if !buyOrder.Amount.GreaterThan(decimal.Zero) {
+			buyLevel.Orders.Remove(orderIndex)
+		}
+		if buyLevel.Orders.Len() == 0 {
+			book.BuyOrders.Delete(buyLevel)
+		}
+
+		me.emitTrade(me.newTrade(order.CoinSymbol, buyLevel.Price, tradeQty, buyOrder.ID, order.ID))
+	}
+}
+
+func (me *MatchingEngine) emitTrade(trade *model.Trade) {
+	select {
+	case me.TradeCh <- trade:
+	default:
+	}
+	if me.ExecutionCh != nil {
+		me.ExecutionCh <- ExecutionEvent{Trade: trade}
+	}
+}
+
+func (me *MatchingEngine) emitMarketOrderDone(order *Order) {
+	if me.ExecutionCh == nil {
+		return
+	}
+	me.ExecutionCh <- ExecutionEvent{
+		MarketOrderDone: &MarketOrderDone{
+			OrderID:              order.ID,
+			CoinSymbol:           order.CoinSymbol,
+			Side:                 order.Side,
+			FilledAmount:         order.FilledAmount,
+			FilledQuoteAmount:    order.FilledQuoteAmount,
+			RemainingAmount:      order.Amount,
+			RemainingQuoteAmount: order.QuoteAmount,
+		},
 	}
 }
 
@@ -284,6 +410,22 @@ func bestMatchableSellOrder(book *OrderBook, incoming *Order) (*PriceLevel, int,
 	return matchLevel, matchIndex, matchLevel != nil
 }
 
+func bestMarketSellOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, bool) {
+	var matchLevel *PriceLevel
+	matchIndex := -1
+
+	book.SellOrders.Ascend(func(level *PriceLevel) bool {
+		if index := firstNonSelfOrderIndex(level, incoming); index >= 0 {
+			matchLevel = level
+			matchIndex = index
+			return false
+		}
+		return true
+	})
+
+	return matchLevel, matchIndex, matchLevel != nil
+}
+
 func bestMatchableBuyOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, bool) {
 	var matchLevel *PriceLevel
 	matchIndex := -1
@@ -292,6 +434,22 @@ func bestMatchableBuyOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, 
 		if level.Price.LessThan(incoming.Price) {
 			return false
 		}
+		if index := firstNonSelfOrderIndex(level, incoming); index >= 0 {
+			matchLevel = level
+			matchIndex = index
+			return false
+		}
+		return true
+	})
+
+	return matchLevel, matchIndex, matchLevel != nil
+}
+
+func bestMarketBuyOrder(book *OrderBook, incoming *Order) (*PriceLevel, int, bool) {
+	var matchLevel *PriceLevel
+	matchIndex := -1
+
+	book.BuyOrders.Descend(func(level *PriceLevel) bool {
 		if index := firstNonSelfOrderIndex(level, incoming); index >= 0 {
 			matchLevel = level
 			matchIndex = index

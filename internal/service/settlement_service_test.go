@@ -17,10 +17,11 @@ func TestApplyTradeFillAccumulatesFilledAmount(t *testing.T) {
 		FilledAmount: decimal.NewFromInt(3),
 	}
 
-	filledAmount, status, err := applyTradeFill(order, decimal.NewFromInt(4))
+	filledAmount, filledQuoteAmount, status, err := applyTradeFill(order, decimal.NewFromInt(4), decimal.NewFromInt(20000))
 
 	require.NoError(t, err)
 	assert.Equal(t, decimal.NewFromInt(7), filledAmount)
+	assert.Equal(t, decimal.NewFromInt(20000), filledQuoteAmount)
 	assert.Equal(t, model.OrderStatusPartial, status)
 }
 
@@ -31,7 +32,7 @@ func TestApplyTradeFillReturnsFilledWhenAmountComplete(t *testing.T) {
 		FilledAmount: decimal.NewFromInt(7),
 	}
 
-	filledAmount, status, err := applyTradeFill(order, decimal.NewFromInt(3))
+	filledAmount, _, status, err := applyTradeFill(order, decimal.NewFromInt(3), decimal.NewFromInt(15000))
 
 	require.NoError(t, err)
 	assert.Equal(t, decimal.NewFromInt(10), filledAmount)
@@ -45,7 +46,7 @@ func TestApplyTradeFillRejectsOverfill(t *testing.T) {
 		FilledAmount: decimal.NewFromInt(9),
 	}
 
-	_, _, err := applyTradeFill(order, decimal.NewFromInt(2))
+	_, _, _, err := applyTradeFill(order, decimal.NewFromInt(2), decimal.NewFromInt(10000))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "order 42")
@@ -140,8 +141,24 @@ func TestReservedQuoteAmountUsesBuyOrderLimitPrice(t *testing.T) {
 	buyOrder := &model.Order{
 		Price: decimal.NewFromInt(60000),
 	}
+	trade := &model.Trade{
+		Price:    decimal.NewFromInt(50000),
+		Quantity: decimal.NewFromInt(5),
+	}
 
-	assert.Equal(t, decimal.NewFromInt(300000), reservedQuoteAmount(buyOrder, decimal.NewFromInt(5)))
+	assert.Equal(t, decimal.NewFromInt(300000), reservedQuoteAmount(buyOrder, trade))
+}
+
+func TestReservedQuoteAmountUsesExecutionForMarketBuy(t *testing.T) {
+	buyOrder := &model.Order{
+		OrderType: model.OrderTypeMarket,
+	}
+	trade := &model.Trade{
+		Price:    decimal.NewFromInt(50000),
+		Quantity: decimal.NewFromInt(5),
+	}
+
+	assert.Equal(t, decimal.NewFromInt(250000), reservedQuoteAmount(buyOrder, trade))
 }
 
 func TestDeterministicTradeIdempotencyKeyIsStableForSamePayload(t *testing.T) {

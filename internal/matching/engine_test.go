@@ -53,6 +53,18 @@ func requireNextTrade(t *testing.T, me *MatchingEngine) *model.Trade {
 	}
 }
 
+func requireNextExecutionEvent(t *testing.T, me *MatchingEngine) ExecutionEvent {
+	t.Helper()
+
+	select {
+	case event := <-me.ExecutionCh:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for execution event")
+		return ExecutionEvent{}
+	}
+}
+
 func assertNoTrade(t *testing.T, me *MatchingEngine) {
 	t.Helper()
 
@@ -299,6 +311,95 @@ func TestMatch_FilledOrdersAndEmptyPriceLevelsAreRemoved(t *testing.T) {
 	assert.Equal(t, decimal.NewFromInt(1), trade.Quantity)
 	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
 	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
+}
+
+func TestMarketBuyConsumesAsksByQuoteBudgetAndDoesNotRest(t *testing.T) {
+	me := NewMatchingEngine()
+
+	me.Match(testUserOrder(1, 20, "BTC", model.OrderSideSell, 5000, 1))
+	me.Match(testUserOrder(2, 30, "BTC", model.OrderSideSell, 7000, 2))
+	me.Match(&Order{
+		ID:          3,
+		UserID:      10,
+		CoinSymbol:  "BTC",
+		Side:        model.OrderSideBuy,
+		OrderType:   model.OrderTypeMarket,
+		QuoteAmount: decimal.NewFromInt(12000),
+	})
+
+	firstTrade := requireNextTrade(t, me)
+	secondTrade := requireNextTrade(t, me)
+	firstEvent := requireNextExecutionEvent(t, me)
+	secondEvent := requireNextExecutionEvent(t, me)
+	doneEvent := requireNextExecutionEvent(t, me)
+
+	assert.Equal(t, uint(1), firstTrade.SellOrderID)
+	assert.Equal(t, decimal.NewFromInt(5000), firstTrade.Price)
+	assert.Equal(t, decimal.NewFromInt(1), firstTrade.Quantity)
+	assert.Equal(t, uint(2), secondTrade.SellOrderID)
+	assert.Equal(t, decimal.NewFromInt(7000), secondTrade.Price)
+	assert.True(t, secondTrade.Quantity.Equal(decimal.NewFromInt(1)))
+	require.NotNil(t, firstEvent.Trade)
+	require.NotNil(t, secondEvent.Trade)
+	require.NotNil(t, doneEvent.MarketOrderDone)
+	assert.True(t, doneEvent.MarketOrderDone.RemainingQuoteAmount.IsZero())
+	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+	sellLevel, ok := me.GetOrderBook("BTC").SellOrders.Min()
+	require.True(t, ok)
+	assert.True(t, sellLevel.Orders.Front().Amount.Equal(decimal.NewFromInt(1)))
+}
+
+func TestMarketBuyWithNoLiquidityDoesNotRest(t *testing.T) {
+	me := NewMatchingEngine()
+
+	me.Match(&Order{
+		ID:          3,
+		UserID:      10,
+		CoinSymbol:  "BTC",
+		Side:        model.OrderSideBuy,
+		OrderType:   model.OrderTypeMarket,
+		QuoteAmount: decimal.NewFromInt(12000),
+	})
+
+	doneEvent := requireNextExecutionEvent(t, me)
+
+	require.NotNil(t, doneEvent.MarketOrderDone)
+	assert.Equal(t, decimal.NewFromInt(12000), doneEvent.MarketOrderDone.RemainingQuoteAmount)
+	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+}
+
+func TestMarketSellConsumesHighestBidsAndDoesNotRest(t *testing.T) {
+	me := NewMatchingEngine()
+
+	me.Match(testUserOrder(1, 20, "BTC", model.OrderSideBuy, 7000, 1))
+	me.Match(testUserOrder(2, 30, "BTC", model.OrderSideBuy, 5000, 2))
+	me.Match(&Order{
+		ID:         3,
+		UserID:     10,
+		CoinSymbol: "BTC",
+		Side:       model.OrderSideSell,
+		OrderType:  model.OrderTypeMarket,
+		Amount:     decimal.NewFromInt(2),
+	})
+
+	firstTrade := requireNextTrade(t, me)
+	secondTrade := requireNextTrade(t, me)
+	requireNextExecutionEvent(t, me)
+	requireNextExecutionEvent(t, me)
+	doneEvent := requireNextExecutionEvent(t, me)
+
+	assert.Equal(t, uint(1), firstTrade.BuyOrderID)
+	assert.Equal(t, decimal.NewFromInt(7000), firstTrade.Price)
+	assert.Equal(t, decimal.NewFromInt(1), firstTrade.Quantity)
+	assert.Equal(t, uint(2), secondTrade.BuyOrderID)
+	assert.Equal(t, decimal.NewFromInt(5000), secondTrade.Price)
+	assert.Equal(t, decimal.NewFromInt(1), secondTrade.Quantity)
+	require.NotNil(t, doneEvent.MarketOrderDone)
+	assert.True(t, doneEvent.MarketOrderDone.RemainingAmount.IsZero())
+	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
+	buyLevel, ok := me.GetOrderBook("BTC").BuyOrders.Max()
+	require.True(t, ok)
+	assert.Equal(t, decimal.NewFromInt(1), buyLevel.Orders.Front().Amount)
 }
 
 func TestGetOrderBookSnapshot_AsksAscendingBidsDescending(t *testing.T) {

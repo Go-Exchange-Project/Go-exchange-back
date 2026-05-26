@@ -302,7 +302,7 @@ func TestIntegrationTradePositivePriceAndQuantityConstraints(t *testing.T) {
 	require.Error(t, db.Create(&negativeQuantityTrade).Error)
 }
 
-func TestIntegrationOrderPositiveAmountConstraint(t *testing.T) {
+func TestIntegrationLimitOrderPositiveAmountConstraint(t *testing.T) {
 	db := openRepositoryIntegrationDB(t)
 	userID := repositoryTestUserID(7)
 	defer cleanupRepositoryUsers(t, db, userID)

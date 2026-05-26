@@ -25,8 +25,9 @@ type CreateOrderRequest struct {
 	CoinSymbol string `json:"coin_symbol" binding:"required"`
 	Side       string `json:"side" binding:"required"`
 	OrderType  string `json:"order_type"`
-	Price      string `json:"price" binding:"required"`
-	Amount     string `json:"amount" binding:"required"`
+	Price      string `json:"price"`
+	Amount     string `json:"amount"`
+	QuoteAmount string `json:"quote_amount"`
 }
 
 func NewOrderHandler(service *service.OrderService) *OrderHandler {
@@ -53,6 +54,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		OrderType:  req.OrderType,
 		Price:      req.Price,
 		Amount:     req.Amount,
+		QuoteAmount: req.QuoteAmount,
 	})
 	if err != nil {
 		writeServiceError(c, err)
@@ -201,7 +203,9 @@ type OrderResponse struct {
 	Status       model.OrderStatus `json:"status"`
 	Price        string            `json:"price"`
 	Amount       string            `json:"amount"`
+	QuoteAmount  string            `json:"quote_amount"`
 	FilledAmount string            `json:"filled_amount"`
+	FilledQuoteAmount string       `json:"filled_quote_amount"`
 	Remaining    string            `json:"remaining"`
 	CreatedAt    time.Time         `json:"created_at"`
 }
@@ -247,7 +251,9 @@ func orderResponse(order model.Order) OrderResponse {
 		Status:       order.Status,
 		Price:        order.Price.String(),
 		Amount:       order.Amount.String(),
+		QuoteAmount:  order.QuoteAmount.String(),
 		FilledAmount: order.FilledAmount.String(),
+		FilledQuoteAmount: order.FilledQuoteAmount.String(),
 		Remaining:    remaining.String(),
 		CreatedAt:    order.CreatedAt,
 	}

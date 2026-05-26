@@ -118,11 +118,12 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 			return err
 		}
 
-		buyFilled, buyStatus, err := applyTradeFill(buyOrder, trade.Quantity)
+		executionQuote := tradeQuoteAmount(trade)
+		buyFilled, buyFilledQuote, buyStatus, err := applyTradeFill(buyOrder, trade.Quantity, executionQuote)
 		if err != nil {
 			return fmt.Errorf("buy order fill: %w", err)
 		}
-		sellFilled, sellStatus, err := applyTradeFill(sellOrder, trade.Quantity)
+		sellFilled, sellFilledQuote, sellStatus, err := applyTradeFill(sellOrder, trade.Quantity, executionQuote)
 		if err != nil {
 			return fmt.Errorf("sell order fill: %w", err)
 		}
@@ -144,8 +145,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 			return err
 		}
 
-		executionQuote := tradeQuoteAmount(trade)
-		reservedQuote := reservedQuoteAmount(buyOrder, trade.Quantity)
+		reservedQuote := reservedQuoteAmount(buyOrder, trade)
 		buyerCoinNet, err := amountAfterFee(trade.Quantity, trade.BuyerFee, "buyer")
 		if err != nil {
 			return err
@@ -171,10 +171,10 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 			return err
 		}
 
-		if err := orderRepo.UpdateOrderFill(buyOrder.ID, buyFilled, buyStatus); err != nil {
+		if err := orderRepo.UpdateOrderExecution(buyOrder.ID, buyFilled, buyFilledQuote, buyStatus); err != nil {
 			return err
 		}
-		if err := orderRepo.UpdateOrderFill(sellOrder.ID, sellFilled, sellStatus); err != nil {
+		if err := orderRepo.UpdateOrderExecution(sellOrder.ID, sellFilled, sellFilledQuote, sellStatus); err != nil {
 			return err
 		}
 
@@ -207,22 +207,35 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 	return result, err
 }
 
-func applyTradeFill(order *model.Order, tradeQuantity decimal.Decimal) (decimal.Decimal, model.OrderStatus, error) {
+func applyTradeFill(order *model.Order, tradeQuantity decimal.Decimal, tradeQuoteAmount decimal.Decimal) (decimal.Decimal, decimal.Decimal, model.OrderStatus, error) {
 	if order == nil {
-		return decimal.Zero, "", fmt.Errorf("order is required")
+		return decimal.Zero, decimal.Zero, "", fmt.Errorf("order is required")
 	}
 	if !tradeQuantity.GreaterThan(decimal.Zero) {
-		return decimal.Zero, "", fmt.Errorf("trade quantity must be greater than zero")
+		return decimal.Zero, decimal.Zero, "", fmt.Errorf("trade quantity must be greater than zero")
+	}
+	if !tradeQuoteAmount.GreaterThan(decimal.Zero) {
+		return decimal.Zero, decimal.Zero, "", fmt.Errorf("trade quote amount must be greater than zero")
 	}
 
 	filledAmount := order.FilledAmount.Add(tradeQuantity)
+	filledQuoteAmount := order.FilledQuoteAmount.Add(tradeQuoteAmount)
+	if order.OrderType == model.OrderTypeMarket && order.Side == model.OrderSideBuy {
+		if filledQuoteAmount.GreaterThan(order.QuoteAmount) {
+			return decimal.Zero, decimal.Zero, "", fmt.Errorf("order %d filled quote amount %s exceeds quote amount %s", order.ID, filledQuoteAmount.String(), order.QuoteAmount.String())
+		}
+		if filledQuoteAmount.Equal(order.QuoteAmount) {
+			return filledAmount, filledQuoteAmount, model.OrderStatusFilled, nil
+		}
+		return filledAmount, filledQuoteAmount, model.OrderStatusPartial, nil
+	}
 	if filledAmount.GreaterThan(order.Amount) {
-		return decimal.Zero, "", fmt.Errorf("order %d filled amount %s exceeds order amount %s", order.ID, filledAmount.String(), order.Amount.String())
+		return decimal.Zero, decimal.Zero, "", fmt.Errorf("order %d filled amount %s exceeds order amount %s", order.ID, filledAmount.String(), order.Amount.String())
 	}
 	if filledAmount.Equal(order.Amount) {
-		return filledAmount, model.OrderStatusFilled, nil
+		return filledAmount, filledQuoteAmount, model.OrderStatusFilled, nil
 	}
-	return filledAmount, model.OrderStatusPartial, nil
+	return filledAmount, filledQuoteAmount, model.OrderStatusPartial, nil
 }
 
 func validateOrderStatusForSettlement(order *model.Order, role string) error {
@@ -272,8 +285,11 @@ func tradeQuoteAmount(trade *model.Trade) decimal.Decimal {
 	return trade.Price.Mul(trade.Quantity)
 }
 
-func reservedQuoteAmount(buyOrder *model.Order, quantity decimal.Decimal) decimal.Decimal {
-	return buyOrder.Price.Mul(quantity)
+func reservedQuoteAmount(buyOrder *model.Order, trade *model.Trade) decimal.Decimal {
+	if buyOrder.OrderType == model.OrderTypeMarket {
+		return tradeQuoteAmount(trade)
+	}
+	return buyOrder.Price.Mul(trade.Quantity)
 }
 
 func prepareTradeForSettlement(trade *model.Trade) error {

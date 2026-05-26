@@ -64,8 +64,8 @@ func main() {
 	orderHandler := handler.NewOrderHandler(orderService)
 
 	go func() {
-		for trade := range me.TradeCh {
-			processTradeSettlement(trade, settlementService, failedSettlementService, func(msg []byte) {
+		for event := range me.ExecutionCh {
+			processExecutionEvent(event, settlementService, failedSettlementService, orderService, func(msg []byte) {
 				hub.Broadcast <- msg
 			}, log.Default())
 		}
@@ -165,6 +165,47 @@ type tradeSettler interface {
 
 type settlementFailureRecorder interface {
 	RecordFailure(trade *model.Trade, settlementErr error) (*model.FailedSettlement, error)
+}
+
+type marketOrderCompleter interface {
+	CompleteMarketOrder(input service.CompleteMarketOrderInput) error
+}
+
+func processExecutionEvent(
+	event matching.ExecutionEvent,
+	settler tradeSettler,
+	failureRecorder settlementFailureRecorder,
+	marketCompleter marketOrderCompleter,
+	broadcast func([]byte),
+	logger *log.Logger,
+) {
+	if event.Trade != nil {
+		processTradeSettlement(event.Trade, settler, failureRecorder, broadcast, logger)
+		return
+	}
+	if event.MarketOrderDone != nil {
+		processMarketOrderDone(event.MarketOrderDone, marketCompleter, logger)
+	}
+}
+
+func processMarketOrderDone(
+	done *matching.MarketOrderDone,
+	completer marketOrderCompleter,
+	logger *log.Logger,
+) {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if completer == nil || done == nil {
+		return
+	}
+	if err := completer.CompleteMarketOrder(service.CompleteMarketOrderInput{
+		OrderID:           done.OrderID,
+		FilledAmount:      done.FilledAmount,
+		FilledQuoteAmount: done.FilledQuoteAmount,
+	}); err != nil {
+		logger.Printf("complete market order failed: %v", err)
+	}
 }
 
 func processTradeSettlement(

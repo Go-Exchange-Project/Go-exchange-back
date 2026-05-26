@@ -36,9 +36,14 @@ func (r *OrderRepository) UpdateOrderStatus(orderID uint, status model.OrderStat
 }
 
 func (r *OrderRepository) UpdateOrderFill(orderID uint, filledAmount decimal.Decimal, status model.OrderStatus) error {
+	return r.UpdateOrderExecution(orderID, filledAmount, decimal.Zero, status)
+}
+
+func (r *OrderRepository) UpdateOrderExecution(orderID uint, filledAmount decimal.Decimal, filledQuoteAmount decimal.Decimal, status model.OrderStatus) error {
 	result := r.DB.Model(&model.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
-		"status":        status,
-		"filled_amount": filledAmount,
+		"status":              status,
+		"filled_amount":       filledAmount,
+		"filled_quote_amount": filledQuoteAmount,
 	})
 	if result.Error != nil {
 		return result.Error
@@ -88,6 +93,7 @@ func (r *OrderRepository) FindOpenOrdersForBootstrap() ([]model.Order, error) {
 	var orders []model.Order
 	err := r.DB.
 		Where("status IN ?", []model.OrderStatus{model.OrderStatusPending, model.OrderStatusPartial}).
+		Where("order_type = ?", model.OrderTypeLimit).
 		Where("amount > filled_amount").
 		Order("created_at ASC").
 		Order("id ASC").

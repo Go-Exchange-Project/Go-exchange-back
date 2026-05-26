@@ -86,6 +86,13 @@ func TestValidateLimitOrderPolicyRejectsSmallNotional(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least 5000 KRW")
 }
 
+func TestValidateMarketBuyOrderPolicyRejectsSmallQuoteAmount(t *testing.T) {
+	err := validateMarketBuyOrderPolicy(decimal.RequireFromString("4999.999"))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least 5000 KRW")
+}
+
 func TestBuildOrderRejectsInvalidLimitOrderPolicy(t *testing.T) {
 	tests := []struct {
 		name   string

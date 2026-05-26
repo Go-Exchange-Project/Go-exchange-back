@@ -53,6 +53,13 @@ func validateLimitOrderPolicy(price decimal.Decimal, amount decimal.Decimal) err
 	return nil
 }
 
+func validateMarketBuyOrderPolicy(quoteAmount decimal.Decimal) error {
+	if quoteAmount.LessThan(minKRWOrderNotional) {
+		return NewValidationErrorf("market buy quote_amount must be at least %s KRW", minKRWOrderNotional.String())
+	}
+	return nil
+}
+
 func isValidKRWTickPrice(price decimal.Decimal) bool {
 	tick := krwTickSize(price)
 	return price.Mod(tick).IsZero()
