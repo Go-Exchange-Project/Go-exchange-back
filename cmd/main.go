@@ -48,6 +48,11 @@ func main() {
 	hub := ws.NewHub()
 	go hub.Run()
 
+	marketRulesRegistry, err := service.NewMarketRulesRegistryFromEnv()
+	if err != nil {
+		log.Fatal("market rules registry failed: ", err)
+	}
+
 	orderRepo := repository.NewOrderRepository(config.DB)
 	walletRepo := repository.NewWalletRepository(config.DB)
 	userRepo := repository.NewUserRepository(config.DB)
@@ -57,10 +62,11 @@ func main() {
 	}
 	authService := service.NewAuthService(userRepo, tokenManager)
 	orderService := service.NewOrderService(orderRepo, walletRepo, me)
+	orderService.MarketRules = marketRulesRegistry
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
 	authHandler := handler.NewAuthHandler(authService)
-	marketHandler := handler.NewMarketHandler()
+	marketHandler := handler.NewMarketHandler(marketRulesRegistry)
 	orderHandler := handler.NewOrderHandler(orderService)
 
 	go func() {

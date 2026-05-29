@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -156,6 +158,164 @@ func TestMarketRulesRegistryReturnsDefensiveTickRules(t *testing.T) {
 	*rules.TickRules[0].UpperBound = decimal.NewFromInt(999)
 
 	assert.True(t, registry.KRWTickSize(decimal.RequireFromString("0.5")).Equal(decimal.RequireFromString("0.00001")))
+}
+
+func TestNewMarketRulesRegistryFromConfig(t *testing.T) {
+	registry, err := NewMarketRulesRegistryFromConfig(MarketRulesConfig{
+		MinOrderNotional:        "10000",
+		FeeRate:                 "0.001",
+		DefaultMarketStatus:     "ACTIVE",
+		DefaultMinOrderQuantity: "0.01",
+		DefaultBaseQuantityStep: "0.01",
+		Markets: map[string]MarketRulesMarketConfig{
+			"abc": {
+				TradingStatus:    "HALTED",
+				MinOrderQuantity: "5",
+				BaseQuantityStep: "5",
+			},
+			"def": {},
+		},
+		TickRules: []MarketRulesTickConfig{
+			{UpperBound: "1000", TickSize: "1"},
+		},
+		MaxTickSize: "10",
+	})
+
+	require.NoError(t, err)
+	abcRules, err := registry.KRWMarketRules("abc")
+	require.NoError(t, err)
+	assert.Equal(t, "ABC", abcRules.CoinSymbol)
+	assert.Equal(t, MarketStatusHalted, abcRules.TradingStatus)
+	assert.False(t, abcRules.TradingEnabled)
+	assert.True(t, abcRules.MinOrderNotional.Equal(decimal.NewFromInt(10000)))
+	assert.True(t, abcRules.FeeRate.Equal(decimal.RequireFromString("0.001")))
+	assert.True(t, abcRules.MinOrderQuantity.Equal(decimal.NewFromInt(5)))
+	assert.True(t, abcRules.BaseQuantityStep.Equal(decimal.NewFromInt(5)))
+	assert.True(t, registry.KRWTickSize(decimal.NewFromInt(1000)).Equal(decimal.NewFromInt(10)))
+
+	defRules, err := registry.KRWMarketRules("def")
+	require.NoError(t, err)
+	assert.Equal(t, MarketStatusActive, defRules.TradingStatus)
+	assert.True(t, defRules.MinOrderQuantity.Equal(decimal.RequireFromString("0.01")))
+	assert.True(t, defRules.BaseQuantityStep.Equal(decimal.RequireFromString("0.01")))
+}
+
+func TestNewMarketRulesRegistryFromConfigRejectsInvalidConfig(t *testing.T) {
+	_, err := NewMarketRulesRegistryFromConfig(MarketRulesConfig{
+		MinOrderNotional:        "5000",
+		FeeRate:                 "0.0005",
+		DefaultMarketStatus:     "BROKEN",
+		DefaultMinOrderQuantity: "0.00000001",
+		DefaultBaseQuantityStep: "0.00000001",
+		TickRules:               []MarketRulesTickConfig{{UpperBound: "1", TickSize: "0.00001"}},
+		MaxTickSize:             "1000",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid default_market_status")
+}
+
+func TestNewMarketRulesRegistryFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "market_rules.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+		"min_order_notional": "7000",
+		"fee_rate": "0.0007",
+		"default_market_status": "ACTIVE",
+		"default_min_order_quantity": "0.001",
+		"default_base_quantity_step": "0.001",
+		"markets": {
+			"abc": {
+				"trading_status": "HALTED",
+				"min_order_quantity": "2",
+				"base_quantity_step": "2"
+			}
+		},
+		"tick_rules": [{ "upper_bound": "1000", "tick_size": "1" }],
+		"max_tick_size": "10"
+	}`), 0o600))
+
+	registry, err := NewMarketRulesRegistryFromFile(path)
+
+	require.NoError(t, err)
+	rules, err := registry.KRWMarketRules("abc")
+	require.NoError(t, err)
+	assert.Equal(t, MarketStatusHalted, rules.TradingStatus)
+	assert.True(t, rules.MinOrderNotional.Equal(decimal.NewFromInt(7000)))
+	assert.True(t, rules.MinOrderQuantity.Equal(decimal.NewFromInt(2)))
+}
+
+func TestNewMarketRulesRegistryFromEnv(t *testing.T) {
+	path := writeMarketRulesConfigFile(t, `{
+		"min_order_notional": "8000",
+		"fee_rate": "0.0008",
+		"default_market_status": "ACTIVE",
+		"default_min_order_quantity": "0.01",
+		"default_base_quantity_step": "0.01",
+		"markets": {
+			"abc": { "trading_status": "HALTED" }
+		},
+		"tick_rules": [{ "upper_bound": "1000", "tick_size": "1" }],
+		"max_tick_size": "10"
+	}`)
+	t.Setenv(EnvMarketRulesPath, path)
+
+	registry, err := NewMarketRulesRegistryFromEnv()
+
+	require.NoError(t, err)
+	rules, err := registry.KRWMarketRules("abc")
+	require.NoError(t, err)
+	assert.Equal(t, MarketStatusHalted, rules.TradingStatus)
+	assert.True(t, rules.MinOrderNotional.Equal(decimal.NewFromInt(8000)))
+	assert.True(t, rules.MinOrderQuantity.Equal(decimal.RequireFromString("0.01")))
+}
+
+func TestCommittedMarketRulesConfigFileLoads(t *testing.T) {
+	registry, err := NewMarketRulesRegistryFromFile(filepath.Join("..", "..", "config", "market_rules.json"))
+
+	require.NoError(t, err)
+	xrpRules, err := registry.KRWMarketRules("xrp")
+	require.NoError(t, err)
+	assert.Equal(t, MarketStatusActive, xrpRules.TradingStatus)
+	assert.True(t, xrpRules.MinOrderQuantity.Equal(decimal.NewFromInt(1)))
+	haltRules, err := registry.KRWMarketRules("halt")
+	require.NoError(t, err)
+	assert.Equal(t, MarketStatusHalted, haltRules.TradingStatus)
+}
+
+func TestBuildOrderWithRegistryUsesInjectedMarketRules(t *testing.T) {
+	registry, err := NewMarketRulesRegistryFromConfig(MarketRulesConfig{
+		MinOrderNotional:        "5000",
+		FeeRate:                 "0.0005",
+		DefaultMarketStatus:     "ACTIVE",
+		DefaultMinOrderQuantity: "0.00000001",
+		DefaultBaseQuantityStep: "0.00000001",
+		Markets: map[string]MarketRulesMarketConfig{
+			"abc": {TradingStatus: "HALTED"},
+		},
+		TickRules:   []MarketRulesTickConfig{{UpperBound: "1000", TickSize: "1"}},
+		MaxTickSize: "10",
+	})
+	require.NoError(t, err)
+
+	order, err := BuildOrderWithRegistry(CreateOrderInput{
+		UserID:     1,
+		CoinSymbol: "ABC",
+		Side:       "BUY",
+		OrderType:  "LIMIT",
+		Price:      "5000",
+		Amount:     "1",
+	}, registry)
+
+	require.Error(t, err)
+	assert.Nil(t, order)
+	assert.Contains(t, err.Error(), "ABC market is not accepting orders")
+}
+
+func writeMarketRulesConfigFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "market_rules.json")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return path
 }
 
 func TestKRWMarketRulesRejectsMissingCoinSymbol(t *testing.T) {

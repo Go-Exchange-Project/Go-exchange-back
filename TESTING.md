@@ -28,6 +28,7 @@ Database configuration priority:
 | `GOEXCHANGE_DB_SSLMODE` | `disable` | PostgreSQL SSL mode. Use `require` or stronger settings where appropriate outside local development. |
 | `GOEXCHANGE_DB_CONNECT_TIMEOUT` | `5` | PostgreSQL connection timeout in seconds. |
 | `GOEXCHANGE_CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated browser origins allowed to call the HTTP API. Add your LAN Vite URL, for example `http://192.168.219.100:3000`, when opening the frontend through a network address. |
+| `GOEXCHANGE_MARKET_RULES_PATH` | `config/market_rules.json` | JSON file loaded at startup for market status, quantity rules, minimum notional, fee rate, and KRW tick sizes. |
 
 Local development example:
 
@@ -109,6 +110,31 @@ Read API query parameters:
 - `GET /trades?coin_symbol=BTC&limit=50`
 
 Decimal values in read responses are returned as JSON strings so clients do not lose precision by parsing them as floating point numbers.
+
+## Market Rules Configuration
+
+Market rules are loaded from `config/market_rules.json` by default. Set `GOEXCHANGE_MARKET_RULES_PATH` to point at another JSON file for a different local or deployment profile.
+
+The file controls:
+
+- `min_order_notional`: minimum quote notional for limit orders and market buys.
+- `fee_rate`: default trading fee rate returned by the market rules API.
+- `default_market_status`: fallback status for markets not listed under `markets`.
+- `default_min_order_quantity` and `default_base_quantity_step`: fallback base asset quantity policy.
+- `markets`: per-coin overrides for `trading_status`, `min_order_quantity`, and `base_quantity_step`.
+- `tick_rules` and `max_tick_size`: KRW price tick size policy.
+
+Example market entry:
+
+```json
+"XRP": {
+  "trading_status": "ACTIVE",
+  "min_order_quantity": "1",
+  "base_quantity_step": "1"
+}
+```
+
+`trading_status` currently supports `ACTIVE` and `HALTED`. `HALTED` markets are returned by `GET /markets/rules` with `trading_enabled=false`, and new buy/sell orders are rejected with a conflict error. Existing order cancellation remains allowed so users can release locked funds.
 
 ## Wallet Ledger Entries
 

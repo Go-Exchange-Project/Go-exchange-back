@@ -8,6 +8,7 @@ import (
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,6 +89,43 @@ func TestMarketHandlerGetRulesUsesCoinSpecificTradingStatus(t *testing.T) {
 	assert.Equal(t, "HALT", body.CoinSymbol)
 	assert.False(t, body.TradingEnabled)
 	assert.Equal(t, "HALTED", body.TradingStatus)
+}
+
+func TestMarketHandlerGetRulesUsesInjectedRegistry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	registry, err := service.NewMarketRulesRegistryFromConfig(service.MarketRulesConfig{
+		MinOrderNotional:        "7000",
+		FeeRate:                 "0.0007",
+		DefaultMarketStatus:     "ACTIVE",
+		DefaultMinOrderQuantity: "0.001",
+		DefaultBaseQuantityStep: "0.001",
+		Markets: map[string]service.MarketRulesMarketConfig{
+			"abc": {
+				TradingStatus:    "HALTED",
+				MinOrderQuantity: "2",
+				BaseQuantityStep: "2",
+			},
+		},
+		TickRules:   []service.MarketRulesTickConfig{{UpperBound: "1000", TickSize: "1"}},
+		MaxTickSize: "10",
+	})
+	require.NoError(t, err)
+	router := gin.New()
+	router.GET("/markets/rules", NewMarketHandler(registry).GetRules)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/markets/rules?coin_symbol=abc", nil)
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var body MarketRulesResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "ABC", body.CoinSymbol)
+	assert.False(t, body.TradingEnabled)
+	assert.Equal(t, "HALTED", body.TradingStatus)
+	assert.Equal(t, decimal.NewFromInt(7000).String(), body.MinOrderNotional)
+	assert.Equal(t, "2", body.MinOrderQuantity)
+	assert.Equal(t, "2", body.BaseQuantityStep)
 }
 
 func TestMarketHandlerRejectsMissingCoinSymbol(t *testing.T) {

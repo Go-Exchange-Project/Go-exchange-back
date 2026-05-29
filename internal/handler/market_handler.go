@@ -7,7 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type MarketHandler struct{}
+type MarketHandler struct {
+	MarketRules *service.MarketRulesRegistry
+}
 
 type MarketRulesResponse struct {
 	CoinSymbol       string                   `json:"coin_symbol"`
@@ -26,18 +28,32 @@ type MarketTickRuleResponse struct {
 	TickSize   string  `json:"tick_size"`
 }
 
-func NewMarketHandler() *MarketHandler {
-	return &MarketHandler{}
+func NewMarketHandler(registry ...*service.MarketRulesRegistry) *MarketHandler {
+	var marketRules *service.MarketRulesRegistry
+	if len(registry) > 0 {
+		marketRules = registry[0]
+	}
+	if marketRules == nil {
+		marketRules = service.NewDefaultMarketRulesRegistry()
+	}
+	return &MarketHandler{MarketRules: marketRules}
 }
 
 func (h *MarketHandler) GetRules(c *gin.Context) {
-	rules, err := service.KRWMarketRules(c.Query("coin_symbol"))
+	rules, err := h.marketRulesRegistry().KRWMarketRules(c.Query("coin_symbol"))
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, marketRulesResponse(rules))
+}
+
+func (h *MarketHandler) marketRulesRegistry() *service.MarketRulesRegistry {
+	if h != nil && h.MarketRules != nil {
+		return h.MarketRules
+	}
+	return service.NewDefaultMarketRulesRegistry()
 }
 
 func marketRulesResponse(rules service.MarketRules) MarketRulesResponse {

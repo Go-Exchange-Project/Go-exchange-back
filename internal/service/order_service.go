@@ -18,6 +18,7 @@ type OrderService struct {
 	MatchingEngine   *matching.MatchingEngine
 	TradeRepository  *repository.TradeRepository
 	LedgerRepository *repository.LedgerRepository
+	MarketRules      *MarketRulesRegistry
 }
 
 const (
@@ -72,6 +73,7 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 		OrderRepository:  repo,
 		WalletRepository: walletRepo,
 		MatchingEngine:   me,
+		MarketRules:      defaultMarketRulesRegistry,
 	}
 	if repo != nil && repo.DB != nil {
 		service.TradeRepository = repository.NewTradeRepository(repo.DB)
@@ -81,7 +83,7 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 }
 
 func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error) {
-	order, err := BuildOrder(input)
+	order, err := s.BuildOrder(input)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +117,10 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 	}
 
 	return order, nil
+}
+
+func (s *OrderService) BuildOrder(input CreateOrderInput) (*model.Order, error) {
+	return BuildOrderWithRegistry(input, s.marketRulesRegistry())
 }
 
 func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, error) {
@@ -338,6 +344,14 @@ func (s *OrderService) ListTrades(input ListTradesInput) ([]repository.UserTrade
 }
 
 func BuildOrder(input CreateOrderInput) (*model.Order, error) {
+	return BuildOrderWithRegistry(input, defaultMarketRulesRegistry)
+}
+
+func BuildOrderWithRegistry(input CreateOrderInput, marketRules *MarketRulesRegistry) (*model.Order, error) {
+	if marketRules == nil {
+		marketRules = defaultMarketRulesRegistry
+	}
+
 	if input.UserID == 0 {
 		return nil, NewValidationErrorf("user_id is required")
 	}
@@ -372,7 +386,7 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLimitOrderPolicy(coinSymbol, price, amount); err != nil {
+		if err := marketRules.ValidateLimitOrder(coinSymbol, price, amount); err != nil {
 			return nil, err
 		}
 	case model.OrderTypeMarket:
@@ -383,7 +397,7 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := validateMarketBuyOrderPolicy(coinSymbol, quoteAmount); err != nil {
+			if err := marketRules.ValidateMarketBuyOrder(coinSymbol, quoteAmount); err != nil {
 				return nil, err
 			}
 		case model.OrderSideSell:
@@ -391,7 +405,7 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := validateMarketSellOrderPolicy(coinSymbol, amount); err != nil {
+			if err := marketRules.ValidateMarketSellOrder(coinSymbol, amount); err != nil {
 				return nil, err
 			}
 		}
@@ -411,6 +425,13 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 		FilledAmount:      decimal.Zero,
 		FilledQuoteAmount: decimal.Zero,
 	}, nil
+}
+
+func (s *OrderService) marketRulesRegistry() *MarketRulesRegistry {
+	if s != nil && s.MarketRules != nil {
+		return s.MarketRules
+	}
+	return defaultMarketRulesRegistry
 }
 
 func holdOrderAssets(walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {

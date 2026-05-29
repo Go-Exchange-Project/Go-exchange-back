@@ -1,6 +1,11 @@
 package service
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
 )
@@ -21,6 +26,31 @@ type MarketRulesRegistry struct {
 	maxTickSize             decimal.Decimal
 }
 
+type MarketRulesConfig struct {
+	MinOrderNotional        string                             `json:"min_order_notional"`
+	FeeRate                 string                             `json:"fee_rate"`
+	DefaultMarketStatus     string                             `json:"default_market_status"`
+	DefaultMinOrderQuantity string                             `json:"default_min_order_quantity"`
+	DefaultBaseQuantityStep string                             `json:"default_base_quantity_step"`
+	Markets                 map[string]MarketRulesMarketConfig `json:"markets"`
+	TickRules               []MarketRulesTickConfig            `json:"tick_rules"`
+	MaxTickSize             string                             `json:"max_tick_size"`
+}
+
+type MarketRulesMarketConfig struct {
+	TradingStatus    string `json:"trading_status"`
+	MinOrderQuantity string `json:"min_order_quantity"`
+	BaseQuantityStep string `json:"base_quantity_step"`
+}
+
+type MarketRulesTickConfig struct {
+	UpperBound string `json:"upper_bound"`
+	TickSize   string `json:"tick_size"`
+}
+
+const EnvMarketRulesPath = "GOEXCHANGE_MARKET_RULES_PATH"
+
+var defaultMarketRulesConfigPath = "config/market_rules.json"
 var minKRWOrderNotional = decimal.NewFromInt(5000)
 var defaultTradingFeeRate = decimal.RequireFromString("0.0005")
 var defaultMarketStatus = MarketStatusActive
@@ -68,6 +98,122 @@ var krwTickRules = []krwTickRule{
 var maxKRWTickSize = decimal.NewFromInt(1000)
 var defaultMarketRulesRegistry = NewDefaultMarketRulesRegistry()
 
+func NewMarketRulesRegistryFromEnv() (*MarketRulesRegistry, error) {
+	path := strings.TrimSpace(os.Getenv(EnvMarketRulesPath))
+	if path == "" {
+		path = defaultMarketRulesConfigPath
+	}
+	return NewMarketRulesRegistryFromFile(path)
+}
+
+func NewMarketRulesRegistryFromFile(path string) (*MarketRulesRegistry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config MarketRulesConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parse market rules config: %w", err)
+	}
+	return NewMarketRulesRegistryFromConfig(config)
+}
+
+func NewMarketRulesRegistryFromConfig(config MarketRulesConfig) (*MarketRulesRegistry, error) {
+	minOrderNotional, err := parseConfigDecimal(config.MinOrderNotional, "min_order_notional", true)
+	if err != nil {
+		return nil, err
+	}
+	feeRate, err := parseConfigDecimal(config.FeeRate, "fee_rate", false)
+	if err != nil {
+		return nil, err
+	}
+	defaultMinOrderQuantity, err := parseConfigDecimal(config.DefaultMinOrderQuantity, "default_min_order_quantity", true)
+	if err != nil {
+		return nil, err
+	}
+	defaultBaseQuantityStep, err := parseConfigDecimal(config.DefaultBaseQuantityStep, "default_base_quantity_step", true)
+	if err != nil {
+		return nil, err
+	}
+	defaultMarketStatus, err := parseMarketStatusConfig(config.DefaultMarketStatus, "default_market_status")
+	if err != nil {
+		return nil, err
+	}
+	maxTickSize, err := parseConfigDecimal(config.MaxTickSize, "max_tick_size", true)
+	if err != nil {
+		return nil, err
+	}
+
+	tickRules := make([]krwTickRule, 0, len(config.TickRules))
+	for index, tickRule := range config.TickRules {
+		upperBound, err := parseConfigDecimal(tickRule.UpperBound, fmt.Sprintf("tick_rules[%d].upper_bound", index), true)
+		if err != nil {
+			return nil, err
+		}
+		tickSize, err := parseConfigDecimal(tickRule.TickSize, fmt.Sprintf("tick_rules[%d].tick_size", index), true)
+		if err != nil {
+			return nil, err
+		}
+		tickRules = append(tickRules, krwTickRule{
+			upperBound: upperBound,
+			tickSize:   tickSize,
+		})
+	}
+
+	defaultBaseQuantityRule := BaseQuantityPolicy{
+		MinOrderQuantity: defaultMinOrderQuantity,
+		BaseQuantityStep: defaultBaseQuantityStep,
+	}
+	marketStatuses := make(map[string]MarketStatus, len(config.Markets))
+	baseQuantityRules := make(map[string]BaseQuantityPolicy, len(config.Markets))
+	for coinSymbol, marketConfig := range config.Markets {
+		normalizedSymbol := normalizeCoinSymbol(coinSymbol)
+		if normalizedSymbol == "" {
+			return nil, NewValidationErrorf("markets coin symbol is required")
+		}
+
+		status := defaultMarketStatus
+		if strings.TrimSpace(marketConfig.TradingStatus) != "" {
+			status, err = parseMarketStatusConfig(marketConfig.TradingStatus, fmt.Sprintf("markets.%s.trading_status", normalizedSymbol))
+			if err != nil {
+				return nil, err
+			}
+		}
+		marketStatuses[normalizedSymbol] = status
+
+		minOrderQuantity := defaultMinOrderQuantity
+		if strings.TrimSpace(marketConfig.MinOrderQuantity) != "" {
+			minOrderQuantity, err = parseConfigDecimal(marketConfig.MinOrderQuantity, fmt.Sprintf("markets.%s.min_order_quantity", normalizedSymbol), true)
+			if err != nil {
+				return nil, err
+			}
+		}
+		baseQuantityStep := defaultBaseQuantityStep
+		if strings.TrimSpace(marketConfig.BaseQuantityStep) != "" {
+			baseQuantityStep, err = parseConfigDecimal(marketConfig.BaseQuantityStep, fmt.Sprintf("markets.%s.base_quantity_step", normalizedSymbol), true)
+			if err != nil {
+				return nil, err
+			}
+		}
+		baseQuantityRules[normalizedSymbol] = BaseQuantityPolicy{
+			MinOrderQuantity: minOrderQuantity,
+			BaseQuantityStep: baseQuantityStep,
+		}
+	}
+
+	return &MarketRulesRegistry{
+		minOrderNotional:        minOrderNotional,
+		feeRate:                 feeRate,
+		defaultMarketStatus:     defaultMarketStatus,
+		marketStatuses:          marketStatuses,
+		defaultBaseQuantityRule: defaultBaseQuantityRule,
+		baseQuantityRules:       baseQuantityRules,
+		tickRules:               tickRules,
+		maxTickSize:             maxTickSize,
+	}, nil
+}
+
 func NewDefaultMarketRulesRegistry() *MarketRulesRegistry {
 	marketStatuses := make(map[string]MarketStatus, len(krwMarketStatuses))
 	for coinSymbol, status := range krwMarketStatuses {
@@ -91,6 +237,30 @@ func NewDefaultMarketRulesRegistry() *MarketRulesRegistry {
 		baseQuantityRules:       baseQuantityRules,
 		tickRules:               tickRules,
 		maxTickSize:             maxKRWTickSize,
+	}
+}
+
+func parseConfigDecimal(value string, field string, mustBePositive bool) (decimal.Decimal, error) {
+	parsed, err := decimal.NewFromString(strings.TrimSpace(value))
+	if err != nil {
+		return decimal.Zero, NewValidationErrorf("invalid %s", field)
+	}
+	if mustBePositive && !parsed.GreaterThan(decimal.Zero) {
+		return decimal.Zero, NewValidationErrorf("%s must be greater than zero", field)
+	}
+	if !mustBePositive && parsed.IsNegative() {
+		return decimal.Zero, NewValidationErrorf("%s must be zero or greater", field)
+	}
+	return parsed, nil
+}
+
+func parseMarketStatusConfig(value string, field string) (MarketStatus, error) {
+	status := MarketStatus(strings.ToUpper(strings.TrimSpace(value)))
+	switch status {
+	case MarketStatusActive, MarketStatusHalted:
+		return status, nil
+	default:
+		return "", NewValidationErrorf("invalid %s", field)
 	}
 }
 

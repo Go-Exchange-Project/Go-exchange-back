@@ -1,0 +1,41 @@
+{
+  "min_order_notional": "5000",
+  "fee_rate": "0.0005",
+  "default_market_status": "ACTIVE",
+  "default_min_order_quantity": "0.00000001",
+  "default_base_quantity_step": "0.00000001",
+  "markets": {
+    "BTC": {
+      "trading_status": "ACTIVE",
+      "min_order_quantity": "0.00000001",
+      "base_quantity_step": "0.00000001"
+    },
+    "ETH": {
+      "trading_status": "ACTIVE",
+      "min_order_quantity": "0.0000001",
+      "base_quantity_step": "0.0000001"
+    },
+    "XRP": {
+      "trading_status": "ACTIVE",
+      "min_order_quantity": "1",
+      "base_quantity_step": "1"
+    },
+    "HALT": {
+      "trading_status": "HALTED",
+      "min_order_quantity": "0.00000001",
+      "base_quantity_step": "0.00000001"
+    }
+  },
+  "tick_rules": [
+    { "upper_bound": "1", "tick_size": "0.00001" },
+    { "upper_bound": "10", "tick_size": "0.01" },
+    { "upper_bound": "100", "tick_size": "0.1" },
+    { "upper_bound": "1000", "tick_size": "1" },
+    { "upper_bound": "10000", "tick_size": "5" },
+    { "upper_bound": "100000", "tick_size": "10" },
+    { "upper_bound": "500000", "tick_size": "50" },
+    { "upper_bound": "1000000", "tick_size": "100" },
+    { "upper_bound": "2000000", "tick_size": "500" }
+  ],
+  "max_tick_size": "1000"
+}
