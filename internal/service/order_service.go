@@ -372,7 +372,7 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLimitOrderPolicy(price, amount); err != nil {
+		if err := validateLimitOrderPolicy(coinSymbol, price, amount); err != nil {
 			return nil, err
 		}
 	case model.OrderTypeMarket:
@@ -389,6 +389,9 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 		case model.OrderSideSell:
 			amount, err = parsePositiveDecimal(input.Amount, "amount")
 			if err != nil {
+				return nil, err
+			}
+			if err := validateMarketSellOrderPolicy(coinSymbol, amount); err != nil {
 				return nil, err
 			}
 		}

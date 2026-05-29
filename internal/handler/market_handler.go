@@ -13,6 +13,8 @@ type MarketRulesResponse struct {
 	CoinSymbol       string                   `json:"coin_symbol"`
 	QuoteSymbol      string                   `json:"quote_symbol"`
 	MinOrderNotional string                   `json:"min_order_notional"`
+	MinOrderQuantity string                   `json:"min_order_quantity"`
+	BaseQuantityStep string                   `json:"base_quantity_step"`
 	FeeRate          string                   `json:"fee_rate"`
 	TickRules        []MarketTickRuleResponse `json:"tick_rules"`
 }
@@ -54,6 +56,8 @@ func marketRulesResponse(rules service.MarketRules) MarketRulesResponse {
 		CoinSymbol:       rules.CoinSymbol,
 		QuoteSymbol:      rules.QuoteSymbol,
 		MinOrderNotional: rules.MinOrderNotional.String(),
+		MinOrderQuantity: rules.MinOrderQuantity.String(),
+		BaseQuantityStep: rules.BaseQuantityStep.String(),
 		FeeRate:          rules.FeeRate.String(),
 		TickRules:        tickRules,
 	}

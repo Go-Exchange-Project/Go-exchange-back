@@ -30,7 +30,7 @@ func TestBuildOrderSetsUserIDAndDefaultOrderType(t *testing.T) {
 func TestBuildOrderParsesDecimalStringsExactly(t *testing.T) {
 	order, err := BuildOrder(CreateOrderInput{
 		UserID:     1,
-		CoinSymbol: "ETH",
+		CoinSymbol: "BTC",
 		Side:       "SELL",
 		OrderType:  "LIMIT",
 		Price:      "99.9",
@@ -72,6 +72,34 @@ func TestBuildOrderAcceptsMarketSellAmount(t *testing.T) {
 	assert.True(t, order.Price.IsZero())
 	assert.Equal(t, decimal.RequireFromString("0.125"), order.Amount)
 	assert.True(t, order.QuoteAmount.IsZero())
+}
+
+func TestBuildOrderRejectsMarketSellAmountOutsideQuantityStep(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:     1,
+		CoinSymbol: "BTC",
+		Side:       "SELL",
+		OrderType:  "MARKET",
+		Amount:     "0.000000015",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, order)
+	assert.Contains(t, err.Error(), "quantity step 0.00000001")
+}
+
+func TestBuildOrderRejectsCoinSpecificInvalidMarketSellAmount(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:     1,
+		CoinSymbol: "XRP",
+		Side:       "SELL",
+		OrderType:  "MARKET",
+		Amount:     "1.5",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, order)
+	assert.Contains(t, err.Error(), "XRP order amount must align with quantity step 1")
 }
 
 func TestBuildOrderRejectsInvalidInputs(t *testing.T) {
