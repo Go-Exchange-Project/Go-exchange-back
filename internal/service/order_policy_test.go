@@ -39,6 +39,8 @@ func TestKRWMarketRulesReturnsSerializablePolicy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "BTC", rules.CoinSymbol)
 	assert.Equal(t, "KRW", rules.QuoteSymbol)
+	assert.True(t, rules.TradingEnabled)
+	assert.Equal(t, MarketStatusActive, rules.TradingStatus)
 	assert.True(t, rules.MinOrderNotional.Equal(decimal.NewFromInt(5000)))
 	assert.True(t, rules.MinOrderQuantity.Equal(decimal.RequireFromString("0.00000001")))
 	assert.True(t, rules.BaseQuantityStep.Equal(decimal.RequireFromString("0.00000001")))
@@ -49,6 +51,28 @@ func TestKRWMarketRulesReturnsSerializablePolicy(t *testing.T) {
 	assert.True(t, rules.TickRules[0].TickSize.Equal(decimal.RequireFromString("0.00001")))
 	assert.Nil(t, rules.TickRules[len(rules.TickRules)-1].UpperBound)
 	assert.True(t, rules.TickRules[len(rules.TickRules)-1].TickSize.Equal(decimal.NewFromInt(1000)))
+}
+
+func TestKRWMarketRulesUsesCoinSpecificTradingStatus(t *testing.T) {
+	tests := []struct {
+		coinSymbol     string
+		tradingEnabled bool
+		tradingStatus  MarketStatus
+	}{
+		{coinSymbol: "BTC", tradingEnabled: true, tradingStatus: MarketStatusActive},
+		{coinSymbol: "HALT", tradingEnabled: false, tradingStatus: MarketStatusHalted},
+		{coinSymbol: "E2EFOO", tradingEnabled: true, tradingStatus: MarketStatusActive},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.coinSymbol, func(t *testing.T) {
+			rules, err := KRWMarketRules(tt.coinSymbol)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.tradingEnabled, rules.TradingEnabled)
+			assert.Equal(t, tt.tradingStatus, rules.TradingStatus)
+		})
+	}
 }
 
 func TestKRWMarketRulesUsesCoinSpecificBaseQuantityPolicy(t *testing.T) {
@@ -85,6 +109,22 @@ func TestMarketRulesRegistrySharesQuantityPolicyAcrossRulesAndValidation(t *test
 	assert.Contains(t, err.Error(), "XRP order amount must align with quantity step "+rules.BaseQuantityStep.String())
 }
 
+func TestMarketRulesRegistryRejectsDisabledTradingAcrossOrderTypes(t *testing.T) {
+	registry := NewDefaultMarketRulesRegistry()
+
+	err := registry.ValidateLimitOrder("HALT", decimal.NewFromInt(5000), decimal.NewFromInt(1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HALT market is not accepting orders")
+
+	err = registry.ValidateMarketBuyOrder("HALT", decimal.NewFromInt(5000))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HALT market is not accepting orders")
+
+	err = registry.ValidateMarketSellOrder("HALT", decimal.NewFromInt(1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HALT market is not accepting orders")
+}
+
 func TestMarketRulesRegistryCopiesDefaultPolicyMap(t *testing.T) {
 	registry := NewDefaultMarketRulesRegistry()
 	krwBaseQuantityPolicies["ZZZ"] = BaseQuantityPolicy{
@@ -97,6 +137,14 @@ func TestMarketRulesRegistryCopiesDefaultPolicyMap(t *testing.T) {
 
 	assert.True(t, policy.MinOrderQuantity.Equal(defaultMinOrderQuantity))
 	assert.True(t, policy.BaseQuantityStep.Equal(defaultBaseQuantityStep))
+}
+
+func TestMarketRulesRegistryCopiesDefaultStatusMap(t *testing.T) {
+	registry := NewDefaultMarketRulesRegistry()
+	krwMarketStatuses["ZZZ"] = MarketStatusHalted
+	defer delete(krwMarketStatuses, "ZZZ")
+
+	assert.Equal(t, MarketStatusActive, registry.TradingStatus("ZZZ"))
 }
 
 func TestMarketRulesRegistryReturnsDefensiveTickRules(t *testing.T) {
@@ -173,7 +221,7 @@ func TestValidateLimitOrderPolicyRejectsSmallQuantity(t *testing.T) {
 }
 
 func TestValidateMarketBuyOrderPolicyRejectsSmallQuoteAmount(t *testing.T) {
-	err := validateMarketBuyOrderPolicy(decimal.RequireFromString("4999.999"))
+	err := validateMarketBuyOrderPolicy("BTC", decimal.RequireFromString("4999.999"))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least 5000 KRW")
@@ -226,4 +274,19 @@ func TestBuildOrderRejectsInvalidLimitOrderPolicy(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestBuildOrderRejectsDisabledMarket(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:     1,
+		CoinSymbol: "HALT",
+		Side:       "BUY",
+		OrderType:  "LIMIT",
+		Price:      "5000",
+		Amount:     "1",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, order)
+	assert.Contains(t, err.Error(), "HALT market is not accepting orders")
 }

@@ -20,6 +20,8 @@ func TestMarketRulesResponseUsesDecimalStringsAndOpenEndedFinalTick(t *testing.T
 
 	assert.Equal(t, "BTC", response.CoinSymbol)
 	assert.Equal(t, "KRW", response.QuoteSymbol)
+	assert.True(t, response.TradingEnabled)
+	assert.Equal(t, "ACTIVE", response.TradingStatus)
 	assert.Equal(t, "5000", response.MinOrderNotional)
 	assert.Equal(t, "0.00000001", response.MinOrderQuantity)
 	assert.Equal(t, "0.00000001", response.BaseQuantityStep)
@@ -45,6 +47,8 @@ func TestMarketHandlerGetRules(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "BTC", body.CoinSymbol)
 	assert.Equal(t, "KRW", body.QuoteSymbol)
+	assert.True(t, body.TradingEnabled)
+	assert.Equal(t, "ACTIVE", body.TradingStatus)
 	assert.Equal(t, "5000", body.MinOrderNotional)
 	assert.Equal(t, "0.00000001", body.MinOrderQuantity)
 	assert.Equal(t, "0.00000001", body.BaseQuantityStep)
@@ -67,6 +71,23 @@ func TestMarketHandlerGetRulesUsesCoinSpecificQuantityPolicy(t *testing.T) {
 	assert.Equal(t, "XRP", body.CoinSymbol)
 	assert.Equal(t, "1", body.MinOrderQuantity)
 	assert.Equal(t, "1", body.BaseQuantityStep)
+}
+
+func TestMarketHandlerGetRulesUsesCoinSpecificTradingStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/markets/rules", NewMarketHandler().GetRules)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/markets/rules?coin_symbol=halt", nil)
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var body MarketRulesResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "HALT", body.CoinSymbol)
+	assert.False(t, body.TradingEnabled)
+	assert.Equal(t, "HALTED", body.TradingStatus)
 }
 
 func TestMarketHandlerRejectsMissingCoinSymbol(t *testing.T) {

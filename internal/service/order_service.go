@@ -383,7 +383,7 @@ func BuildOrder(input CreateOrderInput) (*model.Order, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := validateMarketBuyOrderPolicy(quoteAmount); err != nil {
+			if err := validateMarketBuyOrderPolicy(coinSymbol, quoteAmount); err != nil {
 				return nil, err
 			}
 		case model.OrderSideSell:

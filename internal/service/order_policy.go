@@ -5,6 +5,8 @@ import "github.com/shopspring/decimal"
 type MarketRules struct {
 	CoinSymbol       string
 	QuoteSymbol      string
+	TradingEnabled   bool
+	TradingStatus    MarketStatus
 	MinOrderNotional decimal.Decimal
 	MinOrderQuantity decimal.Decimal
 	BaseQuantityStep decimal.Decimal
@@ -17,12 +19,19 @@ type MarketTickRule struct {
 	TickSize   decimal.Decimal
 }
 
+type MarketStatus string
+
+const (
+	MarketStatusActive MarketStatus = "ACTIVE"
+	MarketStatusHalted MarketStatus = "HALTED"
+)
+
 func validateLimitOrderPolicy(coinSymbol string, price decimal.Decimal, amount decimal.Decimal) error {
 	return defaultMarketRulesRegistry.ValidateLimitOrder(coinSymbol, price, amount)
 }
 
-func validateMarketBuyOrderPolicy(quoteAmount decimal.Decimal) error {
-	return defaultMarketRulesRegistry.ValidateMarketBuyOrder(quoteAmount)
+func validateMarketBuyOrderPolicy(coinSymbol string, quoteAmount decimal.Decimal) error {
+	return defaultMarketRulesRegistry.ValidateMarketBuyOrder(coinSymbol, quoteAmount)
 }
 
 func validateMarketSellOrderPolicy(coinSymbol string, amount decimal.Decimal) error {

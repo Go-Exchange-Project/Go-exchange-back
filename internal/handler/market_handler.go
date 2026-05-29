@@ -12,6 +12,8 @@ type MarketHandler struct{}
 type MarketRulesResponse struct {
 	CoinSymbol       string                   `json:"coin_symbol"`
 	QuoteSymbol      string                   `json:"quote_symbol"`
+	TradingEnabled   bool                     `json:"trading_enabled"`
+	TradingStatus    string                   `json:"trading_status"`
 	MinOrderNotional string                   `json:"min_order_notional"`
 	MinOrderQuantity string                   `json:"min_order_quantity"`
 	BaseQuantityStep string                   `json:"base_quantity_step"`
@@ -55,6 +57,8 @@ func marketRulesResponse(rules service.MarketRules) MarketRulesResponse {
 	return MarketRulesResponse{
 		CoinSymbol:       rules.CoinSymbol,
 		QuoteSymbol:      rules.QuoteSymbol,
+		TradingEnabled:   rules.TradingEnabled,
+		TradingStatus:    string(rules.TradingStatus),
 		MinOrderNotional: rules.MinOrderNotional.String(),
 		MinOrderQuantity: rules.MinOrderQuantity.String(),
 		BaseQuantityStep: rules.BaseQuantityStep.String(),

@@ -13,6 +13,8 @@ type BaseQuantityPolicy struct {
 type MarketRulesRegistry struct {
 	minOrderNotional        decimal.Decimal
 	feeRate                 decimal.Decimal
+	defaultMarketStatus     MarketStatus
+	marketStatuses          map[string]MarketStatus
 	defaultBaseQuantityRule BaseQuantityPolicy
 	baseQuantityRules       map[string]BaseQuantityPolicy
 	tickRules               []krwTickRule
@@ -21,8 +23,13 @@ type MarketRulesRegistry struct {
 
 var minKRWOrderNotional = decimal.NewFromInt(5000)
 var defaultTradingFeeRate = decimal.RequireFromString("0.0005")
+var defaultMarketStatus = MarketStatusActive
 var defaultMinOrderQuantity = decimal.RequireFromString("0.00000001")
 var defaultBaseQuantityStep = decimal.RequireFromString("0.00000001")
+
+var krwMarketStatuses = map[string]MarketStatus{
+	"HALT": MarketStatusHalted,
+}
 
 var defaultBaseQuantityPolicy = BaseQuantityPolicy{
 	MinOrderQuantity: defaultMinOrderQuantity,
@@ -62,6 +69,11 @@ var maxKRWTickSize = decimal.NewFromInt(1000)
 var defaultMarketRulesRegistry = NewDefaultMarketRulesRegistry()
 
 func NewDefaultMarketRulesRegistry() *MarketRulesRegistry {
+	marketStatuses := make(map[string]MarketStatus, len(krwMarketStatuses))
+	for coinSymbol, status := range krwMarketStatuses {
+		marketStatuses[normalizeCoinSymbol(coinSymbol)] = status
+	}
+
 	baseQuantityRules := make(map[string]BaseQuantityPolicy, len(krwBaseQuantityPolicies))
 	for coinSymbol, policy := range krwBaseQuantityPolicies {
 		baseQuantityRules[normalizeCoinSymbol(coinSymbol)] = policy
@@ -73,6 +85,8 @@ func NewDefaultMarketRulesRegistry() *MarketRulesRegistry {
 	return &MarketRulesRegistry{
 		minOrderNotional:        minKRWOrderNotional,
 		feeRate:                 defaultTradingFeeRate,
+		defaultMarketStatus:     defaultMarketStatus,
+		marketStatuses:          marketStatuses,
 		defaultBaseQuantityRule: defaultBaseQuantityPolicy,
 		baseQuantityRules:       baseQuantityRules,
 		tickRules:               tickRules,
@@ -81,6 +95,9 @@ func NewDefaultMarketRulesRegistry() *MarketRulesRegistry {
 }
 
 func (r *MarketRulesRegistry) ValidateLimitOrder(coinSymbol string, price decimal.Decimal, amount decimal.Decimal) error {
+	if err := r.ValidateTradingEnabled(coinSymbol); err != nil {
+		return err
+	}
 	if !r.IsValidKRWTickPrice(price) {
 		return NewValidationErrorf("price must align with KRW tick size %s", r.KRWTickSize(price).String())
 	}
@@ -96,7 +113,10 @@ func (r *MarketRulesRegistry) ValidateLimitOrder(coinSymbol string, price decima
 	return nil
 }
 
-func (r *MarketRulesRegistry) ValidateMarketBuyOrder(quoteAmount decimal.Decimal) error {
+func (r *MarketRulesRegistry) ValidateMarketBuyOrder(coinSymbol string, quoteAmount decimal.Decimal) error {
+	if err := r.ValidateTradingEnabled(coinSymbol); err != nil {
+		return err
+	}
 	if quoteAmount.LessThan(r.minOrderNotional) {
 		return NewValidationErrorf("market buy quote_amount must be at least %s KRW", r.minOrderNotional.String())
 	}
@@ -104,7 +124,30 @@ func (r *MarketRulesRegistry) ValidateMarketBuyOrder(quoteAmount decimal.Decimal
 }
 
 func (r *MarketRulesRegistry) ValidateMarketSellOrder(coinSymbol string, amount decimal.Decimal) error {
+	if err := r.ValidateTradingEnabled(coinSymbol); err != nil {
+		return err
+	}
 	return r.ValidateBaseQuantity(coinSymbol, amount)
+}
+
+func (r *MarketRulesRegistry) ValidateTradingEnabled(coinSymbol string) error {
+	normalizedSymbol := normalizeCoinSymbol(coinSymbol)
+	if !r.TradingEnabled(normalizedSymbol) {
+		return NewConflictErrorf("%s market is not accepting orders", normalizedSymbol)
+	}
+	return nil
+}
+
+func (r *MarketRulesRegistry) TradingEnabled(coinSymbol string) bool {
+	return r.TradingStatus(coinSymbol) == MarketStatusActive
+}
+
+func (r *MarketRulesRegistry) TradingStatus(coinSymbol string) MarketStatus {
+	normalizedSymbol := normalizeCoinSymbol(coinSymbol)
+	if status, ok := r.marketStatuses[normalizedSymbol]; ok {
+		return status
+	}
+	return r.defaultMarketStatus
 }
 
 func (r *MarketRulesRegistry) ValidateBaseQuantity(coinSymbol string, amount decimal.Decimal) error {
@@ -161,10 +204,13 @@ func (r *MarketRulesRegistry) KRWMarketRules(coinSymbol string) (MarketRules, er
 	})
 
 	baseQuantityPolicy := r.BaseQuantityPolicy(normalizedSymbol)
+	tradingStatus := r.TradingStatus(normalizedSymbol)
 
 	return MarketRules{
 		CoinSymbol:       normalizedSymbol,
 		QuoteSymbol:      model.KRWAssetSymbol,
+		TradingEnabled:   tradingStatus == MarketStatusActive,
+		TradingStatus:    tradingStatus,
 		MinOrderNotional: r.minOrderNotional,
 		MinOrderQuantity: baseQuantityPolicy.MinOrderQuantity,
 		BaseQuantityStep: baseQuantityPolicy.BaseQuantityStep,
