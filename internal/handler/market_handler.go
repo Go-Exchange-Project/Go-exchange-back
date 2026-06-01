@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -46,7 +47,7 @@ func (h *MarketHandler) GetRules(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, marketRulesResponse(rules))
+	httpapi.WriteData(c, http.StatusOK, marketRulesResponse(rules))
 }
 
 func (h *MarketHandler) marketRulesRegistry() *service.MarketRulesRegistry {

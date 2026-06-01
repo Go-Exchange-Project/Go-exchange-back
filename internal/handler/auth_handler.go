@@ -44,7 +44,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, authResponse(result))
+	httpapi.WriteData(c, http.StatusCreated, authResponse(result))
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -63,7 +63,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse(result))
+	httpapi.WriteData(c, http.StatusOK, authResponse(result))
 }
 
 func authResponse(result service.AuthResult) gin.H {

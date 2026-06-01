@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/middleware"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -134,7 +136,7 @@ func main() {
 	}))
 
 	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{
+		httpapi.WriteData(c, http.StatusOK, gin.H{
 			"message": "pong",
 		})
 	})

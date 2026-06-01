@@ -25,6 +25,25 @@ func TestWriteErrorUsesStructuredErrorShape(t *testing.T) {
 	assert.JSONEq(t, `{"error":{"code":"CONFLICT","message":"conflict happened"}}`, rec.Body.String())
 }
 
+func TestWriteDataUsesStructuredDataShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/data", func(c *gin.Context) {
+		WriteData(c, http.StatusCreated, gin.H{
+			"id":      7,
+			"message": "created",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.JSONEq(t, `{"data":{"id":7,"message":"created"}}`, rec.Body.String())
+}
+
 func TestCodeForStatus(t *testing.T) {
 	assert.Equal(t, CodeAuthRequired, CodeForStatus(http.StatusUnauthorized))
 	assert.Equal(t, CodeForbidden, CodeForStatus(http.StatusForbidden))

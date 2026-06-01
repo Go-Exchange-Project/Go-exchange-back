@@ -22,11 +22,11 @@ type OrderHandler struct {
 }
 
 type CreateOrderRequest struct {
-	CoinSymbol string `json:"coin_symbol" binding:"required"`
-	Side       string `json:"side" binding:"required"`
-	OrderType  string `json:"order_type"`
-	Price      string `json:"price"`
-	Amount     string `json:"amount"`
+	CoinSymbol  string `json:"coin_symbol" binding:"required"`
+	Side        string `json:"side" binding:"required"`
+	OrderType   string `json:"order_type"`
+	Price       string `json:"price"`
+	Amount      string `json:"amount"`
 	QuoteAmount string `json:"quote_amount"`
 }
 
@@ -48,12 +48,12 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	order, err := h.OrderService.CreateOrder(service.CreateOrderInput{
-		UserID:     userID,
-		CoinSymbol: req.CoinSymbol,
-		Side:       req.Side,
-		OrderType:  req.OrderType,
-		Price:      req.Price,
-		Amount:     req.Amount,
+		UserID:      userID,
+		CoinSymbol:  req.CoinSymbol,
+		Side:        req.Side,
+		OrderType:   req.OrderType,
+		Price:       req.Price,
+		Amount:      req.Amount,
 		QuoteAmount: req.QuoteAmount,
 	})
 	if err != nil {
@@ -61,7 +61,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	httpapi.WriteData(c, http.StatusOK, gin.H{
 		"message":  "order accepted",
 		"order_id": order.ID,
 	})
@@ -89,7 +89,7 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 	for _, order := range orders {
 		response = append(response, orderResponse(order))
 	}
-	c.JSON(http.StatusOK, gin.H{"orders": response})
+	httpapi.WriteData(c, http.StatusOK, gin.H{"orders": response})
 }
 
 func (h *OrderHandler) GetOrder(c *gin.Context) {
@@ -110,7 +110,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"order": orderResponse(*order)})
+	httpapi.WriteData(c, http.StatusOK, gin.H{"order": orderResponse(*order)})
 }
 
 func (h *OrderHandler) ListWallets(c *gin.Context) {
@@ -130,7 +130,7 @@ func (h *OrderHandler) ListWallets(c *gin.Context) {
 	for _, wallet := range wallets {
 		response = append(response, walletResponse(wallet))
 	}
-	c.JSON(http.StatusOK, gin.H{"wallets": response})
+	httpapi.WriteData(c, http.StatusOK, gin.H{"wallets": response})
 }
 
 func (h *OrderHandler) ListTrades(c *gin.Context) {
@@ -154,7 +154,7 @@ func (h *OrderHandler) ListTrades(c *gin.Context) {
 	for _, trade := range trades {
 		response = append(response, tradeResponse(trade))
 	}
-	c.JSON(http.StatusOK, gin.H{"trades": response})
+	httpapi.WriteData(c, http.StatusOK, gin.H{"trades": response})
 }
 
 func (h *OrderHandler) CancelOrder(c *gin.Context) {
@@ -185,7 +185,7 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	httpapi.WriteData(c, http.StatusOK, gin.H{
 		"message":         "order cancelled",
 		"order_id":        result.OrderID,
 		"status":          result.Status,
@@ -196,18 +196,18 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 }
 
 type OrderResponse struct {
-	ID           uint              `json:"id"`
-	CoinSymbol   string            `json:"coin_symbol"`
-	Side         model.OrderSide   `json:"side"`
-	OrderType    model.OrderType   `json:"order_type"`
-	Status       model.OrderStatus `json:"status"`
-	Price        string            `json:"price"`
-	Amount       string            `json:"amount"`
-	QuoteAmount  string            `json:"quote_amount"`
-	FilledAmount string            `json:"filled_amount"`
-	FilledQuoteAmount string       `json:"filled_quote_amount"`
-	Remaining    string            `json:"remaining"`
-	CreatedAt    time.Time         `json:"created_at"`
+	ID                uint              `json:"id"`
+	CoinSymbol        string            `json:"coin_symbol"`
+	Side              model.OrderSide   `json:"side"`
+	OrderType         model.OrderType   `json:"order_type"`
+	Status            model.OrderStatus `json:"status"`
+	Price             string            `json:"price"`
+	Amount            string            `json:"amount"`
+	QuoteAmount       string            `json:"quote_amount"`
+	FilledAmount      string            `json:"filled_amount"`
+	FilledQuoteAmount string            `json:"filled_quote_amount"`
+	Remaining         string            `json:"remaining"`
+	CreatedAt         time.Time         `json:"created_at"`
 }
 
 type WalletResponse struct {
@@ -244,18 +244,18 @@ func orderResponse(order model.Order) OrderResponse {
 		remaining = decimal.Zero
 	}
 	return OrderResponse{
-		ID:           order.ID,
-		CoinSymbol:   order.CoinSymbol,
-		Side:         order.Side,
-		OrderType:    order.OrderType,
-		Status:       order.Status,
-		Price:        order.Price.String(),
-		Amount:       order.Amount.String(),
-		QuoteAmount:  order.QuoteAmount.String(),
-		FilledAmount: order.FilledAmount.String(),
+		ID:                order.ID,
+		CoinSymbol:        order.CoinSymbol,
+		Side:              order.Side,
+		OrderType:         order.OrderType,
+		Status:            order.Status,
+		Price:             order.Price.String(),
+		Amount:            order.Amount.String(),
+		QuoteAmount:       order.QuoteAmount.String(),
+		FilledAmount:      order.FilledAmount.String(),
 		FilledQuoteAmount: order.FilledQuoteAmount.String(),
-		Remaining:    remaining.String(),
-		CreatedAt:    order.CreatedAt,
+		Remaining:         remaining.String(),
+		CreatedAt:         order.CreatedAt,
 	}
 }
 

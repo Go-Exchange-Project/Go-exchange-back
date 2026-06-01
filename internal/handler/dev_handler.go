@@ -44,7 +44,7 @@ func (h *DevHandler) FundWallet(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	httpapi.WriteData(c, http.StatusOK, gin.H{
 		"message": "wallet funded",
 		"wallet":  walletResponse(*wallet),
 	})

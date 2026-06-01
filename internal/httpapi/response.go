@@ -32,6 +32,14 @@ type ErrorResponse struct {
 	Error Error `json:"error"`
 }
 
+type DataResponse struct {
+	Data interface{} `json:"data"`
+}
+
+func WriteData(c *gin.Context, status int, data interface{}) {
+	c.JSON(status, DataResponse{Data: data})
+}
+
 func WriteError(c *gin.Context, status int, code string, message string) {
 	c.JSON(status, ErrorResponse{Error: Error{
 		Code:    normalizeCode(code),

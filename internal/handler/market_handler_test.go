@@ -44,8 +44,7 @@ func TestMarketHandlerGetRules(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var body MarketRulesResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	body := decodeDataResponse[MarketRulesResponse](t, w.Body.Bytes())
 	assert.Equal(t, "BTC", body.CoinSymbol)
 	assert.Equal(t, "KRW", body.QuoteSymbol)
 	assert.True(t, body.TradingEnabled)
@@ -67,8 +66,7 @@ func TestMarketHandlerGetRulesUsesCoinSpecificQuantityPolicy(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var body MarketRulesResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	body := decodeDataResponse[MarketRulesResponse](t, w.Body.Bytes())
 	assert.Equal(t, "XRP", body.CoinSymbol)
 	assert.Equal(t, "1", body.MinOrderQuantity)
 	assert.Equal(t, "1", body.BaseQuantityStep)
@@ -84,8 +82,7 @@ func TestMarketHandlerGetRulesUsesCoinSpecificTradingStatus(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var body MarketRulesResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	body := decodeDataResponse[MarketRulesResponse](t, w.Body.Bytes())
 	assert.Equal(t, "HALT", body.CoinSymbol)
 	assert.False(t, body.TradingEnabled)
 	assert.Equal(t, "HALTED", body.TradingStatus)
@@ -118,8 +115,7 @@ func TestMarketHandlerGetRulesUsesInjectedRegistry(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var body MarketRulesResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	body := decodeDataResponse[MarketRulesResponse](t, w.Body.Bytes())
 	assert.Equal(t, "ABC", body.CoinSymbol)
 	assert.False(t, body.TradingEnabled)
 	assert.Equal(t, "HALTED", body.TradingStatus)
@@ -138,4 +134,14 @@ func TestMarketHandlerRejectsMissingCoinSymbol(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func decodeDataResponse[T any](t *testing.T, body []byte) T {
+	t.Helper()
+
+	var envelope struct {
+		Data T `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	return envelope.Data
 }
