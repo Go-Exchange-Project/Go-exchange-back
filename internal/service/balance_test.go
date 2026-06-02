@@ -121,6 +121,7 @@ func TestSettleSellerCoinConsumesLockedQuantity(t *testing.T) {
 		CoinSymbol:       "BTC",
 		AvailableBalance: decimal.RequireFromString("0.25"),
 		LockedBalance:    decimal.RequireFromString("1.5"),
+		AvgBuyPrice:      decimal.NewFromInt(100),
 	}
 
 	update, err := settleSellerCoin(wallet, decimal.RequireFromString("0.5"))
@@ -129,6 +130,56 @@ func TestSettleSellerCoinConsumesLockedQuantity(t *testing.T) {
 	assert.True(t, update.AvailableBalance.Equal(decimal.RequireFromString("0.25")))
 	assert.True(t, update.LockedBalance.Equal(decimal.RequireFromString("1.0")))
 	assert.True(t, update.Quantity.Equal(decimal.RequireFromString("1.25")))
+	assert.True(t, update.AvgBuyPrice.Equal(decimal.NewFromInt(100)))
+}
+
+func TestSettleSellerCoinResetsAvgBuyPriceWhenFullySold(t *testing.T) {
+	wallet := &model.Wallet{
+		CoinSymbol:       "BTC",
+		AvailableBalance: decimal.Zero,
+		LockedBalance:    decimal.NewFromInt(1),
+		AvgBuyPrice:      decimal.NewFromInt(100),
+	}
+
+	update, err := settleSellerCoin(wallet, decimal.NewFromInt(1))
+
+	require.NoError(t, err)
+	assert.True(t, update.Quantity.IsZero())
+	assert.True(t, update.AvgBuyPrice.IsZero())
+}
+
+func TestCreditBuyerCoinWithAcquisitionCostSetsFirstAvgBuyPrice(t *testing.T) {
+	wallet := &model.Wallet{
+		CoinSymbol:       "BTC",
+		AvailableBalance: decimal.Zero,
+		LockedBalance:    decimal.Zero,
+		AvgBuyPrice:      decimal.Zero,
+	}
+
+	update, err := creditBuyerCoinWithAcquisitionCost(wallet, decimal.NewFromInt(2), decimal.NewFromInt(210))
+
+	require.NoError(t, err)
+	assert.True(t, update.AvailableBalance.Equal(decimal.NewFromInt(2)))
+	assert.True(t, update.Quantity.Equal(decimal.NewFromInt(2)))
+	assert.True(t, update.AvgBuyPrice.Equal(decimal.NewFromInt(105)))
+}
+
+func TestCreditBuyerCoinWithAcquisitionCostUsesWeightedAverage(t *testing.T) {
+	wallet := &model.Wallet{
+		CoinSymbol:       "BTC",
+		AvailableBalance: decimal.NewFromInt(1),
+		LockedBalance:    decimal.NewFromInt(1),
+		Quantity:         decimal.NewFromInt(2),
+		AvgBuyPrice:      decimal.NewFromInt(100),
+	}
+
+	update, err := creditBuyerCoinWithAcquisitionCost(wallet, decimal.NewFromInt(1), decimal.NewFromInt(150))
+
+	require.NoError(t, err)
+	assert.True(t, update.AvailableBalance.Equal(decimal.NewFromInt(2)))
+	assert.True(t, update.LockedBalance.Equal(decimal.NewFromInt(1)))
+	assert.True(t, update.Quantity.Equal(decimal.NewFromInt(3)))
+	assert.True(t, update.AvgBuyPrice.Equal(decimal.RequireFromString("116.6666666666666667")))
 }
 
 func TestCreditAvailableKeepsLockedBalance(t *testing.T) {

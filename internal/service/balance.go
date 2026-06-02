@@ -10,6 +10,7 @@ type WalletBalanceUpdate struct {
 	LockedBalance    decimal.Decimal
 	KRW              decimal.Decimal
 	Quantity         decimal.Decimal
+	AvgBuyPrice      decimal.Decimal
 }
 
 func applyBuyOrderHold(wallet *model.Wallet, holdAmount decimal.Decimal) (WalletBalanceUpdate, error) {
@@ -126,7 +127,11 @@ func settleSellerCoin(wallet *model.Wallet, quantity decimal.Decimal) (WalletBal
 		return WalletBalanceUpdate{}, NewConflictErrorf("seller has insufficient locked coin balance")
 	}
 
-	return walletBalanceUpdate(wallet, walletAvailableBalance(wallet), wallet.LockedBalance.Sub(quantity)), nil
+	update := walletBalanceUpdate(wallet, walletAvailableBalance(wallet), wallet.LockedBalance.Sub(quantity))
+	if update.Quantity.IsZero() {
+		update.AvgBuyPrice = decimal.Zero
+	}
+	return update, nil
 }
 
 func creditAvailable(wallet *model.Wallet, amount decimal.Decimal) (WalletBalanceUpdate, error) {
@@ -138,6 +143,35 @@ func creditAvailable(wallet *model.Wallet, amount decimal.Decimal) (WalletBalanc
 	}
 
 	return walletBalanceUpdate(wallet, walletAvailableBalance(wallet).Add(amount), wallet.LockedBalance), nil
+}
+
+func creditBuyerCoinWithAcquisitionCost(wallet *model.Wallet, quantity decimal.Decimal, acquisitionCost decimal.Decimal) (WalletBalanceUpdate, error) {
+	if wallet == nil {
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet is required")
+	}
+	if wallet.CoinSymbol == model.KRWAssetSymbol {
+		return WalletBalanceUpdate{}, NewValidationErrorf("buyer base settlement requires coin wallet")
+	}
+	if !quantity.GreaterThan(decimal.Zero) {
+		return WalletBalanceUpdate{}, NewValidationErrorf("settlement quantity must be greater than zero")
+	}
+	if !acquisitionCost.GreaterThan(decimal.Zero) {
+		return WalletBalanceUpdate{}, NewValidationErrorf("acquisition cost must be greater than zero")
+	}
+	if wallet.AvgBuyPrice.IsNegative() {
+		return WalletBalanceUpdate{}, NewValidationErrorf("avg buy price must be greater than or equal to zero")
+	}
+
+	existingQuantity := walletTotalBalance(wallet)
+	newQuantity := existingQuantity.Add(quantity)
+	if !newQuantity.GreaterThan(decimal.Zero) {
+		return WalletBalanceUpdate{}, NewValidationErrorf("wallet quantity must be greater than zero")
+	}
+
+	update := walletBalanceUpdate(wallet, walletAvailableBalance(wallet).Add(quantity), wallet.LockedBalance)
+	existingCost := wallet.AvgBuyPrice.Mul(existingQuantity)
+	update.AvgBuyPrice = existingCost.Add(acquisitionCost).Div(newQuantity)
+	return update, nil
 }
 
 func walletAvailableBalance(wallet *model.Wallet) decimal.Decimal {
@@ -152,12 +186,20 @@ func walletAvailableBalance(wallet *model.Wallet) decimal.Decimal {
 	return wallet.AvailableBalance
 }
 
+func walletTotalBalance(wallet *model.Wallet) decimal.Decimal {
+	if wallet == nil {
+		return decimal.Zero
+	}
+	return walletAvailableBalance(wallet).Add(wallet.LockedBalance)
+}
+
 func walletBalanceUpdate(wallet *model.Wallet, available decimal.Decimal, locked decimal.Decimal) WalletBalanceUpdate {
 	update := WalletBalanceUpdate{
 		AvailableBalance: available,
 		LockedBalance:    locked,
 		KRW:              wallet.KRW,
 		Quantity:         wallet.Quantity,
+		AvgBuyPrice:      wallet.AvgBuyPrice,
 	}
 
 	total := available.Add(locked)

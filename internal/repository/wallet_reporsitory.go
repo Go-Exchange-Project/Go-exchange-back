@@ -88,6 +88,10 @@ func (r *WalletRepository) UpdateBalances(userID uint, coinSymbol string, availa
 	return requireRowsAffected(r.updateBalancesDB(userID, coinSymbol, available, locked), "wallet balance update")
 }
 
+func (r *WalletRepository) UpdateBalancesAndAvgBuyPrice(userID uint, coinSymbol string, available decimal.Decimal, locked decimal.Decimal, avgBuyPrice decimal.Decimal) error {
+	return requireRowsAffected(r.updateBalancesAndAvgBuyPriceDB(userID, coinSymbol, available, locked, avgBuyPrice), "wallet balance and avg buy price update")
+}
+
 func (r *WalletRepository) walletByUserAndCoin(userID uint, coinSymbol string) *gorm.DB {
 	query, args := walletByUserAndCoinScope(userID, coinSymbol)
 	return r.DB.Where(query, args...)
@@ -129,6 +133,24 @@ func (r *WalletRepository) updateCoinQuantityDB(userID uint, coinSymbol string, 
 
 func (r *WalletRepository) updateBalancesDB(userID uint, coinSymbol string, available decimal.Decimal, locked decimal.Decimal) *gorm.DB {
 	query, args := walletByUserAndCoinScope(userID, coinSymbol)
+	updates := walletBalanceUpdates(coinSymbol, available, locked)
+
+	return r.DB.Model(&model.Wallet{}).
+		Where(query, args...).
+		Updates(updates)
+}
+
+func (r *WalletRepository) updateBalancesAndAvgBuyPriceDB(userID uint, coinSymbol string, available decimal.Decimal, locked decimal.Decimal, avgBuyPrice decimal.Decimal) *gorm.DB {
+	query, args := walletByUserAndCoinScope(userID, coinSymbol)
+	updates := walletBalanceUpdates(coinSymbol, available, locked)
+	updates["avg_buy_price"] = avgBuyPrice
+
+	return r.DB.Model(&model.Wallet{}).
+		Where(query, args...).
+		Updates(updates)
+}
+
+func walletBalanceUpdates(coinSymbol string, available decimal.Decimal, locked decimal.Decimal) map[string]interface{} {
 	total := available.Add(locked)
 	updates := map[string]interface{}{
 		"available_balance": available,
@@ -139,10 +161,7 @@ func (r *WalletRepository) updateBalancesDB(userID uint, coinSymbol string, avai
 	} else {
 		updates["quantity"] = total
 	}
-
-	return r.DB.Model(&model.Wallet{}).
-		Where(query, args...).
-		Updates(updates)
+	return updates
 }
 
 func walletByUserAndCoinScope(userID uint, coinSymbol string) (string, []interface{}) {

@@ -155,7 +155,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 		if err != nil {
 			return err
 		}
-		buyerCoinUpdate, err := creditAvailable(buyerCoin, trade.Quantity)
+		buyerCoinUpdate, err := creditBuyerCoinWithAcquisitionCost(buyerCoin, trade.Quantity, executionDebit)
 		if err != nil {
 			return err
 		}
@@ -178,10 +178,10 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 		if err := walletRepo.UpdateBalances(participants.BuyerUserID, model.KRWAssetSymbol, buyerKRWUpdate.AvailableBalance, buyerKRWUpdate.LockedBalance); err != nil {
 			return err
 		}
-		if err := walletRepo.UpdateBalances(participants.BuyerUserID, trade.CoinSymbol, buyerCoinUpdate.AvailableBalance, buyerCoinUpdate.LockedBalance); err != nil {
+		if err := walletRepo.UpdateBalancesAndAvgBuyPrice(participants.BuyerUserID, trade.CoinSymbol, buyerCoinUpdate.AvailableBalance, buyerCoinUpdate.LockedBalance, buyerCoinUpdate.AvgBuyPrice); err != nil {
 			return err
 		}
-		if err := walletRepo.UpdateBalances(participants.SellerUserID, trade.CoinSymbol, sellerCoinUpdate.AvailableBalance, sellerCoinUpdate.LockedBalance); err != nil {
+		if err := walletRepo.UpdateBalancesAndAvgBuyPrice(participants.SellerUserID, trade.CoinSymbol, sellerCoinUpdate.AvailableBalance, sellerCoinUpdate.LockedBalance, sellerCoinUpdate.AvgBuyPrice); err != nil {
 			return err
 		}
 		if err := walletRepo.UpdateBalances(participants.SellerUserID, model.KRWAssetSymbol, sellerKRWUpdate.AvailableBalance, sellerKRWUpdate.LockedBalance); err != nil {

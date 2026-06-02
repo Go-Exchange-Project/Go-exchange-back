@@ -71,6 +71,31 @@ func TestIntegrationUpdateBalancesUpdatesExistingWallet(t *testing.T) {
 	assert.True(t, wallet.Quantity.Equal(decimal.NewFromInt(10)))
 }
 
+func TestIntegrationUpdateBalancesAndAvgBuyPriceUpdatesExistingWallet(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(10)
+	defer cleanupRepositoryUsers(t, db, userID)
+
+	repo := NewWalletRepository(db)
+	require.NoError(t, db.Create(&model.Wallet{
+		UserID:           userID,
+		CoinSymbol:       "BTC",
+		Quantity:         decimal.NewFromInt(10),
+		AvailableBalance: decimal.NewFromInt(10),
+		LockedBalance:    decimal.Zero,
+		AvgBuyPrice:      decimal.NewFromInt(90),
+	}).Error)
+
+	require.NoError(t, repo.UpdateBalancesAndAvgBuyPrice(userID, "BTC", decimal.NewFromInt(7), decimal.NewFromInt(3), decimal.NewFromInt(100)))
+
+	wallet, err := repo.FindByUserIDAndCoinSymbol(userID, "BTC")
+	require.NoError(t, err)
+	assert.True(t, wallet.AvailableBalance.Equal(decimal.NewFromInt(7)))
+	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(3)))
+	assert.True(t, wallet.Quantity.Equal(decimal.NewFromInt(10)))
+	assert.True(t, wallet.AvgBuyPrice.Equal(decimal.NewFromInt(100)))
+}
+
 func TestIntegrationUpdateBalancesMissingWalletReturnsError(t *testing.T) {
 	db := openRepositoryIntegrationDB(t)
 	userID := repositoryTestUserID(2)

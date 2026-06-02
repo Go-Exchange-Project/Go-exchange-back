@@ -371,7 +371,9 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	assert.True(t, buyerKRW.AvailableBalance.Equal(decimal.RequireFromString("50.025")))
 	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.Zero))
 	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
+	assert.True(t, buyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("90.045")))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.Zero))
+	assert.True(t, sellerBTC.AvgBuyPrice.IsZero())
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
 	assertSettlementLedgerEntries(t, db, result.TradeID, trade.IdempotencyKey, buyerID, sellerID)
 }
@@ -441,6 +443,7 @@ func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, persistedBuyerBTC.AvailableBalance.Equal(decimal.NewFromInt(1)))
 	assert.True(t, persistedBuyerBTC.LockedBalance.Equal(decimal.Zero))
+	assert.True(t, persistedBuyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("100.05")))
 	assert.True(t, persistedSellerKRW.AvailableBalance.Equal(decimal.RequireFromString("99.95")))
 	assert.True(t, persistedSellerKRW.LockedBalance.Equal(decimal.Zero))
 }
@@ -556,6 +559,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	assert.True(t, buyerKRW.AvailableBalance.Equal(decimal.RequireFromString("50.025")))
 	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.RequireFromString("499.75")))
 	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
+	assert.True(t, buyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("90.045")))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(5)))
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
 	assertSettlementLedgerEntries(t, db, firstResult.TradeID, trade.IdempotencyKey, buyerID, sellerID)
