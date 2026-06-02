@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestApplyTradeFeePolicyChargesReceivedAssets(t *testing.T) {
+func TestApplyTradeFeePolicyChargesKRWFees(t *testing.T) {
 	trade := &model.Trade{
 		CoinSymbol: "BTC",
 		Price:      decimal.NewFromInt(5000),
@@ -20,10 +20,20 @@ func TestApplyTradeFeePolicyChargesReceivedAssets(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, trade.FeeRate.Equal(decimal.RequireFromString("0.0005")))
-	assert.True(t, trade.BuyerFee.Equal(decimal.RequireFromString("0.001")))
-	assert.Equal(t, "BTC", trade.BuyerFeeAsset)
+	assert.True(t, trade.BuyerFee.Equal(decimal.NewFromInt(5)))
+	assert.Equal(t, model.KRWAssetSymbol, trade.BuyerFeeAsset)
 	assert.True(t, trade.SellerFee.Equal(decimal.NewFromInt(5)))
 	assert.Equal(t, model.KRWAssetSymbol, trade.SellerFeeAsset)
+}
+
+func TestQuoteAmountWithTradingFee(t *testing.T) {
+	assert.True(t, quoteAmountWithTradingFee(decimal.NewFromInt(100)).Equal(decimal.RequireFromString("100.05")))
+}
+
+func TestMarketBuyExecutableQuoteAmountTreatsBudgetAsFeeInclusive(t *testing.T) {
+	executableQuote := marketBuyExecutableQuoteAmount(decimal.RequireFromString("100.05"))
+
+	assert.True(t, executableQuote.Equal(decimal.NewFromInt(100)), "executable_quote=%s", executableQuote.String())
 }
 
 func TestAmountAfterFeeReturnsNetAmount(t *testing.T) {

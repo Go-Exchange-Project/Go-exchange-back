@@ -137,7 +137,7 @@ func TestTradeQuoteAmount(t *testing.T) {
 	assert.Equal(t, decimal.RequireFromString("6250.03125"), tradeQuoteAmount(trade))
 }
 
-func TestReservedQuoteAmountUsesBuyOrderLimitPrice(t *testing.T) {
+func TestReservedBuyDebitAmountUsesBuyOrderLimitPriceWithFee(t *testing.T) {
 	buyOrder := &model.Order{
 		Price: decimal.NewFromInt(60000),
 	}
@@ -146,10 +146,10 @@ func TestReservedQuoteAmountUsesBuyOrderLimitPrice(t *testing.T) {
 		Quantity: decimal.NewFromInt(5),
 	}
 
-	assert.Equal(t, decimal.NewFromInt(300000), reservedQuoteAmount(buyOrder, trade))
+	assert.True(t, reservedBuyDebitAmount(buyOrder, trade).Equal(decimal.NewFromInt(300150)))
 }
 
-func TestReservedQuoteAmountUsesExecutionForMarketBuy(t *testing.T) {
+func TestReservedBuyDebitAmountUsesExecutionForMarketBuyWithFee(t *testing.T) {
 	buyOrder := &model.Order{
 		OrderType: model.OrderTypeMarket,
 	}
@@ -158,7 +158,7 @@ func TestReservedQuoteAmountUsesExecutionForMarketBuy(t *testing.T) {
 		Quantity: decimal.NewFromInt(5),
 	}
 
-	assert.Equal(t, decimal.NewFromInt(250000), reservedQuoteAmount(buyOrder, trade))
+	assert.True(t, reservedBuyDebitAmount(buyOrder, trade).Equal(decimal.NewFromInt(250125)))
 }
 
 func TestDeterministicTradeIdempotencyKeyIsStableForSamePayload(t *testing.T) {

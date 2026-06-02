@@ -145,20 +145,17 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 			return err
 		}
 
-		reservedQuote := reservedQuoteAmount(buyOrder, trade)
-		buyerCoinNet, err := amountAfterFee(trade.Quantity, trade.BuyerFee, "buyer")
-		if err != nil {
-			return err
-		}
+		reservedDebit := reservedBuyDebitAmount(buyOrder, trade)
+		executionDebit := executionQuote.Add(trade.BuyerFee)
 		sellerQuoteNet, err := amountAfterFee(executionQuote, trade.SellerFee, "seller")
 		if err != nil {
 			return err
 		}
-		buyerKRWUpdate, err := settleBuyerKRW(buyerKRW, reservedQuote, executionQuote)
+		buyerKRWUpdate, err := settleBuyerKRW(buyerKRW, reservedDebit, executionDebit)
 		if err != nil {
 			return err
 		}
-		buyerCoinUpdate, err := creditAvailable(buyerCoin, buyerCoinNet)
+		buyerCoinUpdate, err := creditAvailable(buyerCoin, trade.Quantity)
 		if err != nil {
 			return err
 		}
@@ -285,11 +282,11 @@ func tradeQuoteAmount(trade *model.Trade) decimal.Decimal {
 	return trade.Price.Mul(trade.Quantity)
 }
 
-func reservedQuoteAmount(buyOrder *model.Order, trade *model.Trade) decimal.Decimal {
+func reservedBuyDebitAmount(buyOrder *model.Order, trade *model.Trade) decimal.Decimal {
 	if buyOrder.OrderType == model.OrderTypeMarket {
-		return tradeQuoteAmount(trade)
+		return quoteAmountWithTradingFee(tradeQuoteAmount(trade))
 	}
-	return buyOrder.Price.Mul(trade.Quantity)
+	return quoteAmountWithTradingFee(buyOrder.Price.Mul(trade.Quantity))
 }
 
 func prepareTradeForSettlement(trade *model.Trade) error {

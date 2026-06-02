@@ -18,12 +18,29 @@ func applyTradeFeePolicy(trade *model.Trade) error {
 		return fmt.Errorf("invalid trading fee rate")
 	}
 
+	executionQuote := tradeQuoteAmount(trade)
+
 	trade.FeeRate = defaultTradingFeeRate
-	trade.BuyerFee = trade.Quantity.Mul(defaultTradingFeeRate)
-	trade.BuyerFeeAsset = trade.CoinSymbol
-	trade.SellerFee = tradeQuoteAmount(trade).Mul(defaultTradingFeeRate)
+	trade.BuyerFee = tradingFeeAmount(executionQuote)
+	trade.BuyerFeeAsset = model.KRWAssetSymbol
+	trade.SellerFee = tradingFeeAmount(executionQuote)
 	trade.SellerFeeAsset = model.KRWAssetSymbol
 	return nil
+}
+
+func tradingFeeAmount(amount decimal.Decimal) decimal.Decimal {
+	return amount.Mul(defaultTradingFeeRate)
+}
+
+func quoteAmountWithTradingFee(amount decimal.Decimal) decimal.Decimal {
+	return amount.Add(tradingFeeAmount(amount))
+}
+
+func marketBuyExecutableQuoteAmount(grossQuoteBudget decimal.Decimal) decimal.Decimal {
+	if !grossQuoteBudget.GreaterThan(decimal.Zero) {
+		return decimal.Zero
+	}
+	return grossQuoteBudget.Div(decimal.NewFromInt(1).Add(defaultTradingFeeRate))
 }
 
 func amountAfterFee(gross decimal.Decimal, fee decimal.Decimal, field string) (decimal.Decimal, error) {

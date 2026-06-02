@@ -63,9 +63,10 @@ type CancelOrderResult struct {
 }
 
 type CompleteMarketOrderInput struct {
-	OrderID           uint
-	FilledAmount      decimal.Decimal
-	FilledQuoteAmount decimal.Decimal
+	OrderID              uint
+	FilledAmount         decimal.Decimal
+	FilledQuoteAmount    decimal.Decimal
+	RemainingQuoteAmount decimal.Decimal
 }
 
 func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.WalletRepository, me *matching.MatchingEngine) *OrderService {
@@ -108,7 +109,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 			Side:              order.Side,
 			Price:             order.Price,
 			Amount:            order.Amount,
-			QuoteAmount:       order.QuoteAmount,
+			QuoteAmount:       matchingQuoteAmountForOrder(order),
 			CreatedAt:         order.CreatedAt,
 			OrderType:         order.OrderType,
 			FilledAmount:      order.FilledAmount,
@@ -203,6 +204,7 @@ func (s *OrderService) CompleteMarketOrder(input CompleteMarketOrderInput) error
 		orderRepo := s.OrderRepository.WithTx(tx)
 		walletRepo := s.WalletRepository.WithTx(tx)
 		ledgerRepo := s.LedgerRepository.WithTx(tx)
+		tradeRepo := s.TradeRepository.WithTx(tx)
 
 		order, err := orderRepo.FindByIDForUpdate(input.OrderID)
 		if err != nil {
@@ -221,7 +223,7 @@ func (s *OrderService) CompleteMarketOrder(input CompleteMarketOrderInput) error
 
 		switch order.Side {
 		case model.OrderSideBuy:
-			return completeMarketBuyOrder(orderRepo, walletRepo, ledgerRepo, order)
+			return completeMarketBuyOrder(orderRepo, walletRepo, ledgerRepo, tradeRepo, order, input)
 		case model.OrderSideSell:
 			return completeMarketSellOrder(orderRepo, walletRepo, ledgerRepo, order)
 		default:
@@ -230,8 +232,17 @@ func (s *OrderService) CompleteMarketOrder(input CompleteMarketOrderInput) error
 	})
 }
 
-func completeMarketBuyOrder(orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
-	remainingQuote := order.QuoteAmount.Sub(order.FilledQuoteAmount)
+func completeMarketBuyOrder(orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, tradeRepo *repository.TradeRepository, order *model.Order, input CompleteMarketOrderInput) error {
+	buyerFeeTotal, err := tradeRepo.SumBuyerFeesByBuyOrderID(order.ID)
+	if err != nil {
+		return err
+	}
+	spentQuoteWithFees := order.FilledQuoteAmount.Add(buyerFeeTotal)
+	if spentQuoteWithFees.GreaterThan(order.QuoteAmount) {
+		return NewConflictErrorf("market buy order %d spent quote amount %s exceeds quote budget %s", order.ID, spentQuoteWithFees.String(), order.QuoteAmount.String())
+	}
+
+	remainingQuote := order.QuoteAmount.Sub(spentQuoteWithFees)
 	if remainingQuote.GreaterThan(decimal.Zero) {
 		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
 		if err != nil {
@@ -249,7 +260,7 @@ func completeMarketBuyOrder(orderRepo *repository.OrderRepository, walletRepo *r
 			return err
 		}
 	}
-	if order.FilledQuoteAmount.Equal(order.QuoteAmount) {
+	if !input.RemainingQuoteAmount.GreaterThan(decimal.Zero) {
 		return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusFilled)
 	}
 	return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusCancelled)
@@ -444,7 +455,7 @@ func holdOrderAssets(walletRepo *repository.WalletRepository, ledgerRepo *reposi
 			}
 			return err
 		}
-		required := order.Price.Mul(order.Amount)
+		required := quoteAmountWithTradingFee(order.Price.Mul(order.Amount))
 		if order.OrderType == model.OrderTypeMarket {
 			required = order.QuoteAmount
 		}
@@ -489,7 +500,7 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, ledgerRepo *repos
 			}
 			return "", decimal.Zero, err
 		}
-		releaseAmount := order.Price.Mul(remaining)
+		releaseAmount := quoteAmountWithTradingFee(order.Price.Mul(remaining))
 		update, err := releaseBuyOrderHold(wallet, releaseAmount)
 		if err != nil {
 			return "", decimal.Zero, err
@@ -519,6 +530,16 @@ func releaseOrderHold(walletRepo *repository.WalletRepository, ledgerRepo *repos
 	default:
 		return "", decimal.Zero, NewValidationErrorf("invalid order side")
 	}
+}
+
+func matchingQuoteAmountForOrder(order *model.Order) decimal.Decimal {
+	if order == nil {
+		return decimal.Zero
+	}
+	if order.Side == model.OrderSideBuy && order.OrderType == model.OrderTypeMarket {
+		return marketBuyExecutableQuoteAmount(order.QuoteAmount)
+	}
+	return order.QuoteAmount
 }
 
 func isCancellableOrderStatus(status model.OrderStatus) bool {

@@ -41,6 +41,19 @@ func NewTradeRepository(db *gorm.DB) *TradeRepository {
 	return &TradeRepository{DB: db}
 }
 
+func (r *TradeRepository) WithTx(tx *gorm.DB) *TradeRepository {
+	return &TradeRepository{DB: tx}
+}
+
+func (r *TradeRepository) SumBuyerFeesByBuyOrderID(orderID uint) (decimal.Decimal, error) {
+	var total decimal.Decimal
+	err := r.DB.Model(&model.Trade{}).
+		Select("COALESCE(SUM(buyer_fee), 0)").
+		Where("buy_order_id = ?", orderID).
+		Scan(&total).Error
+	return total, err
+}
+
 func (r *TradeRepository) ListByUserID(userID uint, filter TradeListFilter) ([]UserTrade, error) {
 	var trades []UserTrade
 	query := r.DB.Table("trades").

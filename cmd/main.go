@@ -208,9 +208,10 @@ func processMarketOrderDone(
 		return
 	}
 	if err := completer.CompleteMarketOrder(service.CompleteMarketOrderInput{
-		OrderID:           done.OrderID,
-		FilledAmount:      done.FilledAmount,
-		FilledQuoteAmount: done.FilledQuoteAmount,
+		OrderID:              done.OrderID,
+		FilledAmount:         done.FilledAmount,
+		FilledQuoteAmount:    done.FilledQuoteAmount,
+		RemainingQuoteAmount: done.RemainingQuoteAmount,
 	}); err != nil {
 		logger.Printf("complete market order failed: %v", err)
 	}

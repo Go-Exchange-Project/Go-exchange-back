@@ -84,8 +84,8 @@ func TestTradeResponseUsesUserSideAndDecimalStrings(t *testing.T) {
 		Price:          decimal.RequireFromString("2000.5"),
 		Quantity:       decimal.RequireFromString("0.75"),
 		FeeRate:        decimal.RequireFromString("0.0005"),
-		BuyerFee:       decimal.RequireFromString("0.000375"),
-		BuyerFeeAsset:  "ETH",
+		BuyerFee:       decimal.RequireFromString("0.7501875"),
+		BuyerFeeAsset:  model.KRWAssetSymbol,
 		SellerFee:      decimal.RequireFromString("0.7501875"),
 		SellerFeeAsset: model.KRWAssetSymbol,
 		TradedAt:       time.Unix(2000, 0),
@@ -102,8 +102,8 @@ func TestTradeResponseUsesUserSideAndDecimalStrings(t *testing.T) {
 	assert.Equal(t, "2000.5", response.Price)
 	assert.Equal(t, "0.75", response.Quantity)
 	assert.Equal(t, "0.0005", response.FeeRate)
-	assert.Equal(t, "0.000375", response.BuyerFee)
-	assert.Equal(t, "ETH", response.BuyerFeeAsset)
+	assert.Equal(t, "0.7501875", response.BuyerFee)
+	assert.Equal(t, model.KRWAssetSymbol, response.BuyerFeeAsset)
 	assert.Equal(t, "0.7501875", response.SellerFee)
 	assert.Equal(t, model.KRWAssetSymbol, response.SellerFeeAsset)
 }
