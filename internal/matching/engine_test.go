@@ -368,6 +368,31 @@ func TestMarketBuyWithNoLiquidityDoesNotRest(t *testing.T) {
 	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
 }
 
+func TestMarketBuySkipsOwnAskOnlyAndDoesNotRest(t *testing.T) {
+	me := NewMatchingEngine()
+
+	me.Match(testUserOrder(1, 10, "BTC", model.OrderSideSell, 5000, 1))
+	me.Match(&Order{
+		ID:          2,
+		UserID:      10,
+		CoinSymbol:  "BTC",
+		Side:        model.OrderSideBuy,
+		OrderType:   model.OrderTypeMarket,
+		QuoteAmount: decimal.NewFromInt(5000),
+	})
+
+	doneEvent := requireNextExecutionEvent(t, me)
+
+	assertNoTrade(t, me)
+	require.NotNil(t, doneEvent.MarketOrderDone)
+	assert.Equal(t, decimal.NewFromInt(5000), doneEvent.MarketOrderDone.RemainingQuoteAmount)
+	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+	sellLevel, ok := me.GetOrderBook("BTC").SellOrders.Min()
+	require.True(t, ok)
+	assert.Equal(t, uint(1), sellLevel.Orders.Front().ID)
+	assert.Equal(t, decimal.NewFromInt(1), sellLevel.Orders.Front().Amount)
+}
+
 func TestMarketSellConsumesHighestBidsAndDoesNotRest(t *testing.T) {
 	me := NewMatchingEngine()
 
@@ -399,6 +424,31 @@ func TestMarketSellConsumesHighestBidsAndDoesNotRest(t *testing.T) {
 	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
 	buyLevel, ok := me.GetOrderBook("BTC").BuyOrders.Max()
 	require.True(t, ok)
+	assert.Equal(t, decimal.NewFromInt(1), buyLevel.Orders.Front().Amount)
+}
+
+func TestMarketSellSkipsOwnBidOnlyAndDoesNotRest(t *testing.T) {
+	me := NewMatchingEngine()
+
+	me.Match(testUserOrder(1, 10, "BTC", model.OrderSideBuy, 5000, 1))
+	me.Match(&Order{
+		ID:         2,
+		UserID:     10,
+		CoinSymbol: "BTC",
+		Side:       model.OrderSideSell,
+		OrderType:  model.OrderTypeMarket,
+		Amount:     decimal.NewFromInt(1),
+	})
+
+	doneEvent := requireNextExecutionEvent(t, me)
+
+	assertNoTrade(t, me)
+	require.NotNil(t, doneEvent.MarketOrderDone)
+	assert.Equal(t, decimal.NewFromInt(1), doneEvent.MarketOrderDone.RemainingAmount)
+	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
+	buyLevel, ok := me.GetOrderBook("BTC").BuyOrders.Max()
+	require.True(t, ok)
+	assert.Equal(t, uint(1), buyLevel.Orders.Front().ID)
 	assert.Equal(t, decimal.NewFromInt(1), buyLevel.Orders.Front().Amount)
 }
 

@@ -182,6 +182,23 @@ func TestCreditBuyerCoinWithAcquisitionCostUsesWeightedAverage(t *testing.T) {
 	assert.True(t, update.AvgBuyPrice.Equal(decimal.RequireFromString("116.6666666666666667")))
 }
 
+func TestCreditBuyerCoinWithAcquisitionCostTreatsZeroAverageInventoryAsZeroCost(t *testing.T) {
+	wallet := &model.Wallet{
+		CoinSymbol:       "BTC",
+		AvailableBalance: decimal.NewFromInt(1),
+		LockedBalance:    decimal.Zero,
+		Quantity:         decimal.NewFromInt(1),
+		AvgBuyPrice:      decimal.Zero,
+	}
+
+	update, err := creditBuyerCoinWithAcquisitionCost(wallet, decimal.NewFromInt(1), decimal.NewFromInt(100))
+
+	require.NoError(t, err)
+	assert.True(t, update.AvailableBalance.Equal(decimal.NewFromInt(2)))
+	assert.True(t, update.Quantity.Equal(decimal.NewFromInt(2)))
+	assert.True(t, update.AvgBuyPrice.Equal(decimal.NewFromInt(50)))
+}
+
 func TestCreditAvailableKeepsLockedBalance(t *testing.T) {
 	wallet := &model.Wallet{
 		CoinSymbol:       "BTC",
