@@ -160,7 +160,7 @@ Settlement duplicates do not write extra ledger rows because `SettleTrade` retur
 Known limits:
 
 - There is no public ledger API yet.
-- Fees are not modeled.
+- Trading fees are modeled in trades and settlement, but the ledger does not yet split fee revenue into a separate exchange account.
 - The ledger is per wallet balance change; a later accounting phase should introduce exchange-level double-entry accounts and stronger reconciliation reports.
 
 ## Matching Trade Event Identity
