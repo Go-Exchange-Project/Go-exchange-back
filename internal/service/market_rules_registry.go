@@ -51,7 +51,7 @@ type MarketRulesTickConfig struct {
 const EnvMarketRulesPath = "GOEXCHANGE_MARKET_RULES_PATH"
 
 var defaultMarketRulesConfigPath = "config/market_rules.json"
-var minKRWOrderNotional = decimal.NewFromInt(5000)
+var minKRWOrderNotional = decimal.Zero
 var defaultTradingFeeRate = decimal.RequireFromString("0.0005")
 var defaultMarketStatus = MarketStatusActive
 var defaultMinOrderQuantity = decimal.RequireFromString("0.00000001")
@@ -126,7 +126,7 @@ func NewMarketRulesRegistryFromFile(path string) (*MarketRulesRegistry, error) {
 }
 
 func NewMarketRulesRegistryFromConfig(config MarketRulesConfig) (*MarketRulesRegistry, error) {
-	minOrderNotional, err := parseConfigDecimal(config.MinOrderNotional, "min_order_notional", true)
+	minOrderNotional, err := parseConfigDecimal(config.MinOrderNotional, "min_order_notional", false)
 	if err != nil {
 		return nil, err
 	}
@@ -281,9 +281,11 @@ func (r *MarketRulesRegistry) ValidateLimitOrder(coinSymbol string, price decima
 		return err
 	}
 
-	notional := price.Mul(amount)
-	if notional.LessThan(r.minOrderNotional) {
-		return NewValidationErrorf("order notional must be at least %s KRW", r.minOrderNotional.String())
+	if r.minOrderNotional.GreaterThan(decimal.Zero) {
+		notional := price.Mul(amount)
+		if notional.LessThan(r.minOrderNotional) {
+			return NewValidationErrorf("order notional must be at least %s KRW", r.minOrderNotional.String())
+		}
 	}
 
 	return nil
@@ -293,7 +295,7 @@ func (r *MarketRulesRegistry) ValidateMarketBuyOrder(coinSymbol string, quoteAmo
 	if err := r.ValidateTradingEnabled(coinSymbol); err != nil {
 		return err
 	}
-	if quoteAmount.LessThan(r.minOrderNotional) {
+	if r.minOrderNotional.GreaterThan(decimal.Zero) && quoteAmount.LessThan(r.minOrderNotional) {
 		return NewValidationErrorf("market buy quote_amount must be at least %s KRW", r.minOrderNotional.String())
 	}
 	return nil

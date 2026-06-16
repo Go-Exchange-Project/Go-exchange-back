@@ -69,6 +69,7 @@ func main() {
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
 	authHandler := handler.NewAuthHandler(authService)
 	marketHandler := handler.NewMarketHandler(marketRulesRegistry)
+	orderBookHandler := handler.NewOrderBookHandler(me)
 	orderHandler := handler.NewOrderHandler(orderService)
 
 	go func() {
@@ -148,6 +149,7 @@ func main() {
 	r.POST("/auth/register", authHandler.Register)
 	r.POST("/auth/login", authHandler.Login)
 	r.GET("/markets/rules", marketHandler.GetRules)
+	r.GET("/orderbook", orderBookHandler.GetSnapshot)
 
 	authenticated := r.Group("/")
 	authenticated.Use(middleware.AuthRequired(tokenManager))

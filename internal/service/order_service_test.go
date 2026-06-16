@@ -58,6 +58,36 @@ func TestBuildOrderAcceptsMarketBuyQuoteAmount(t *testing.T) {
 	assert.Equal(t, decimal.RequireFromString("5000.25"), order.QuoteAmount)
 }
 
+func TestBuildOrderAcceptsSmallLimitOrderNotional(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:     1,
+		CoinSymbol: "XRP",
+		Side:       "SELL",
+		OrderType:  "LIMIT",
+		Price:      "1848",
+		Amount:     "1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "XRP", order.CoinSymbol)
+	assert.True(t, order.Price.Equal(decimal.NewFromInt(1848)))
+	assert.True(t, order.Amount.Equal(decimal.NewFromInt(1)))
+}
+
+func TestBuildOrderAcceptsSmallMarketBuyQuoteAmount(t *testing.T) {
+	order, err := BuildOrder(CreateOrderInput{
+		UserID:      1,
+		CoinSymbol:  "XRP",
+		Side:        "BUY",
+		OrderType:   "MARKET",
+		QuoteAmount: "1848",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderTypeMarket, order.OrderType)
+	assert.True(t, order.QuoteAmount.Equal(decimal.NewFromInt(1848)))
+}
+
 func TestBuildOrderAcceptsMarketSellAmount(t *testing.T) {
 	order, err := BuildOrder(CreateOrderInput{
 		UserID:     1,
@@ -126,16 +156,6 @@ func TestBuildOrderRejectsInvalidInputs(t *testing.T) {
 				Side:       "BUY",
 				OrderType:  "MARKET",
 				Amount:     "1",
-			},
-		},
-		{
-			name: "market buy below minimum quote amount",
-			input: CreateOrderInput{
-				UserID:      1,
-				CoinSymbol:  "BTC",
-				Side:        "BUY",
-				OrderType:   "MARKET",
-				QuoteAmount: "4999",
 			},
 		},
 		{

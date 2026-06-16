@@ -471,6 +471,23 @@ func TestGetOrderBookSnapshot_AsksAscendingBidsDescending(t *testing.T) {
 	assert.Equal(t, decimal.NewFromInt(40000), snapshot.Bids[1].Price)
 }
 
+func TestRequestOrderBookSnapshot_ReturnsCurrentSymbolBook(t *testing.T) {
+	me := NewMatchingEngine()
+	me.Start()
+
+	submitAndWaitSnapshot(t, me, testOrder(1, "AVAX", model.OrderSideSell, 10300, 1))
+	submitAndWaitSnapshot(t, me, testOrder(2, "AVAX", model.OrderSideSell, 10200, 1))
+
+	snapshot, err := me.RequestOrderBookSnapshot("AVAX", DefaultSnapshotDepth)
+
+	require.NoError(t, err)
+	assert.Equal(t, "AVAX", snapshot.CoinSymbol)
+	require.Len(t, snapshot.Asks, 2)
+	assert.Equal(t, decimal.NewFromInt(10200), snapshot.Asks[0].Price)
+	assert.Equal(t, decimal.NewFromInt(10300), snapshot.Asks[1].Price)
+	assert.Empty(t, snapshot.Bids)
+}
+
 func TestGetOrderBookSnapshot_LimitsDepth(t *testing.T) {
 	me := NewMatchingEngine()
 

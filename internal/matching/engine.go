@@ -15,6 +15,8 @@ var (
 	ErrCancelOrderInvalidCommand    = errors.New("invalid matching cancel command")
 	ErrCancelOrderEngineUnavailable = errors.New("matching engine is unavailable")
 	ErrCancelOrderTimedOut          = errors.New("matching cancel timed out")
+	ErrSnapshotEngineUnavailable    = errors.New("matching engine is unavailable")
+	ErrSnapshotTimedOut             = errors.New("matching snapshot request timed out")
 )
 
 type MatchingEngine struct {
@@ -22,6 +24,7 @@ type MatchingEngine struct {
 	OrderBooks  map[string]*OrderBook
 	OrderCh     chan *Order
 	CancelCh    chan CancelOrderCommand
+	SnapshotReq chan OrderBookSnapshotRequest
 	TradeCh     chan *model.Trade
 	ExecutionCh chan ExecutionEvent
 	SnapshotCh  chan OrderBookSnapshot
@@ -44,6 +47,17 @@ type CancelOrderCommand struct {
 type CancelOrderResult struct {
 	Removed bool
 	Err     error
+}
+
+type OrderBookSnapshotRequest struct {
+	CoinSymbol string
+	Depth      int
+	ResponseCh chan OrderBookSnapshotResult
+}
+
+type OrderBookSnapshotResult struct {
+	Snapshot OrderBookSnapshot
+	Err      error
 }
 
 type ExecutionEvent struct {
@@ -79,6 +93,7 @@ func NewMatchingEngine() *MatchingEngine {
 		OrderBooks:  make(map[string]*OrderBook),
 		OrderCh:     make(chan *Order, 1024),
 		CancelCh:    make(chan CancelOrderCommand, 1024),
+		SnapshotReq: make(chan OrderBookSnapshotRequest, 1024),
 		TradeCh:     make(chan *model.Trade, 1024),
 		ExecutionCh: make(chan ExecutionEvent, 1024),
 		SnapshotCh:  make(chan OrderBookSnapshot, 256),
@@ -104,9 +119,40 @@ func (me *MatchingEngine) Start() {
 				if result.Removed {
 					me.SnapshotCh <- me.GetOrderBookSnapshot(cmd.CoinSymbol)
 				}
+			case req := <-me.SnapshotReq:
+				if req.ResponseCh != nil {
+					req.ResponseCh <- OrderBookSnapshotResult{
+						Snapshot: me.GetOrderBookSnapshotWithDepth(req.CoinSymbol, req.Depth),
+					}
+				}
 			}
 		}
 	}()
+}
+
+func (me *MatchingEngine) RequestOrderBookSnapshot(coinSymbol string, depth int) (OrderBookSnapshot, error) {
+	if me == nil || me.SnapshotReq == nil {
+		return OrderBookSnapshot{}, ErrSnapshotEngineUnavailable
+	}
+
+	req := OrderBookSnapshotRequest{
+		CoinSymbol: coinSymbol,
+		Depth:      depth,
+		ResponseCh: make(chan OrderBookSnapshotResult, 1),
+	}
+
+	select {
+	case me.SnapshotReq <- req:
+	case <-time.After(time.Second):
+		return OrderBookSnapshot{}, ErrSnapshotTimedOut
+	}
+
+	select {
+	case result := <-req.ResponseCh:
+		return result.Snapshot, result.Err
+	case <-time.After(time.Second):
+		return OrderBookSnapshot{}, ErrSnapshotTimedOut
+	}
 }
 
 func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {

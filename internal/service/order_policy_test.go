@@ -51,7 +51,7 @@ func TestKRWMarketRulesReturnsSerializablePolicy(t *testing.T) {
 	assert.Equal(t, "KRW", rules.QuoteSymbol)
 	assert.True(t, rules.TradingEnabled)
 	assert.Equal(t, MarketStatusActive, rules.TradingStatus)
-	assert.True(t, rules.MinOrderNotional.Equal(decimal.NewFromInt(5000)))
+	assert.True(t, rules.MinOrderNotional.Equal(decimal.Zero))
 	assert.True(t, rules.MinOrderQuantity.Equal(decimal.RequireFromString("0.00000001")))
 	assert.True(t, rules.BaseQuantityStep.Equal(decimal.RequireFromString("0.00000001")))
 	assert.True(t, rules.FeeRate.Equal(decimal.RequireFromString("0.0005")))
@@ -355,13 +355,34 @@ func TestValidateLimitOrderPolicyRejectsPriceOutsideTick(t *testing.T) {
 	assert.Contains(t, err.Error(), "tick size")
 }
 
-func TestValidateLimitOrderPolicyRejectsSmallNotional(t *testing.T) {
+func TestValidateLimitOrderPolicyAllowsSmallNotionalByDefault(t *testing.T) {
 	err := validateLimitOrderPolicy(
-		"BTC",
-		decimal.RequireFromString("50000"),
-		decimal.RequireFromString("0.099"),
+		"XRP",
+		decimal.RequireFromString("1848"),
+		decimal.NewFromInt(1),
 	)
 
+	require.NoError(t, err)
+}
+
+func TestMarketRulesRegistryRejectsSmallNotionalWhenConfigured(t *testing.T) {
+	registry, err := NewMarketRulesRegistryFromConfig(MarketRulesConfig{
+		MinOrderNotional:        "5000",
+		FeeRate:                 "0.0005",
+		DefaultMarketStatus:     "ACTIVE",
+		DefaultMinOrderQuantity: "0.00000001",
+		DefaultBaseQuantityStep: "0.00000001",
+		Markets:                 map[string]MarketRulesMarketConfig{"btc": {}},
+		TickRules:               []MarketRulesTickConfig{{UpperBound: "10000", TickSize: "1"}},
+		MaxTickSize:             "1",
+	})
+	require.NoError(t, err)
+
+	err = registry.ValidateLimitOrder("BTC", decimal.NewFromInt(1000), decimal.NewFromInt(1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least 5000 KRW")
+
+	err = registry.ValidateMarketBuyOrder("BTC", decimal.NewFromInt(1000))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least 5000 KRW")
 }
@@ -388,11 +409,10 @@ func TestValidateLimitOrderPolicyRejectsSmallQuantity(t *testing.T) {
 	assert.Contains(t, err.Error(), "BTC order amount must be at least 0.00000001")
 }
 
-func TestValidateMarketBuyOrderPolicyRejectsSmallQuoteAmount(t *testing.T) {
-	err := validateMarketBuyOrderPolicy("BTC", decimal.RequireFromString("4999.999"))
+func TestValidateMarketBuyOrderPolicyAllowsSmallQuoteAmountByDefault(t *testing.T) {
+	err := validateMarketBuyOrderPolicy("BTC", decimal.NewFromInt(1))
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least 5000 KRW")
+	require.NoError(t, err)
 }
 
 func TestValidateMarketSellOrderPolicyRejectsAmountOutsideQuantityStep(t *testing.T) {
@@ -422,7 +442,6 @@ func TestBuildOrderRejectsInvalidLimitOrderPolicy(t *testing.T) {
 		want   string
 	}{
 		{name: "invalid tick", price: "10001", amount: "1", want: "tick size"},
-		{name: "below minimum notional", price: "10000", amount: "0.499", want: "at least 5000 KRW"},
 		{name: "invalid quantity step", price: "1000000000000", amount: "0.000000015", want: "quantity step"},
 	}
 

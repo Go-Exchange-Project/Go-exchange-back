@@ -117,7 +117,7 @@ Market rules are loaded from `config/market_rules.json` by default. Set `GOEXCHA
 
 The file controls:
 
-- `min_order_notional`: minimum quote notional for limit orders and market buys.
+- `min_order_notional`: minimum quote notional for limit orders and market buys. Use `0` to disable the notional minimum.
 - `fee_rate`: default trading fee rate returned by the market rules API.
 - `default_market_status`: fallback status for markets not listed under `markets`.
 - `default_min_order_quantity` and `default_base_quantity_step`: fallback base asset quantity policy.
