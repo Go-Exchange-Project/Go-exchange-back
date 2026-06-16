@@ -27,15 +27,21 @@
     }
   },
   "tick_rules": [
-    { "upper_bound": "1", "tick_size": "0.00001" },
+    { "upper_bound": "0.00001", "tick_size": "0.00000001" },
+    { "upper_bound": "0.0001", "tick_size": "0.0000001" },
+    { "upper_bound": "0.001", "tick_size": "0.000001" },
+    { "upper_bound": "0.01", "tick_size": "0.00001" },
+    { "upper_bound": "0.1", "tick_size": "0.0001" },
+    { "upper_bound": "1", "tick_size": "0.001" },
     { "upper_bound": "10", "tick_size": "0.01" },
     { "upper_bound": "100", "tick_size": "0.1" },
-    { "upper_bound": "1000", "tick_size": "1" },
+    { "upper_bound": "5000", "tick_size": "1" },
     { "upper_bound": "10000", "tick_size": "5" },
-    { "upper_bound": "100000", "tick_size": "10" },
-    { "upper_bound": "500000", "tick_size": "50" },
-    { "upper_bound": "1000000", "tick_size": "100" },
-    { "upper_bound": "2000000", "tick_size": "500" }
+    { "upper_bound": "50000", "tick_size": "10" },
+    { "upper_bound": "100000", "tick_size": "50" },
+    { "upper_bound": "500000", "tick_size": "100" },
+    { "upper_bound": "1000000", "tick_size": "500" },
+    { "upper_bound": "2000000", "tick_size": "1000" }
   ],
   "max_tick_size": "1000"
 }

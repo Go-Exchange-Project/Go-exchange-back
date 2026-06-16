@@ -15,15 +15,23 @@ func TestKRWTickSizeUsesPriceBands(t *testing.T) {
 		price string
 		want  string
 	}{
+		{price: "0.000009", want: "0.00000001"},
+		{price: "0.00009", want: "0.0000001"},
+		{price: "0.0009", want: "0.000001"},
 		{price: "0.00922", want: "0.00001"},
+		{price: "0.09", want: "0.0001"},
+		{price: "0.9", want: "0.001"},
 		{price: "9.99", want: "0.01"},
 		{price: "10", want: "0.1"},
 		{price: "100", want: "1"},
-		{price: "1000", want: "5"},
+		{price: "1000", want: "1"},
+		{price: "4999", want: "1"},
+		{price: "5000", want: "5"},
 		{price: "10000", want: "10"},
-		{price: "100000", want: "50"},
-		{price: "500000", want: "100"},
-		{price: "1000000", want: "500"},
+		{price: "50000", want: "50"},
+		{price: "100000", want: "100"},
+		{price: "500000", want: "500"},
+		{price: "1000000", want: "1000"},
 		{price: "2000000", want: "1000"},
 	}
 
@@ -49,8 +57,8 @@ func TestKRWMarketRulesReturnsSerializablePolicy(t *testing.T) {
 	assert.True(t, rules.FeeRate.Equal(decimal.RequireFromString("0.0005")))
 	require.Len(t, rules.TickRules, len(krwTickRules)+1)
 	require.NotNil(t, rules.TickRules[0].UpperBound)
-	assert.True(t, rules.TickRules[0].UpperBound.Equal(decimal.NewFromInt(1)))
-	assert.True(t, rules.TickRules[0].TickSize.Equal(decimal.RequireFromString("0.00001")))
+	assert.True(t, rules.TickRules[0].UpperBound.Equal(decimal.RequireFromString("0.00001")))
+	assert.True(t, rules.TickRules[0].TickSize.Equal(decimal.RequireFromString("0.00000001")))
 	assert.Nil(t, rules.TickRules[len(rules.TickRules)-1].UpperBound)
 	assert.True(t, rules.TickRules[len(rules.TickRules)-1].TickSize.Equal(decimal.NewFromInt(1000)))
 }
@@ -157,7 +165,7 @@ func TestMarketRulesRegistryReturnsDefensiveTickRules(t *testing.T) {
 
 	*rules.TickRules[0].UpperBound = decimal.NewFromInt(999)
 
-	assert.True(t, registry.KRWTickSize(decimal.RequireFromString("0.5")).Equal(decimal.RequireFromString("0.00001")))
+	assert.True(t, registry.KRWTickSize(decimal.RequireFromString("0.5")).Equal(decimal.RequireFromString("0.001")))
 }
 
 func TestNewMarketRulesRegistryFromConfig(t *testing.T) {

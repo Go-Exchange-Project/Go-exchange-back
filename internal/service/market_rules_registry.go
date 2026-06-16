@@ -84,15 +84,21 @@ type krwTickRule struct {
 }
 
 var krwTickRules = []krwTickRule{
-	{upperBound: decimal.NewFromInt(1), tickSize: decimal.RequireFromString("0.00001")},
+	{upperBound: decimal.RequireFromString("0.00001"), tickSize: decimal.RequireFromString("0.00000001")},
+	{upperBound: decimal.RequireFromString("0.0001"), tickSize: decimal.RequireFromString("0.0000001")},
+	{upperBound: decimal.RequireFromString("0.001"), tickSize: decimal.RequireFromString("0.000001")},
+	{upperBound: decimal.RequireFromString("0.01"), tickSize: decimal.RequireFromString("0.00001")},
+	{upperBound: decimal.RequireFromString("0.1"), tickSize: decimal.RequireFromString("0.0001")},
+	{upperBound: decimal.NewFromInt(1), tickSize: decimal.RequireFromString("0.001")},
 	{upperBound: decimal.NewFromInt(10), tickSize: decimal.RequireFromString("0.01")},
 	{upperBound: decimal.NewFromInt(100), tickSize: decimal.RequireFromString("0.1")},
-	{upperBound: decimal.NewFromInt(1000), tickSize: decimal.NewFromInt(1)},
+	{upperBound: decimal.NewFromInt(5000), tickSize: decimal.NewFromInt(1)},
 	{upperBound: decimal.NewFromInt(10000), tickSize: decimal.NewFromInt(5)},
-	{upperBound: decimal.NewFromInt(100000), tickSize: decimal.NewFromInt(10)},
-	{upperBound: decimal.NewFromInt(500000), tickSize: decimal.NewFromInt(50)},
-	{upperBound: decimal.NewFromInt(1000000), tickSize: decimal.NewFromInt(100)},
-	{upperBound: decimal.NewFromInt(2000000), tickSize: decimal.NewFromInt(500)},
+	{upperBound: decimal.NewFromInt(50000), tickSize: decimal.NewFromInt(10)},
+	{upperBound: decimal.NewFromInt(100000), tickSize: decimal.NewFromInt(50)},
+	{upperBound: decimal.NewFromInt(500000), tickSize: decimal.NewFromInt(100)},
+	{upperBound: decimal.NewFromInt(1000000), tickSize: decimal.NewFromInt(500)},
+	{upperBound: decimal.NewFromInt(2000000), tickSize: decimal.NewFromInt(1000)},
 }
 
 var maxKRWTickSize = decimal.NewFromInt(1000)
