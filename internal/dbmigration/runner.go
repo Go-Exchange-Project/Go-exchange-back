@@ -3,12 +3,16 @@ package dbmigration
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/pressly/goose/v3"
 	"gorm.io/gorm"
 )
+
+const EnvMigrationsDir = "GOEXCHANGE_MIGRATIONS_DIR"
 
 func Up(db *gorm.DB) error {
 	sqlDB, err := sqlDBFromGORM(db)
@@ -29,6 +33,9 @@ func UpSQL(db *sql.DB) error {
 }
 
 func migrationsDir() string {
+	if dir := strings.TrimSpace(os.Getenv(EnvMigrationsDir)); dir != "" {
+		return dir
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		return "migrations"

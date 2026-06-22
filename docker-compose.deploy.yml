@@ -1,0 +1,77 @@
+name: goexchange
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: goexchange-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-goexchange}
+      POSTGRES_USER: ${POSTGRES_USER:-goexchange}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-goexchange_local_password}
+    volumes:
+      - goexchange-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-goexchange} -d ${POSTGRES_DB:-goexchange}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: goexchange-back:local
+    container_name: goexchange-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOEXCHANGE_DB_HOST: postgres
+      GOEXCHANGE_DB_USER: ${POSTGRES_USER:-goexchange}
+      GOEXCHANGE_DB_PASSWORD: ${POSTGRES_PASSWORD:-goexchange_local_password}
+      GOEXCHANGE_DB_NAME: ${POSTGRES_DB:-goexchange}
+      GOEXCHANGE_DB_PORT: "5432"
+      GOEXCHANGE_DB_SSLMODE: disable
+      GOEXCHANGE_DB_CONNECT_TIMEOUT: "10"
+      GOEXCHANGE_JWT_SECRET: ${GOEXCHANGE_JWT_SECRET:-change-me-to-a-long-random-secret}
+      GOEXCHANGE_MARKET_RULES_PATH: /app/config/market_rules.json
+      GOEXCHANGE_MIGRATIONS_DIR: /app/migrations
+      GOEXCHANGE_ENABLE_DEV_TOOLS: ${GOEXCHANGE_ENABLE_DEV_TOOLS:-true}
+      GOEXCHANGE_DEV_TOOLS_TOKEN: ${GOEXCHANGE_DEV_TOOLS_TOKEN:-local-dev-token}
+      GOEXCHANGE_ENABLE_UPBIT: ${GOEXCHANGE_ENABLE_UPBIT:-false}
+      GOEXCHANGE_CORS_ALLOWED_ORIGINS: ${GOEXCHANGE_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      GOEXCHANGE_WS_ALLOWED_ORIGINS: ${GOEXCHANGE_WS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ping >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+  frontend:
+    build:
+      context: ${GOEXCHANGE_FRONTEND_CONTEXT:-../Go-exchange-front}
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8080/ws}
+        VITE_ENABLE_DEV_TOOLS: ${VITE_ENABLE_DEV_TOOLS:-true}
+        VITE_DEV_TOOLS_TOKEN: ${VITE_DEV_TOOLS_TOKEN:-local-dev-token}
+    image: goexchange-front:local
+    container_name: goexchange-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+volumes:
+  goexchange-postgres-data:

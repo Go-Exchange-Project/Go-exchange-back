@@ -18,6 +18,12 @@ func TestMigrationsDirContainsGooseMigration(t *testing.T) {
 	assert.False(t, info.IsDir())
 }
 
+func TestMigrationsDirUsesEnvOverride(t *testing.T) {
+	t.Setenv(EnvMigrationsDir, "/app/migrations")
+
+	assert.Equal(t, "/app/migrations", migrationsDir())
+}
+
 func TestSQLDBFromGORMRejectsNil(t *testing.T) {
 	sqlDB, err := sqlDBFromGORM(nil)
 

@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.env.*
+*.log
+coverage.out
+tmp/
+dist/
+node_modules/
+docker-compose.test.yml
+README.md
+TESTING.md
+docs/
