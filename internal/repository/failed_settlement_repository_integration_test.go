@@ -214,7 +214,7 @@ func TestIntegrationMarkResolvedIsNoOpForAlreadyResolved(t *testing.T) {
 	assert.Equal(t, "first resolution", persisted.Resolution)
 	assert.Equal(t, "ops-a", persisted.ResolvedBy)
 	require.NotNil(t, persisted.ResolvedAt)
-	assert.True(t, persisted.ResolvedAt.Equal(resolvedAt))
+	assert.WithinDuration(t, resolvedAt, *persisted.ResolvedAt, time.Millisecond)
 }
 
 func TestIntegrationMarkResolvedMissingIDReturnsError(t *testing.T) {

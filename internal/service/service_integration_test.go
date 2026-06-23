@@ -375,7 +375,7 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.Zero))
 	assert.True(t, sellerBTC.AvgBuyPrice.IsZero())
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
-	assertSettlementLedgerEntries(t, db, result.TradeID, trade.IdempotencyKey, buyerID, sellerID)
+	assertSettlementLedgerEntries(t, db, result.TradeID, trade.IdempotencyKey, buyerID, sellerID, "0", "0")
 }
 
 func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
@@ -562,7 +562,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	assert.True(t, buyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("90.045")))
 	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(5)))
 	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
-	assertSettlementLedgerEntries(t, db, firstResult.TradeID, trade.IdempotencyKey, buyerID, sellerID)
+	assertSettlementLedgerEntries(t, db, firstResult.TradeID, trade.IdempotencyKey, buyerID, sellerID, "499.75", "5")
 }
 
 func TestIntegrationSettleTradeSameIdempotencyKeyDifferentPayloadReturnsConflict(t *testing.T) {
@@ -1187,7 +1187,7 @@ func assertLedgerDelta(t *testing.T, entry model.LedgerEntry, asset string, avai
 	assert.True(t, entry.LockedBalanceAfter.Equal(decimal.RequireFromString(lockedAfter)), "locked_after=%s", entry.LockedBalanceAfter.String())
 }
 
-func assertSettlementLedgerEntries(t *testing.T, db *gorm.DB, tradeID uint, idempotencyKey string, buyerID uint, sellerID uint) {
+func assertSettlementLedgerEntries(t *testing.T, db *gorm.DB, tradeID uint, idempotencyKey string, buyerID uint, sellerID uint, buyerKRWLockedAfter string, sellerBTCLockedAfter string) {
 	t.Helper()
 
 	var entries []model.LedgerEntry
@@ -1205,8 +1205,8 @@ func assertSettlementLedgerEntries(t *testing.T, db *gorm.DB, tradeID uint, idem
 	for _, entry := range entries {
 		byUserAsset[fmt.Sprintf("%d/%s", entry.UserID, entry.CoinSymbol)] = entry
 	}
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "50.025", "-500.25", "50.025", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "50.025", "-500.25", "50.025", buyerKRWLockedAfter)
 	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, "BTC")], "BTC", "5", "0", "5", "0")
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, "BTC")], "BTC", "0", "-5", "0", "0")
+	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, "BTC")], "BTC", "0", "-5", "0", sellerBTCLockedAfter)
 	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "449.775", "0", "449.775", "0")
 }
