@@ -1,0 +1,80 @@
+name: goexchange-prod
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: goexchange-prod-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - goexchange-prod-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required} -d ${POSTGRES_DB:?POSTGRES_DB is required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - goexchange-prod
+
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/go-exchange-project/go-exchange-back:latest}
+    container_name: goexchange-prod-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GIN_MODE: release
+      GOEXCHANGE_DB_HOST: postgres
+      GOEXCHANGE_DB_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      GOEXCHANGE_DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      GOEXCHANGE_DB_NAME: ${POSTGRES_DB:?POSTGRES_DB is required}
+      GOEXCHANGE_DB_PORT: "5432"
+      GOEXCHANGE_DB_SSLMODE: disable
+      GOEXCHANGE_DB_CONNECT_TIMEOUT: "10"
+      GOEXCHANGE_JWT_SECRET: ${GOEXCHANGE_JWT_SECRET:?GOEXCHANGE_JWT_SECRET is required}
+      GOEXCHANGE_MARKET_RULES_PATH: /app/config/market_rules.json
+      GOEXCHANGE_MIGRATIONS_DIR: /app/migrations
+      GOEXCHANGE_ENABLE_DEV_TOOLS: ${GOEXCHANGE_ENABLE_DEV_TOOLS:-false}
+      GOEXCHANGE_DEV_TOOLS_TOKEN: ${GOEXCHANGE_DEV_TOOLS_TOKEN:-}
+      GOEXCHANGE_ENABLE_UPBIT: ${GOEXCHANGE_ENABLE_UPBIT:-false}
+      GOEXCHANGE_CORS_ALLOWED_ORIGINS: ${GOEXCHANGE_CORS_ALLOWED_ORIGINS:?GOEXCHANGE_CORS_ALLOWED_ORIGINS is required}
+      GOEXCHANGE_WS_ALLOWED_ORIGINS: ${GOEXCHANGE_WS_ALLOWED_ORIGINS:?GOEXCHANGE_WS_ALLOWED_ORIGINS is required}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ping >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+    networks:
+      - goexchange-prod
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/go-exchange-project/go-exchange-front:latest}
+    container_name: goexchange-prod-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    networks:
+      - goexchange-prod
+
+networks:
+  goexchange-prod:
+    name: goexchange-prod
+
+volumes:
+  goexchange-prod-postgres-data:
