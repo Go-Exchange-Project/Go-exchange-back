@@ -29,7 +29,7 @@
 k6 run -e BASE_URL=http://localhost:8080 -e DEV_TOOLS_TOKEN=<GOEXCHANGE_DEV_TOOLS_TOKEN 값> -e SMOKE_TEST=true loadtest/order-submission-baseline.js
 ```
 
-**전체 기준선 테스트** (VU 10→50명, 약 2분 40초):
+**전체 기준선 테스트** (VU 10→50명, 약 2분 50초):
 ```bash
 k6 run -e BASE_URL=http://localhost:8080 -e DEV_TOOLS_TOKEN=<GOEXCHANGE_DEV_TOOLS_TOKEN 값> loadtest/order-submission-baseline.js
 ```

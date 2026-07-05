@@ -339,7 +339,7 @@ git commit -m "feat: add k6 order-submission baseline load test script"
 k6 run -e BASE_URL=http://localhost:8080 -e DEV_TOOLS_TOKEN=<GOEXCHANGE_DEV_TOOLS_TOKEN 값> -e SMOKE_TEST=true loadtest/order-submission-baseline.js
 ```
 
-**전체 기준선 테스트** (VU 10→50명, 약 2분 40초):
+**전체 기준선 테스트** (VU 10→50명, 약 2분 50초):
 ```bash
 k6 run -e BASE_URL=http://localhost:8080 -e DEV_TOOLS_TOKEN=<GOEXCHANGE_DEV_TOOLS_TOKEN 값> loadtest/order-submission-baseline.js
 ```
@@ -400,7 +400,7 @@ Run: `curl -s http://localhost:8080/ping`
 
 Expected: `{"data":{"message":"pong"}}`. 만약 서버가 죽어 있다면 Task 1의 Step 1, 4를 다시 수행해 재기동한다.
 
-- [ ] **Step 3: 전체 기준선 테스트 실행 (약 2분 40초 소요, 전체 출력을 보존)**
+- [ ] **Step 3: 전체 기준선 테스트 실행 (약 2분 50초 소요, 전체 출력을 보존)**
 
 Run:
 ```bash

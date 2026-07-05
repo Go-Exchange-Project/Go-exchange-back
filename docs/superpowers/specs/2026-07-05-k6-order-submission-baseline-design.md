@@ -29,7 +29,7 @@
 
 1. 최대 VU 수(50명)만큼 유저를 미리 등록한다: `POST /auth/register`로 `loadtest-user-{i}@test.local` 형식 이메일과 고정 비밀번호를 사용해 50명 순차 가입. `Register` 응답에 이미 JWT `token`이 포함되므로 새 유저인 경우 별도 로그인 호출은 필요 없다. 다만 같은 테스트 DB에 스크립트를 여러 번 재실행하면 이미 등록된 이메일(`409`)을 만나는데, 이 경우 `POST /auth/login`으로 폴백해 토큰을 받는다 (재실행 가능성을 위한 구현 세부사항).
 2. 역할을 번갈아 배정한다: 홀수 번째는 "매수자(buyer)", 짝수 번째는 "매도자(seller)" — VU ID가 순서대로 배정되는 특성상, 소규모(스모크) 테스트에서도 매수자/매도자가 함께 활성화되도록 한다.
-3. `POST /dev/wallets/fund`(개발자 도구 엔드포인트, `X-Dev-Tools-Token` 헤더 필요)로 지갑을 충전한다:
+3. `POST /dev/wallets/fund`(개발자 도구 엔드포인트, `X-GoExchange-Dev-Token` 헤더 필요)로 지갑을 충전한다:
    - 매수자: `coin_symbol: "KRW"`, 넉넉한 금액(예: `100000000`)
    - 매도자: `coin_symbol: "BTC"`, 넉넉한 수량(예: `1000`)
 4. `setup()`은 `{ users: [{ token, role }, ...] }`를 반환하며, 이 데이터가 모든 VU의 시나리오 함수에 전달된다.
