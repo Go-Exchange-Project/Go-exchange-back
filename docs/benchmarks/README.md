@@ -1,10 +1,13 @@
 # 벤치마크/테스트 결과 기록
 
-성능 비교(전/후)를 위해 벤치마크 및 주요 테스트 실행 결과를 이 디렉토리에 날짜별로 저장합니다.
+성능 비교(전/후)를 위해 벤치마크 및 주요 테스트 실행 결과를 이 디렉토리에 순서대로 저장합니다.
 
 ## 파일 명명 규칙
 
-`YYYY-MM-DD-<대상>-benchmarks.md` (예: `2026-07-05-matching-engine-benchmarks.md`)
+`NN-YYYY-MM-DD-<대상>-benchmarks.md` (예: `01-2026-07-05-matching-engine-benchmarks.md`)
+
+- `NN`: 몇 번째 기록인지 (01, 02, 03, ... 두 자리, 100개 넘으면 자릿수 확장). 파일명이 정렬 순서 = 기록 순서가 되도록 함
+- 파일 제목(H1)에도 `N번째 테스트 (날짜)` 형식으로 명시
 
 ## 각 파일에 포함할 내용
 
@@ -16,4 +19,4 @@
 
 ## 기록 목록
 
-- [2026-07-05-matching-engine-benchmarks.md](2026-07-05-matching-engine-benchmarks.md) — 매칭엔진 동시성/벤치마크 테스트 추가 작업 직후 첫 벤치마크 결과 (커밋 `24f8cb2`)
+- [01-2026-07-05-matching-engine-benchmarks.md](01-2026-07-05-matching-engine-benchmarks.md) — 1번째 테스트: 매칭엔진 동시성/벤치마크 테스트 추가 작업 직후 첫 벤치마크 결과 (커밋 `24f8cb2`)
