@@ -48,7 +48,7 @@ Run: `where k6` (Windows) 또는 `k6 version`
 
 Expected: 설치되어 있지 않으면(`찾을 수 없음`/명령어 없음 에러) 다음으로 설치:
 ```
-winget install --id=k6.k6 -e --accept-source-agreements --accept-package-agreements
+winget install --id=GrafanaLabs.k6 -e --accept-source-agreements --accept-package-agreements
 ```
 설치 후 새 셸에서 `k6 version`을 실행해 버전 문자열이 출력되는지 확인한다.
 
@@ -315,7 +315,7 @@ git commit -m "feat: add k6 order-submission baseline load test script"
 
 ## 사전 준비
 
-1. k6 설치 확인: `k6 version` (없으면 `winget install --id=k6.k6 -e`)
+1. k6 설치 확인: `k6 version` (없으면 `winget install --id=GrafanaLabs.k6 -e`). 설치 직후에는 현재 셸이 갱신된 PATH를 못 읽을 수 있으니, 새 터미널을 열거나 `export PATH="/c/Program Files/k6:$PATH"`로 직접 잡아준다.
 2. 테스트 전용 Postgres 기동 (평소 개발용 DB와 분리됨):
    ```bash
    docker-compose -f docker-compose.test.yml up -d
@@ -359,6 +359,10 @@ k6 run -e BASE_URL=http://localhost:8080 -e DEV_TOOLS_TOKEN=<GOEXCHANGE_DEV_TOOL
   있다. 실제 체결(트레이드) 발생 여부는 `GET /trades`로 확인할 수 있다.
 - 이번 버전은 처리량/지연시간 "기준선" 측정이 목적이며 임계값(pass/fail threshold)은
   걸려있지 않다. 스트레스 테스트, 혼합 시나리오(조회 트래픽 포함) 는 별도 작업이다.
+- 같은 테스트 DB에 스크립트를 여러 번 실행해도 안전하다: `setup()`이 이미 등록된 유저를
+  만나면(`409`) 자동으로 로그인으로 폴백한다. 다만 이 경우 k6의 전역 `http_req_failed`
+  지표에는 이 예상된 `409`가 실패로 잡히므로, 실패율은 `create_order` 태그 기준으로
+  판단해야 한다.
 ```
 
 - [ ] **Step 2: 커밋**
