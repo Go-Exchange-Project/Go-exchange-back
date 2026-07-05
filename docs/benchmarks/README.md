@@ -20,3 +20,4 @@
 ## 기록 목록
 
 - [01-2026-07-05-matching-engine-benchmarks.md](01-2026-07-05-matching-engine-benchmarks.md) — 1번째 테스트: 매칭엔진 동시성/벤치마크 테스트 추가 작업 직후 첫 벤치마크 결과 (커밋 `24f8cb2`)
+- [02-2026-07-06-k6-order-submission-baseline.md](02-2026-07-06-k6-order-submission-baseline.md) — 2번째 테스트: POST /orders 부하테스트(k6) 기준선, VU 10~50명 (커밋 `d2bf50a`)
