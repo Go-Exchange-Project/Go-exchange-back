@@ -2,6 +2,7 @@ package matching
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,4 +57,43 @@ func TestConcurrentOrderSubmission_NoRaceAndConsistentState(t *testing.T) {
 
 	assert.Equal(t, numGoroutines, orderCount)
 	assert.True(t, totalQty.Equal(decimal.NewFromInt(numGoroutines)))
+}
+
+func TestConcurrentMultiSymbolAccess_NoRace(t *testing.T) {
+	me := NewMatchingEngine()
+	me.Start()
+
+	symbols := []string{"BTC", "ETH", "AVAX", "SOL", "DOGE"}
+	const ordersPerSymbol = 20
+	var wg sync.WaitGroup
+	wg.Add(len(symbols) * ordersPerSymbol)
+
+	var nextOrderID uint32
+	for _, symbol := range symbols {
+		for i := 0; i < ordersPerSymbol; i++ {
+			go func(symbol string, i int) {
+				defer wg.Done()
+				id := atomic.AddUint32(&nextOrderID, 1)
+				order := testOrder(uint(id), symbol, model.OrderSideBuy, int64(1000+i), 1)
+				submitAndWaitSnapshot(t, me, order)
+			}(symbol, i)
+		}
+	}
+
+	waitWithTimeout(t, &wg, 5*time.Second)
+
+	for _, symbol := range symbols {
+		book := me.GetOrderBook(symbol)
+		count := 0
+		book.BuyOrders.Ascend(func(level *PriceLevel) bool {
+			for j := 0; j < level.Orders.Len(); j++ {
+				if level.Orders.At(j).CoinSymbol != symbol {
+					t.Fatalf("order from symbol %s found in %s book", level.Orders.At(j).CoinSymbol, symbol)
+				}
+				count++
+			}
+			return true
+		})
+		assert.Equal(t, ordersPerSymbol, count, "symbol %s order count mismatch", symbol)
+	}
 }
