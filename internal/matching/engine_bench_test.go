@@ -56,3 +56,25 @@ func BenchmarkOrderBookDepth(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkBulkFill(b *testing.B) {
+	const wallDepth = 100
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		me := NewMatchingEngine()
+		for lvl := 0; lvl < wallDepth; lvl++ {
+			me.Match(testOrder(uint(lvl+1), "BTC", model.OrderSideSell, int64(50000+lvl), 1))
+		}
+
+		localDone := make(chan struct{})
+		go drainEngineEvents(me, localDone)
+		b.StartTimer()
+
+		me.Match(testOrder(uint(wallDepth+1), "BTC", model.OrderSideBuy, int64(50000+wallDepth-1), int64(wallDepth)))
+
+		b.StopTimer()
+		close(localDone)
+	}
+}
