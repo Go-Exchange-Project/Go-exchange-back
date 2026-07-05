@@ -97,3 +97,33 @@ func TestConcurrentMultiSymbolAccess_NoRace(t *testing.T) {
 		assert.Equal(t, ordersPerSymbol, count, "symbol %s order count mismatch", symbol)
 	}
 }
+
+func TestMultipleEngineInstances_Isolated(t *testing.T) {
+	const numEngines = 5
+	engines := make([]*MatchingEngine, numEngines)
+	for i := range engines {
+		engines[i] = NewMatchingEngine()
+		engines[i].Start()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(numEngines)
+	for i, me := range engines {
+		go func(i int, me *MatchingEngine) {
+			defer wg.Done()
+			submitAndWaitSnapshot(t, me, testOrder(uint(i+1), "BTC", model.OrderSideSell, 50000, 1))
+			submitAndWaitSnapshot(t, me, testOrder(uint(i+100), "BTC", model.OrderSideBuy, 50000, 1))
+		}(i, me)
+	}
+	waitWithTimeout(t, &wg, 5*time.Second)
+
+	for i, me := range engines {
+		trade := requireNextTrade(t, me)
+		assert.Equal(t, uint(i+1), trade.SellOrderID, "engine %d trade sell order id mismatch", i)
+		assert.Equal(t, uint(i+100), trade.BuyOrderID, "engine %d trade buy order id mismatch", i)
+		assert.Equal(t, int64(1), trade.EngineSequence, "engine %d should have independent trade sequence starting at 1", i)
+		assertNoTrade(t, me)
+		assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+		assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
+	}
+}
