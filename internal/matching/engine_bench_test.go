@@ -33,20 +33,33 @@ func BenchmarkMatch_ImmediateCross(b *testing.B) {
 	}
 }
 
+// buildSellWall seeds the book with `levels` resting sell orders at
+// ascending prices (50000, 50001, ...), each with order ID i+1.
+func buildSellWall(me *MatchingEngine, levels int) {
+	for i := 0; i < levels; i++ {
+		me.Match(testOrder(uint(i+1), "BTC", model.OrderSideSell, int64(50000+i), 1))
+	}
+}
+
 func BenchmarkOrderBookDepth(b *testing.B) {
 	depths := []int{100, 1000, 10000}
 	for _, depth := range depths {
 		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
 			me := NewMatchingEngine()
-			for i := 0; i < depth; i++ {
-				me.Match(testOrder(uint(i+1), "BTC", model.OrderSideSell, int64(50000+i), 1))
-			}
+			buildSellWall(me, depth)
 
 			done := make(chan struct{})
 			go drainEngineEvents(me, done)
 			defer close(done)
 
 			b.ReportAllocs()
+			// The timed loop below only ever matches against the single
+			// best-price (lowest) resting sell order at 50000, immediately
+			// replenishing it each iteration. The rest of the sell wall
+			// built above is never touched during timing, so ns/op is
+			// expected to stay flat across depth=100/1000/10000 — this
+			// benchmark measures top-of-book match cost, not depth-dependent
+			// traversal cost.
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				orderID := uint(100000 + i*2)
@@ -64,9 +77,7 @@ func BenchmarkBulkFill(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		me := NewMatchingEngine()
-		for lvl := 0; lvl < wallDepth; lvl++ {
-			me.Match(testOrder(uint(lvl+1), "BTC", model.OrderSideSell, int64(50000+lvl), 1))
-		}
+		buildSellWall(me, wallDepth)
 
 		localDone := make(chan struct{})
 		go drainEngineEvents(me, localDone)
