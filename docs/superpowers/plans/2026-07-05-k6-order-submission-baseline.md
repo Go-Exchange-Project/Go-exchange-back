@@ -170,6 +170,11 @@ export function setup() {
     const role = i % 2 === 1 ? 'buyer' : 'seller';
     const email = `loadtest-user-${i}@test.local`;
 
+    // Register-or-login: re-running this script against the same test DB
+    // (e.g. smoke test then full test, or two full runs back to back) hits
+    // "409 email already registered" for users created by a prior run. Fall
+    // back to logging in as that user instead of treating it as a failure,
+    // so the script is safely re-runnable without resetting the test DB.
     const registerRes = http.post(
       `${BASE_URL}/auth/register`,
       JSON.stringify({
@@ -180,12 +185,26 @@ export function setup() {
       { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } }
     );
 
-    if (registerRes.status !== 201) {
+    let token;
+    if (registerRes.status === 201) {
+      token = registerRes.json('data.token');
+    } else if (registerRes.status === 409) {
+      const loginRes = http.post(
+        `${BASE_URL}/auth/login`,
+        JSON.stringify({ email: email, password: 'loadtest-password-123' }),
+        { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } }
+      );
+      if (loginRes.status !== 200) {
+        throw new Error(
+          `setup: user ${i} (${email}) already registered but login failed: ${loginRes.status} ${loginRes.body}`
+        );
+      }
+      token = loginRes.json('data.token');
+    } else {
       throw new Error(
         `setup: failed to register user ${i} (${email}): ${registerRes.status} ${registerRes.body}`
       );
     }
-    const token = registerRes.json('data.token');
 
     const fundBody =
       role === 'buyer'
