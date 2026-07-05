@@ -4,7 +4,7 @@
 
 **Goal:** `POST /orders` 엔드포인트(인증, DB 쓰기, 매칭, 정산 전체 경로)를 대상으로 하는 k6 부하테스트 스크립트를 만들고, 로컬 환경에서 VU 10~50명 규모의 기준선 결과를 측정해 `docs/benchmarks/`에 기록한다.
 
-**Architecture:** k6 스크립트의 `setup()`이 매수자 25명/매도자 25명을 가입시키고 지갑을 충전한 뒤, `ramping-vus` executor로 VU를 10→50명까지 올리며 고정 체결가에 매수/매도 주문을 계속 제출해 실제 체결이 발생하게 한다. 대상 DB는 `docker-compose.test.yml`의 격리된 테스트 Postgres이며, 서버 실행 시 환경변수로 접속 정보를 오버라이드한다.
+**Architecture:** k6 스크립트의 `setup()`이 매수자/매도자를 홀짝으로 번갈아 배정해(총 25명씩) 가입(또는 재실행 시 로그인 폴백)시키고 지갑을 충전한 뒤, `ramping-vus` executor로 VU를 10→50명까지 올리며 고정 체결가에 매수/매도 주문을 계속 제출해 실제 체결이 발생하게 한다. 대상 DB는 `docker-compose.test.yml`의 격리된 테스트 Postgres이며, 서버 실행 시 환경변수로 접속 정보를 오버라이드한다.
 
 **Tech Stack:** k6 (JavaScript), Gin 백엔드(`cmd/main.go`), Postgres(`docker-compose.test.yml`), 기존 `docs/benchmarks/` 기록 컨벤션.
 
