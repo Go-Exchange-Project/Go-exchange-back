@@ -12,3 +12,6 @@
 !*.tfvars.example
 crash.log
 crash.*.log
+
+# Superpowers subagent-driven-development scratch state
+.superpowers/
