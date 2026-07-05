@@ -14,7 +14,7 @@
 - 서버 실행 시 `GOEXCHANGE_DB_HOST`, `GOEXCHANGE_DB_PORT`, `GOEXCHANGE_DB_USER`, `GOEXCHANGE_DB_NAME`, `GOEXCHANGE_DB_PASSWORD`를 셸 환경변수로 명시적으로 오버라이드한다 (`.env.local` 파일은 수정하지 않는다 — `config.LoadLocalEnvFiles()`는 이미 설정된 OS 환경변수를 덮어쓰지 않으므로 셸에서 먼저 export하면 `.env.local`보다 우선한다).
 - 개발자 도구 토큰: `.env.local`에 이미 `GOEXCHANGE_ENABLE_DEV_TOOLS=true`, `GOEXCHANGE_DEV_TOOLS_TOKEN=local-dev-token`이 설정되어 있다. 헤더명은 `X-GoExchange-Dev-Token` (`internal/middleware/dev_tools.go`의 `DevToolsTokenHeader` 상수).
 - 대상 심볼: `BTC`, 고정 체결가 `50000000`, 주문 수량 `0.001` (전량 지정가). `config/market_rules.json`에서 `BTC`는 `ACTIVE`, `min_order_quantity`/`base_quantity_step` = `0.00000001`이라 이 값들은 유효하다.
-- 테스트 유저 50명: 앞 25명은 `buyer`(코인 심볼 `KRW`로 `100000000` 충전), 뒤 25명은 `seller`(코인 심볼 `BTC`로 `1000` 충전). `KRW` 자산 심볼 상수는 `model.KRWAssetSymbol = "KRW"`.
+- 테스트 유저 50명: 홀수 번째(1, 3, 5, ...)는 `buyer`(코인 심볼 `KRW`로 `100000000` 충전), 짝수 번째(2, 4, 6, ...)는 `seller`(코인 심볼 `BTC`로 `1000` 충전) — 총 25명씩이지만, 번갈아 배정해 VU ID가 낮은 순서로 활성화되는 소규모(스모크) 테스트에서도 항상 매수자/매도자가 함께 섞이도록 한다. `KRW` 자산 심볼 상수는 `model.KRWAssetSymbol = "KRW"`.
 - VU 프로파일: `ramping-vus` executor, `stages: [{30s→10}, {1m→50}, {1m@50}, {20s→0}]`.
 - 임계값(threshold)은 걸지 않는다.
 - 새로 만드는 파일은 정확히 2개: `loadtest/order-submission-baseline.js`, `loadtest/README.md`. 그 외에 `docs/benchmarks/`에 결과 기록 파일 1개와 `docs/benchmarks/README.md` 갱신이 추가된다.
@@ -123,7 +123,6 @@ const DEV_TOOLS_TOKEN = __ENV.DEV_TOOLS_TOKEN;
 const DEV_TOOLS_TOKEN_HEADER = 'X-GoExchange-Dev-Token';
 
 const TOTAL_USERS = 50;
-const BUYER_COUNT = 25;
 const COIN_SYMBOL = 'BTC';
 const FIXED_PRICE = '50000000';
 const ORDER_AMOUNT = '0.001';
@@ -163,7 +162,12 @@ export function setup() {
 
   const users = [];
   for (let i = 1; i <= TOTAL_USERS; i++) {
-    const role = i <= BUYER_COUNT ? 'buyer' : 'seller';
+    // Alternate role by parity (not a contiguous 1..25/26..50 split) so that
+    // any two consecutive VU IDs include one buyer and one seller. This
+    // matters because k6 assigns VU IDs sequentially starting at 1, and a
+    // low-VU smoke test (e.g. target=2) would otherwise only ever activate
+    // VU1/VU2 — which must include both roles to produce a trade.
+    const role = i % 2 === 1 ? 'buyer' : 'seller';
     const email = `loadtest-user-${i}@test.local`;
 
     const registerRes = http.post(
