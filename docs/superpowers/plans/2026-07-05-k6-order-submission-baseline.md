@@ -268,7 +268,7 @@ cd "C:\Users\dksco\OneDrive\Desktop\GoExchange\Go-exchange-back"
 k6 run -e BASE_URL=http://localhost:8080 -e DEV_TOOLS_TOKEN=local-dev-token -e SMOKE_TEST=true loadtest/order-submission-baseline.js
 ```
 
-Expected: `setup()`이 에러 없이 50명 유저 등록/충전을 마치고, `checks` 요약에 `order accepted (status 200)` 100% 통과, `http_req_failed` 비율 0.00%로 출력된다.
+Expected: `setup()`이 에러 없이 50명 유저 등록(또는 이미 등록되어 있으면 로그인 폴백)/충전을 마치고, `checks` 요약에 `order accepted (status 200)` 100% 통과. **주의:** 같은 테스트 DB에 스크립트를 이미 한 번 실행한 적이 있다면, 재실행 시 `setup()`의 회원가입 요청이 `409`를 받고 로그인으로 폴백하는데, k6의 전역 `http_req_failed`는 이 예상된 `409`도 실패로 집계해 0%가 아닐 수 있다. 이 경우 전역 수치 대신 `create_order` 태그가 붙은 요청만의 실패율(및 `checks`의 100% 통과 여부)로 판단한다 — 실제로 문제가 없다면 `create_order` 태그 쪽은 0%여야 한다.
 
 - [ ] **Step 3: 실제 체결이 일어났는지 확인**
 
