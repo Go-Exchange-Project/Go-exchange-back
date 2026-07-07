@@ -6,8 +6,11 @@ import (
 	"log"
 	"testing"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,4 +107,21 @@ func testTrade() *model.Trade {
 
 func discardLogger() *log.Logger {
 	return log.New(&bytes.Buffer{}, "", 0)
+}
+
+func histogramSampleCount(t *testing.T, h prometheus.Histogram) uint64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, h.Write(m))
+	return m.GetHistogram().GetSampleCount()
+}
+
+func TestProcessTradeSettlementRecordsSettlementDuration(t *testing.T) {
+	before := histogramSampleCount(t, metrics.OrderSettlementDuration)
+
+	settler := &fakeTradeSettler{result: service.SettlementResult{Applied: true, TradeID: 1}}
+	processTradeSettlement(testTrade(), settler, nil, func([]byte) {}, discardLogger())
+
+	after := histogramSampleCount(t, metrics.OrderSettlementDuration)
+	assert.Equal(t, before+1, after)
 }

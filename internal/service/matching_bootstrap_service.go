@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -120,6 +121,7 @@ func matchingOrderFromModelOrder(order model.Order) (*matching.Order, error) {
 		Price:        order.Price,
 		Amount:       remaining,
 		CreatedAt:    order.CreatedAt,
+		EnqueuedAt:   time.Now(),
 		OrderType:    order.OrderType,
 		FilledAmount: order.FilledAmount,
 	}, nil

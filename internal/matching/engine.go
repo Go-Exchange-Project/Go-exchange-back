@@ -30,6 +30,8 @@ type MatchingEngine struct {
 	SnapshotCh  chan OrderBookSnapshot
 	engineID    string
 	tradeSeq    int64
+
+	MatchLatencyObserver func(time.Duration)
 }
 
 const DefaultSnapshotDepth = 30
@@ -110,6 +112,9 @@ func (me *MatchingEngine) Start() {
 					continue
 				}
 				me.Match(order)
+				if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
+					me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
+				}
 				me.SnapshotCh <- me.GetOrderBookSnapshot(order.CoinSymbol)
 			case cmd := <-me.CancelCh:
 				result := me.handleCancel(cmd)

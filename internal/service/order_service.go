@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -111,6 +112,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 			Amount:            order.Amount,
 			QuoteAmount:       matchingQuoteAmountForOrder(order),
 			CreatedAt:         order.CreatedAt,
+			EnqueuedAt:        time.Now(),
 			OrderType:         order.OrderType,
 			FilledAmount:      order.FilledAmount,
 			FilledQuoteAmount: order.FilledQuoteAmount,

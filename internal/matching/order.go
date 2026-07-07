@@ -17,6 +17,7 @@ type Order struct {
 	FilledAmount      decimal.Decimal
 	FilledQuoteAmount decimal.Decimal
 	CreatedAt         time.Time
+	EnqueuedAt        time.Time
 	OrderType         model.OrderType
 	Price             decimal.Decimal
 }

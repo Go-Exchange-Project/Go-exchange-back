@@ -47,6 +47,9 @@ func main() {
 	}
 
 	me := matching.NewMatchingEngine()
+	me.MatchLatencyObserver = func(d time.Duration) {
+		metrics.OrderPipelineMatchLatency.Observe(d.Seconds())
+	}
 	me.Start()
 
 	hub := ws.NewHub()
@@ -235,7 +238,9 @@ func processTradeSettlement(
 		logger = log.Default()
 	}
 
+	settlementStart := time.Now()
 	result, err := settler.SettleTrade(trade)
+	metrics.OrderSettlementDuration.Observe(time.Since(settlementStart).Seconds())
 	if err != nil {
 		if failureRecorder != nil {
 			if _, recordErr := failureRecorder.RecordFailure(trade, err); recordErr != nil {
