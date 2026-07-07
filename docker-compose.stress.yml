@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-goexchange}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
-      - goexchange-stress-postgres-data:/var/lib/postgresql/data
+      - goexchange-stress-postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-goexchange} -d ${POSTGRES_DB:-goexchange}"]
       interval: 10s
