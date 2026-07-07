@@ -14,6 +14,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/middleware"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
@@ -22,6 +23,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/ws"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -135,6 +137,9 @@ func main() {
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders: []string{"Content-Type", "Authorization", middleware.DevToolsTokenHeader},
 	}))
+	r.Use(metrics.HTTPMiddleware())
+
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	r.GET("/ping", func(c *gin.Context) {
 		httpapi.WriteData(c, http.StatusOK, gin.H{
