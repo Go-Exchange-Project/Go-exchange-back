@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
@@ -31,6 +32,12 @@ func main() {
 		log.Fatal("load local env failed: ", err)
 	}
 	config.ConnectDB()
+
+	if config.PprofEnabledFromEnv() {
+		go func() {
+			log.Println("pprof listening on 127.0.0.1:6060:", http.ListenAndServe("127.0.0.1:6060", nil))
+		}()
+	}
 
 	if err := config.DB.AutoMigrate(
 		&model.User{},

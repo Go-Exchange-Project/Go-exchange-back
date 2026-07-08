@@ -10,6 +10,7 @@ const (
 	EnvGOExchangeDevToolsToken  = "GOEXCHANGE_DEV_TOOLS_TOKEN"
 	EnvGOExchangeEnableUpbit    = "GOEXCHANGE_ENABLE_UPBIT"
 	EnvGOExchangeCORSOrigins    = "GOEXCHANGE_CORS_ALLOWED_ORIGINS"
+	EnvGOExchangeEnablePprof    = "GOEXCHANGE_ENABLE_PPROF"
 )
 
 var defaultCORSAllowedOrigins = []string{
@@ -31,6 +32,10 @@ func UpbitEnabledFromEnv() bool {
 		return true
 	}
 	return parseBoolEnv(value)
+}
+
+func PprofEnabledFromEnv() bool {
+	return parseBoolEnv(os.Getenv(EnvGOExchangeEnablePprof))
 }
 
 func CORSAllowedOriginsFromEnv() []string {

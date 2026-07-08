@@ -95,3 +95,22 @@ func requireUnsetEnv(t *testing.T, key string) {
 		t.Fatalf("unset env %s: %v", key, err)
 	}
 }
+
+func TestPprofEnabledFromEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected bool
+	}{
+		{name: "enabled", value: "true", expected: true},
+		{name: "disabled", value: "false", expected: false},
+		{name: "unset", value: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvGOExchangeEnablePprof, tt.value)
+			assert.Equal(t, tt.expected, PprofEnabledFromEnv())
+		})
+	}
+}
