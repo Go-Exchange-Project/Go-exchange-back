@@ -25,6 +25,9 @@ const STRESS_STAGES = [
 ];
 
 export const options = {
+  // TOTAL_USERS=800 sequential register-or-login + fund calls take well over
+  // k6's default 60s setup() timeout, so this must be raised explicitly.
+  setupTimeout: '5m',
   scenarios: {
     order_submission_stress: {
       executor: 'ramping-vus',
