@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDatabaseDSNFromEnvUsesExplicitDSN(t *testing.T) {
 	clearDatabaseEnv(t)
@@ -57,6 +60,94 @@ func TestBuildDatabaseDSNOmitsEmptyPassword(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("BuildDatabaseDSN() = %q, want %q", got, want)
+	}
+}
+
+func TestMaxOpenConnsFromEnvDefaultsWhenUnset(t *testing.T) {
+	t.Setenv(EnvDBMaxOpenConns, "")
+
+	got := MaxOpenConnsFromEnv()
+	want := 25
+
+	if got != want {
+		t.Fatalf("MaxOpenConnsFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestMaxOpenConnsFromEnvUsesExplicitValue(t *testing.T) {
+	t.Setenv(EnvDBMaxOpenConns, "10")
+
+	got := MaxOpenConnsFromEnv()
+	want := 10
+
+	if got != want {
+		t.Fatalf("MaxOpenConnsFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestMaxOpenConnsFromEnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv(EnvDBMaxOpenConns, "not-a-number")
+
+	got := MaxOpenConnsFromEnv()
+	want := 25
+
+	if got != want {
+		t.Fatalf("MaxOpenConnsFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestMaxIdleConnsFromEnvDefaultsWhenUnset(t *testing.T) {
+	t.Setenv(EnvDBMaxIdleConns, "")
+
+	got := MaxIdleConnsFromEnv()
+	want := 25
+
+	if got != want {
+		t.Fatalf("MaxIdleConnsFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestMaxIdleConnsFromEnvUsesExplicitValue(t *testing.T) {
+	t.Setenv(EnvDBMaxIdleConns, "5")
+
+	got := MaxIdleConnsFromEnv()
+	want := 5
+
+	if got != want {
+		t.Fatalf("MaxIdleConnsFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestConnMaxLifetimeFromEnvDefaultsWhenUnset(t *testing.T) {
+	t.Setenv(EnvDBConnMaxLifetime, "")
+
+	got := ConnMaxLifetimeFromEnv()
+	want := 30 * time.Minute
+
+	if got != want {
+		t.Fatalf("ConnMaxLifetimeFromEnv() = %s, want %s", got, want)
+	}
+}
+
+func TestConnMaxLifetimeFromEnvUsesExplicitValue(t *testing.T) {
+	t.Setenv(EnvDBConnMaxLifetime, "5m")
+
+	got := ConnMaxLifetimeFromEnv()
+	want := 5 * time.Minute
+
+	if got != want {
+		t.Fatalf("ConnMaxLifetimeFromEnv() = %s, want %s", got, want)
+	}
+}
+
+func TestConnMaxLifetimeFromEnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv(EnvDBConnMaxLifetime, "not-a-duration")
+
+	got := ConnMaxLifetimeFromEnv()
+	want := 30 * time.Minute
+
+	if got != want {
+		t.Fatalf("ConnMaxLifetimeFromEnv() = %s, want %s", got, want)
 	}
 }
 
