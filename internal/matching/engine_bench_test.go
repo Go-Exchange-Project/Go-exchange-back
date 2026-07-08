@@ -3,8 +3,10 @@ package matching
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/shopspring/decimal"
 )
 
 func drainEngineEvents(me *MatchingEngine, done <-chan struct{}) {
@@ -88,4 +90,85 @@ func BenchmarkBulkFill(b *testing.B) {
 		b.StopTimer()
 		close(localDone)
 	}
+}
+
+func reportTPS(b *testing.B) {
+	b.Helper()
+	elapsed := b.Elapsed()
+	if elapsed <= 0 || b.N == 0 {
+		return
+	}
+	tps := float64(b.N) / elapsed.Seconds()
+	b.ReportMetric(tps, "tps")
+}
+
+func BenchmarkTPS_LimitOrder(b *testing.B) {
+	me := NewMatchingEngine()
+	me.Match(testOrder(1, "BTC", model.OrderSideSell, 50000, int64(b.N)+1))
+
+	done := make(chan struct{})
+	go drainEngineEvents(me, done)
+	defer close(done)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		me.Match(testOrder(uint(i+2), "BTC", model.OrderSideBuy, 50000, 1))
+	}
+	b.StopTimer()
+	reportTPS(b)
+}
+
+func BenchmarkTPS_MarketOrder(b *testing.B) {
+	me := NewMatchingEngine()
+
+	done := make(chan struct{})
+	go drainEngineEvents(me, done)
+	defer close(done)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		orderID := uint(200000 + i*2)
+		me.Match(testOrder(orderID, "BTC", model.OrderSideSell, 50000, 1))
+		me.Match(&Order{
+			ID:          orderID + 1,
+			CoinSymbol:  "BTC",
+			Side:        model.OrderSideBuy,
+			OrderType:   model.OrderTypeMarket,
+			QuoteAmount: decimal.NewFromInt(50000),
+			CreatedAt:   time.Now(),
+		})
+	}
+	b.StopTimer()
+	reportTPS(b)
+}
+
+func BenchmarkTPS_MixedOrder(b *testing.B) {
+	me := NewMatchingEngine()
+
+	done := make(chan struct{})
+	go drainEngineEvents(me, done)
+	defer close(done)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		orderID := uint(400000 + i*3)
+		me.Match(testOrder(orderID, "BTC", model.OrderSideSell, 50000, 1))
+		if i%2 == 0 {
+			me.Match(testOrder(orderID+1, "BTC", model.OrderSideBuy, 50000, 1))
+		} else {
+			me.Match(&Order{
+				ID:          orderID + 1,
+				CoinSymbol:  "BTC",
+				Side:        model.OrderSideBuy,
+				OrderType:   model.OrderTypeMarket,
+				QuoteAmount: decimal.NewFromInt(50000),
+				CreatedAt:   time.Now(),
+			})
+		}
+	}
+	b.StopTimer()
+	reportTPS(b)
 }
