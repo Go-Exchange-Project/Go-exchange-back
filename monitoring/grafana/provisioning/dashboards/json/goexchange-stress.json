@@ -75,6 +75,27 @@
         { "refId": "C", "expr": "go_sql_idle_connections", "legendFormat": "idle" },
         { "refId": "D", "expr": "rate(go_sql_wait_count_total[1m])", "legendFormat": "new conn waits/sec" }
       ]
+    },
+    {
+      "id": 7,
+      "title": "매칭엔진 TPS (체결 처리율)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(order_settlement_duration_seconds_count[1m])", "legendFormat": "trades/sec" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "GC STW 횟수",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(go_gc_duration_seconds_count{job=\"goexchange-backend\"}[1m])", "legendFormat": "GC cycles/sec" },
+        { "refId": "B", "expr": "go_gc_duration_seconds_count{job=\"goexchange-backend\"}", "legendFormat": "GC cycles (누적)" }
+      ]
     }
   ]
 }
