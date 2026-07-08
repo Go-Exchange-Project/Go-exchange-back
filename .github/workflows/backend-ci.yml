@@ -78,7 +78,7 @@ jobs:
         run: go mod download
 
       - name: Run Postgres integration tests
-        run: go test -run Integration -v ./internal/repository ./internal/service
+        run: go test -run Integration -v -p 1 ./internal/repository ./internal/service
 
   docker-build:
     name: Docker build
