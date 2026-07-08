@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -39,6 +41,12 @@ func ConnectDB() {
 	if err != nil {
 		log.Fatal("DB connection failed: ", err)
 	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatal("DB handle retrieval failed: ", err)
+	}
+	prometheus.MustRegister(collectors.NewDBStatsCollector(sqlDB, "goexchange"))
 
 	DB = db
 	log.Println("DB connection established")
