@@ -76,6 +76,26 @@ Grafana 대시보드(5번 단계에서 연 탭)를 계속 보면서, 다음 중 
 
 어느 패널이 가장 먼저 무너지는지, 몇 VU 근처에서 그랬는지를 기록해둔다.
 
+## 6.5. (선택) CPU 프로파일 캡처
+
+이전 실행에서 CPU 포화가 관측된 VU 구간(예: 150~200)이 있다면, 그 구간에서 30초 CPU 프로파일을 캡처해 실제 병목 함수를 확인할 수 있다.
+
+1. `.env`에 `GOEXCHANGE_ENABLE_PPROF=true`가 설정된 채로 서버가 기동 중인지 확인한다 (기본값은 `false`이므로 명시적으로 켜야 한다).
+2. 로컬에서 서버 인스턴스로 SSH 터널을 연다:
+   ```bash
+   ssh -L 6060:localhost:6060 -i ~/.ssh/goexchange-gcp goexchange@<server_external_ip>
+   ```
+3. k6가 목표 VU 구간에 진입한 시점에, 로컬의 또 다른 터미널에서 프로파일을 받는다:
+   ```bash
+   go tool pprof -seconds=30 -output=cpu.prof http://localhost:6060/debug/pprof/profile
+   ```
+4. 캡처가 끝나면 분석한다:
+   ```bash
+   go tool pprof -top cpu.prof
+   go tool pprof -svg cpu.prof > cpu.svg
+   ```
+5. 결과를 `docs/benchmarks/04-YYYY-MM-DD-matching-engine-cpu-profiling.md`에 기록한다 (왜 이 조사를 했는지, `-top` 원본 출력, 상위 CPU 소비 함수 요약, 다음 작업 제안 포함).
+
 ## 8. 결과 기록
 
 k6 종료 시 출력되는 요약과, Grafana 대시보드 스크린샷(문제가 시작된 시점 전후)을 캡처해서 기존 컨벤션대로 저장한다.
