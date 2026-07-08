@@ -34,8 +34,13 @@ func main() {
 	config.ConnectDB()
 
 	if config.PprofEnabledFromEnv() {
+		// Binds to all interfaces inside the container; external exposure is
+		// prevented by docker-compose's host-side 127.0.0.1:6060:6060 mapping,
+		// not by this bind address (binding to 127.0.0.1 here would make it
+		// unreachable through Docker's port forwarding, which routes via the
+		// container's eth0, not its loopback).
 		go func() {
-			log.Println("pprof listening on 127.0.0.1:6060:", http.ListenAndServe("127.0.0.1:6060", nil))
+			log.Println("pprof listening on :6060:", http.ListenAndServe(":6060", nil))
 		}()
 	}
 
