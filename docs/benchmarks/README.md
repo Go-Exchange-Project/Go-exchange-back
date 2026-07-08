@@ -25,3 +25,4 @@
 - [04-2026-07-08-matching-engine-cpu-profiling.md](04-2026-07-08-matching-engine-cpu-profiling.md) — 4번째 테스트: pprof CPU 프로파일링. 병목은 매칭엔진이 아니라 미설정된 DB 커넥션 풀로 인한 반복적 SCRAM 인증(CPU의 38%)으로 확인 (커밋 `3122c33`)
 - [05-2026-07-09-db-connection-pool-tuning.md](05-2026-07-09-db-connection-pool-tuning.md) — 5번째 테스트: DB 커넥션 풀 튜닝 전/후 비교. 동일 VM에서 완주 가능 VU가 250→800(4배+)으로, p95가 9.09s→4.30s(VU150 기준)로 개선 (커밋 `85e2bf8`)
 - [06-2026-07-09-matching-engine-pure-tps-benchmark.md](06-2026-07-09-matching-engine-pure-tps-benchmark.md) — 6번째 테스트: 순수 매칭엔진 TPS 벤치마크(API/DB 제외). 지정가 465,036 TPS, 시장가 163,926 TPS, 혼합 216,731 TPS — 전체 스택(55.2 TPS)과 측정 대상이 다름을 확인 (커밋 `b025055`)
+- [07-2026-07-09-cpu-core-pinning.md](07-2026-07-09-cpu-core-pinning.md) — 7번째 테스트: CPU 코어 핀닝(backend=코어0, 나머지=코어1) 실험. 가설과 달리 처리량이 12.7% 감소해 기각 — 격리 이득보다 가용 용량 축소 손해가 더 컸음 (커밋 `1db00ff`)
