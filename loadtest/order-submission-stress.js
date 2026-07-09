@@ -14,7 +14,7 @@ const BUYER_KRW_FUNDING = '100000000';
 const SELLER_BTC_FUNDING = '1000';
 
 // 사전에 정의된 목표 수치나 임계값 없이, Grafana 대시보드를 보면서 에러율 급증이나
-// p95 급격 저하가 관측되는 시점에 수동으로 실행을 중단한다. 800 VU까지도 시스템이
+// p95 급격 저하가 관측되는 시점에 수동으로 실행을 중단한다. 3000 VU까지도 시스템이
 // 버틴다면 이 배열에 단계를 더 추가해서 계속 밀어붙일 수 있다.
 const STRESS_STAGES = [
   { duration: '2m', target: 50 },
