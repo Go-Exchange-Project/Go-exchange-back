@@ -30,7 +30,7 @@ variable "environment" {
 variable "server_machine_type" {
   description = "서버 인스턴스(Go 앱 + Postgres + Prometheus + Grafana) 머신 타입."
   type        = string
-  default     = "e2-medium"
+  default     = "e2-highcpu-4"
 }
 
 variable "load_gen_machine_type" {
