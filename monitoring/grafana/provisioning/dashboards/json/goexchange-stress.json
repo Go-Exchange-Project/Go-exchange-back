@@ -96,6 +96,16 @@
         { "refId": "A", "expr": "rate(go_gc_duration_seconds_count{job=\"goexchange-backend\"}[1m])", "legendFormat": "GC cycles/sec" },
         { "refId": "B", "expr": "go_gc_duration_seconds_count{job=\"goexchange-backend\"}", "legendFormat": "GC cycles (누적)" }
       ]
+    },
+    {
+      "id": 9,
+      "title": "매칭엔진 채널 길이 (버퍼 용량: order/cancel/snapshot_request/execution=1024, snapshot=256)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "matching_engine_channel_length{job=\"goexchange-backend\"}", "legendFormat": "{{channel}}" }
+      ]
     }
   ]
 }
