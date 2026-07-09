@@ -34,3 +34,24 @@ var (
 		Buckets: matchLatencyBuckets,
 	})
 )
+
+func RegisterMatchingEngineChannelLenGauges(orderLen, cancelLen, snapshotReqLen, executionLen, snapshotLen func() int) {
+	gauges := []struct {
+		channel string
+		lenFn   func() int
+	}{
+		{"order", orderLen},
+		{"cancel", cancelLen},
+		{"snapshot_request", snapshotReqLen},
+		{"execution", executionLen},
+		{"snapshot", snapshotLen},
+	}
+	for _, g := range gauges {
+		g := g
+		promauto.NewGaugeFunc(prometheus.GaugeOpts{
+			Name:        "matching_engine_channel_length",
+			Help:        "Current number of buffered items in a matching engine channel.",
+			ConstLabels: prometheus.Labels{"channel": g.channel},
+		}, func() float64 { return float64(g.lenFn()) })
+	}
+}
