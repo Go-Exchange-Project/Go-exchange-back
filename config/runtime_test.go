@@ -114,3 +114,21 @@ func TestPprofEnabledFromEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestSettlementWorkersFromEnvDefault(t *testing.T) {
+	requireUnsetEnv(t, EnvGOExchangeSettlementWorkers)
+
+	assert.Equal(t, 10, SettlementWorkersFromEnv())
+}
+
+func TestSettlementWorkersFromEnvCustomValue(t *testing.T) {
+	t.Setenv(EnvGOExchangeSettlementWorkers, "3")
+
+	assert.Equal(t, 3, SettlementWorkersFromEnv())
+}
+
+func TestSettlementWorkersFromEnvInvalidValueFallsBackToDefault(t *testing.T) {
+	t.Setenv(EnvGOExchangeSettlementWorkers, "not-a-number")
+
+	assert.Equal(t, 10, SettlementWorkersFromEnv())
+}
