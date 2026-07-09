@@ -27,3 +27,4 @@
 - [06-2026-07-09-matching-engine-pure-tps-benchmark.md](06-2026-07-09-matching-engine-pure-tps-benchmark.md) — 6번째 테스트: 순수 매칭엔진 TPS 벤치마크(API/DB 제외). 지정가 465,036 TPS, 시장가 163,926 TPS, 혼합 216,731 TPS — 전체 스택(55.2 TPS)과 측정 대상이 다름을 확인 (커밋 `b025055`)
 - [07-2026-07-09-cpu-core-pinning.md](07-2026-07-09-cpu-core-pinning.md) — 7번째 테스트: CPU 코어 핀닝(backend=코어0, 나머지=코어1) 실험. 가설과 달리 처리량이 12.7% 감소해 기각 — 격리 이득보다 가용 용량 축소 손해가 더 컸음 (커밋 `1db00ff`)
 - [08-2026-07-09-latency-metric-bucket-resolution.md](08-2026-07-09-latency-metric-bucket-resolution.md) — 8번째 테스트: 매칭 지연 지표 버킷 상한(10초) 수정 후 재측정. 진짜 p95는 10초가 아니라 14.2~27.5초로, 기존 관측치보다 최대 2.75배 심각했음을 확인 (커밋 `6dfced6`)
+- [09-2026-07-09-matching-engine-channel-length.md](09-2026-07-09-matching-engine-channel-length.md) — 9번째 테스트: 매칭엔진 채널 길이 노출로 병목 메커니즘 확인. 단일 정산 워커가 못 따라가 ExecutionCh/OrderCh가 버퍼 상한(1024)까지 포화 → 매칭 루프 블로킹이 지연의 진짜 원인임을 실측 확인 (커밋 `a3d1226`)
