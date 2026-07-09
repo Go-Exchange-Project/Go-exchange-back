@@ -96,13 +96,15 @@ func main() {
 	orderBookHandler := handler.NewOrderBookHandler(me)
 	orderHandler := handler.NewOrderHandler(orderService)
 
-	go func() {
-		for event := range me.ExecutionCh {
-			processExecutionEvent(event, settlementService, failedSettlementService, orderService, func(msg []byte) {
-				hub.Broadcast <- msg
-			}, log.Default())
-		}
-	}()
+	for i := 0; i < config.SettlementWorkersFromEnv(); i++ {
+		go func() {
+			for event := range me.ExecutionCh {
+				processExecutionEvent(event, settlementService, failedSettlementService, orderService, func(msg []byte) {
+					hub.Broadcast <- msg
+				}, log.Default())
+			}
+		}()
+	}
 
 	go func() {
 		for snapshot := range me.SnapshotCh {
