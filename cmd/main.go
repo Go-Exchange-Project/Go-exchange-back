@@ -62,6 +62,13 @@ func main() {
 	me.MatchLatencyObserver = func(d time.Duration) {
 		metrics.OrderPipelineMatchLatency.Observe(d.Seconds())
 	}
+	metrics.RegisterMatchingEngineChannelLenGauges(
+		func() int { return len(me.OrderCh) },
+		func() int { return len(me.CancelCh) },
+		func() int { return len(me.SnapshotReq) },
+		func() int { return len(me.ExecutionCh) },
+		func() int { return len(me.SnapshotCh) },
+	)
 	me.Start()
 
 	hub := ws.NewHub()
