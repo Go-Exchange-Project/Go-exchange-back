@@ -6,7 +6,7 @@ const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const DEV_TOOLS_TOKEN = __ENV.DEV_TOOLS_TOKEN;
 const DEV_TOOLS_TOKEN_HEADER = 'X-GoExchange-Dev-Token';
 
-const TOTAL_USERS = 800;
+const TOTAL_USERS = 3000;
 const COIN_SYMBOL = 'BTC';
 const FIXED_PRICE = '50000000';
 const ORDER_AMOUNT = '0.001';
@@ -22,12 +22,14 @@ const STRESS_STAGES = [
   { duration: '2m', target: 200 },
   { duration: '2m', target: 400 },
   { duration: '2m', target: 800 },
+  { duration: '2m', target: 1600 },
+  { duration: '2m', target: 3000 },
 ];
 
 export const options = {
-  // TOTAL_USERS=800 sequential register-or-login + fund calls take well over
+  // TOTAL_USERS=3000 sequential register-or-login + fund calls take well over
   // k6's default 60s setup() timeout, so this must be raised explicitly.
-  setupTimeout: '5m',
+  setupTimeout: '10m',
   scenarios: {
     order_submission_stress: {
       executor: 'ramping-vus',
