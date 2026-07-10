@@ -5,10 +5,13 @@ import (
 	"errors"
 	"log"
 	"testing"
+	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/shopspring/decimal"
@@ -19,10 +22,29 @@ import (
 type fakeTradeSettler struct {
 	result service.SettlementResult
 	err    error
+	// errs가 설정되면 호출마다 하나씩 소비하고, 소진되면 err/result로 응답한다.
+	errs  []error
+	calls int
 }
 
 func (f *fakeTradeSettler) SettleTrade(*model.Trade) (service.SettlementResult, error) {
+	f.calls++
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return service.SettlementResult{}, err
+		}
+		return f.result, nil
+	}
 	return f.result, f.err
+}
+
+func withFastTransientRetries(t *testing.T) {
+	t.Helper()
+	original := transientRetryDelays
+	transientRetryDelays = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { transientRetryDelays = original })
 }
 
 type fakeFailureRecorder struct {
@@ -124,4 +146,177 @@ func TestProcessTradeSettlementRecordsSettlementDuration(t *testing.T) {
 
 	after := histogramSampleCount(t, metrics.OrderSettlementDuration)
 	assert.Equal(t, before+1, after)
+}
+
+func deadlockError() error {
+	return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+}
+
+func TestProcessTradeSettlementRetriesTransientErrorInPlace(t *testing.T) {
+	withFastTransientRetries(t)
+
+	settler := &fakeTradeSettler{
+		errs:   []error{deadlockError(), deadlockError(), nil},
+		result: service.SettlementResult{Applied: true, TradeID: 1},
+	}
+	recorder := &fakeFailureRecorder{}
+	var broadcasts int
+
+	processTradeSettlement(testTrade(), settler, recorder, func([]byte) {
+		broadcasts++
+	}, discardLogger())
+
+	assert.Equal(t, 3, settler.calls)
+	assert.Equal(t, 0, recorder.calls, "성공했으므로 실패 기록이 없어야 한다")
+	assert.Equal(t, 1, broadcasts)
+}
+
+func TestProcessTradeSettlementRecordsFailureAfterTransientRetriesExhausted(t *testing.T) {
+	withFastTransientRetries(t)
+
+	settler := &fakeTradeSettler{err: deadlockError()}
+	recorder := &fakeFailureRecorder{}
+
+	processTradeSettlement(testTrade(), settler, recorder, func([]byte) {
+		t.Fatal("unexpected broadcast")
+	}, discardLogger())
+
+	assert.Equal(t, 1+len(transientRetryDelays), settler.calls)
+	assert.Equal(t, 1, recorder.calls)
+}
+
+func TestProcessTradeSettlementDoesNotRetryPermanentError(t *testing.T) {
+	withFastTransientRetries(t)
+
+	settler := &fakeTradeSettler{err: errors.New("cancelled order cannot be settled")}
+	recorder := &fakeFailureRecorder{}
+
+	processTradeSettlement(testTrade(), settler, recorder, func([]byte) {}, discardLogger())
+
+	assert.Equal(t, 1, settler.calls)
+	assert.Equal(t, 1, recorder.calls)
+}
+
+type fakeMarketCompleter struct {
+	errs  []error
+	err   error
+	calls int
+}
+
+func (f *fakeMarketCompleter) CompleteMarketOrder(service.CompleteMarketOrderInput) error {
+	f.calls++
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		return err
+	}
+	return f.err
+}
+
+type fakeCompletionFailureRecorder struct {
+	calls  int
+	inputs []service.CompleteMarketOrderInput
+}
+
+func (f *fakeCompletionFailureRecorder) RecordFailure(input service.CompleteMarketOrderInput, _ string, _ error) (*model.FailedMarketCompletion, error) {
+	f.calls++
+	f.inputs = append(f.inputs, input)
+	return &model.FailedMarketCompletion{ID: 1}, nil
+}
+
+func testMarketOrderDone() *matching.MarketOrderDone {
+	return &matching.MarketOrderDone{
+		OrderID:              42,
+		CoinSymbol:           "BTC",
+		Side:                 model.OrderSideBuy,
+		FilledAmount:         decimal.NewFromInt(1),
+		FilledQuoteAmount:    decimal.NewFromInt(100),
+		RemainingQuoteAmount: decimal.Zero,
+	}
+}
+
+func TestProcessMarketOrderDoneRetriesConflictThenSucceeds(t *testing.T) {
+	withFastTransientRetries(t)
+
+	conflict := service.NewConflictErrorf("market order 42 settlement is not complete")
+	completer := &fakeMarketCompleter{errs: []error{conflict, conflict, nil}}
+	recorder := &fakeCompletionFailureRecorder{}
+
+	processMarketOrderDone(testMarketOrderDone(), completer, recorder, discardLogger())
+
+	assert.Equal(t, 3, completer.calls)
+	assert.Equal(t, 0, recorder.calls, "성공했으므로 실패 기록이 없어야 한다")
+}
+
+func TestProcessMarketOrderDoneRecordsFailureAfterRetriesExhausted(t *testing.T) {
+	withFastTransientRetries(t)
+
+	completer := &fakeMarketCompleter{err: service.NewConflictErrorf("market order 42 settlement is not complete")}
+	recorder := &fakeCompletionFailureRecorder{}
+
+	processMarketOrderDone(testMarketOrderDone(), completer, recorder, discardLogger())
+
+	assert.Equal(t, 1+len(transientRetryDelays), completer.calls)
+	require.Equal(t, 1, recorder.calls, "재시도 소진 후 내구 기록이 남아야 한다")
+	assert.Equal(t, uint(42), recorder.inputs[0].OrderID)
+	assert.True(t, recorder.inputs[0].FilledQuoteAmount.Equal(decimal.NewFromInt(100)))
+}
+
+func TestProcessMarketOrderDoneDoesNotRetryValidationError(t *testing.T) {
+	withFastTransientRetries(t)
+
+	completer := &fakeMarketCompleter{err: service.NewValidationErrorf("order 42 is not a market order")}
+	recorder := &fakeCompletionFailureRecorder{}
+
+	processMarketOrderDone(testMarketOrderDone(), completer, recorder, discardLogger())
+
+	assert.Equal(t, 1, completer.calls)
+	assert.Equal(t, 1, recorder.calls)
+}
+
+func TestSettlementWorkerIndexIsStableAndBounded(t *testing.T) {
+	for _, workerCount := range []int{1, 2, 4, 10} {
+		first := settlementWorkerIndex("BTC", workerCount)
+		assert.Equal(t, first, settlementWorkerIndex("BTC", workerCount), "같은 심볼은 항상 같은 워커")
+		assert.GreaterOrEqual(t, first, 0)
+		assert.Less(t, first, workerCount)
+	}
+}
+
+func TestDispatchExecutionEventsRoutesSameSymbolInOrder(t *testing.T) {
+	const workerCount = 4
+	queues := make([]chan matching.ExecutionEvent, workerCount)
+	for i := range queues {
+		queues[i] = make(chan matching.ExecutionEvent, 8)
+	}
+
+	// BTC와 다른 워커로 해시되는 심볼을 런타임에 고른다(해시 충돌에 안전하게).
+	otherSymbol := ""
+	for _, candidate := range []string{"ETH", "XRP", "SOL", "DOGE", "ADA"} {
+		if settlementWorkerIndex(candidate, workerCount) != settlementWorkerIndex("BTC", workerCount) {
+			otherSymbol = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, otherSymbol, "BTC와 다른 워커로 가는 심볼이 있어야 한다")
+
+	events := make(chan matching.ExecutionEvent, 8)
+	events <- matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: "BTC", EngineSequence: 1}}
+	events <- matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: otherSymbol, EngineSequence: 2}}
+	events <- matching.ExecutionEvent{MarketOrderDone: testMarketOrderDone()}
+	close(events)
+
+	dispatchExecutionEvents(events, queues)
+
+	btcQueue := queues[settlementWorkerIndex("BTC", workerCount)]
+	require.Equal(t, 2, len(btcQueue), "BTC trade와 Done은 같은 워커 큐로 가야 한다")
+	first := <-btcQueue
+	second := <-btcQueue
+	require.NotNil(t, first.Trade, "trade가 Done보다 먼저 나와야 한다")
+	assert.Equal(t, int64(1), first.Trade.EngineSequence)
+	require.NotNil(t, second.MarketOrderDone)
+	assert.Equal(t, uint(42), second.MarketOrderDone.OrderID)
+
+	otherQueue := queues[settlementWorkerIndex(otherSymbol, workerCount)]
+	assert.Equal(t, 1, len(otherQueue))
 }

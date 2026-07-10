@@ -14,8 +14,11 @@ const (
 )
 
 type FailedSettlement struct {
-	ID                  uint                   `gorm:"primaryKey"`
-	TradeIdempotencyKey string                 `gorm:"size:128;not null;uniqueIndex:idx_failed_settlements_trade_idempotency_key;check:ck_failed_settlements_trade_idempotency_key_not_empty,length(btrim(trade_idempotency_key)) > 0"`
+	ID                  uint   `gorm:"primaryKey"`
+	TradeIdempotencyKey string `gorm:"size:128;not null;uniqueIndex:idx_failed_settlements_trade_idempotency_key;check:ck_failed_settlements_trade_idempotency_key_not_empty,length(btrim(trade_idempotency_key)) > 0"`
+	EngineSequence      int64  `gorm:"not null;default:0"`
+	EngineEventID       string `gorm:"size:128;not null;default:''"`
+	TradedAt            *time.Time
 	CoinSymbol          string                 `gorm:"not null"`
 	BuyOrderID          uint                   `gorm:"not null"`
 	SellOrderID         uint                   `gorm:"not null"`

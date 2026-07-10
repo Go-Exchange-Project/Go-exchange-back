@@ -23,8 +23,22 @@ const (
 	FailedSettlementCategoryCancelledOrder            FailedSettlementCategory = "CANCELLED_ORDER"
 	FailedSettlementCategoryIdempotencyConflict       FailedSettlementCategory = "IDEMPOTENCY_CONFLICT"
 	FailedSettlementCategoryInsufficientLockedBalance FailedSettlementCategory = "INSUFFICIENT_LOCKED_BALANCE"
+	FailedSettlementCategoryDeadlock                  FailedSettlementCategory = "DEADLOCK"
+	FailedSettlementCategorySerializationFailure      FailedSettlementCategory = "SERIALIZATION_FAILURE"
+	FailedSettlementCategoryLockTimeout               FailedSettlementCategory = "LOCK_TIMEOUT"
 	FailedSettlementCategoryUnknown                   FailedSettlementCategory = "UNKNOWN"
 )
+
+// IsTransientFailedSettlementCategory는 자동 재시도 대상 카테고리인지 판정합니다.
+func IsTransientFailedSettlementCategory(category FailedSettlementCategory) bool {
+	switch category {
+	case FailedSettlementCategoryDeadlock,
+		FailedSettlementCategorySerializationFailure,
+		FailedSettlementCategoryLockTimeout:
+		return true
+	}
+	return false
+}
 
 type ResolveFailureInput struct {
 	ID         uint
@@ -93,6 +107,14 @@ func ClassifyFailedSettlement(failure *model.FailedSettlement) FailedSettlementC
 
 	message := strings.ToUpper(failure.ErrorMessage)
 	switch {
+	// SQLSTATE 태그는 settlementErrorMessage가 기록 시점에 붙인다.
+	// 메시지 본문은 lc_messages에 따라 번역될 수 있으므로 코드 태그를 우선 매칭한다.
+	case strings.Contains(message, "[SQLSTATE "+pgCodeDeadlockDetected+"]"):
+		return FailedSettlementCategoryDeadlock
+	case strings.Contains(message, "[SQLSTATE "+pgCodeSerializationFailure+"]"):
+		return FailedSettlementCategorySerializationFailure
+	case strings.Contains(message, "[SQLSTATE "+pgCodeLockNotAvailable+"]"):
+		return FailedSettlementCategoryLockTimeout
 	case strings.Contains(message, "CANCELLED"):
 		return FailedSettlementCategoryCancelledOrder
 	case strings.Contains(message, "IDEMPOTENCY KEY CONFLICT"):
@@ -130,8 +152,17 @@ func failedSettlementFromTrade(trade *model.Trade, settlementErr error, occurred
 		occurredAt = time.Now().UTC()
 	}
 
+	var tradedAt *time.Time
+	if !trade.TradedAt.IsZero() {
+		tradedAtValue := trade.TradedAt
+		tradedAt = &tradedAtValue
+	}
+
 	return &model.FailedSettlement{
 		TradeIdempotencyKey: idempotencyKey,
+		EngineSequence:      trade.EngineSequence,
+		EngineEventID:       strings.TrimSpace(trade.EngineEventID),
+		TradedAt:            tradedAt,
 		CoinSymbol:          coinSymbol,
 		BuyOrderID:          trade.BuyOrderID,
 		SellOrderID:         trade.SellOrderID,
@@ -151,6 +182,10 @@ func settlementErrorMessage(err error) string {
 	}
 	if message == "" {
 		message = "unknown settlement failure"
+	}
+	// transient 오류는 저장된 메시지만으로 재분류할 수 있도록 SQLSTATE 태그를 붙인다.
+	if code := settlementErrorSQLState(err); code != "" {
+		message = "[SQLSTATE " + code + "] " + message
 	}
 	if len(message) > maxFailedSettlementErrorLength {
 		return message[:maxFailedSettlementErrorLength]

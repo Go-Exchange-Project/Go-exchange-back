@@ -77,6 +77,45 @@ func (r *WalletRepository) FindOrCreateKRWWalletByUserIDForUpdate(userID uint) (
 	return r.FindOrCreateByUserIDAndCoinSymbolForUpdate(userID, model.KRWAssetSymbol)
 }
 
+// FindOrCreateByUserIDAndCoinSymbol은 행 락 없이 지갑을 조회하거나 생성합니다.
+// 정산의 1단계(락 대상 ID 확보)용이며, 여기서 읽은 잔고는 락 이후 다시 읽어야 합니다.
+func (r *WalletRepository) FindOrCreateByUserIDAndCoinSymbol(userID uint, coinSymbol string) (*model.Wallet, error) {
+	wallet, err := r.FindByUserIDAndCoinSymbol(userID, coinSymbol)
+	if err == nil {
+		return wallet, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	if err := r.createZeroBalanceWallet(userID, coinSymbol); err != nil {
+		return nil, err
+	}
+	return r.FindByUserIDAndCoinSymbol(userID, coinSymbol)
+}
+
+// LockByIDs는 지갑들을 항상 ID 오름차순으로 SELECT ... FOR UPDATE 합니다.
+// 모든 트랜잭션이 같은 순서로 잠그므로 지갑 간 AB-BA 데드락이 성립하지 않습니다.
+func (r *WalletRepository) LockByIDs(ids []uint) ([]model.Wallet, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var wallets []model.Wallet
+	err := r.DB.
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id IN ?", ids).
+		Order("id ASC").
+		Find(&wallets).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(wallets) != len(ids) {
+		return nil, fmt.Errorf("wallet lock expected %d rows, locked %d", len(ids), len(wallets))
+	}
+	return wallets, nil
+}
+
 func (r *WalletRepository) UpdateKRW(userID uint, krw decimal.Decimal) error {
 	return requireRowsAffected(r.updateKRWDB(userID, krw), "wallet KRW update")
 }

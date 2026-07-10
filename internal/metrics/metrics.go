@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"strconv"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -34,6 +36,19 @@ var (
 		Buckets: matchLatencyBuckets,
 	})
 )
+
+// RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를
+// 워커 인덱스 라벨로 노출합니다. 핫 심볼 쏠림을 관측하는 용도입니다.
+func RegisterSettlementWorkerQueueGauges(queueLenFns []func() int) {
+	for i, lenFn := range queueLenFns {
+		lenFn := lenFn
+		promauto.NewGaugeFunc(prometheus.GaugeOpts{
+			Name:        "settlement_worker_queue_length",
+			Help:        "Current number of buffered execution events in a settlement worker queue.",
+			ConstLabels: prometheus.Labels{"worker": strconv.Itoa(i)},
+		}, func() float64 { return float64(lenFn()) })
+	}
+}
 
 func RegisterMatchingEngineChannelLenGauges(orderLen, cancelLen, snapshotReqLen, executionLen, snapshotLen func() int) {
 	gauges := []struct {

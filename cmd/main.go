@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -50,6 +51,7 @@ func main() {
 		&model.Wallet{},
 		&model.Trade{},
 		&model.FailedSettlement{},
+		&model.FailedMarketCompletion{},
 		&model.LedgerEntry{},
 	); err != nil {
 		log.Fatal("auto migrate failed: ", err)
@@ -91,20 +93,38 @@ func main() {
 	orderService.MarketRules = marketRulesRegistry
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
+	failedMarketCompletionService := service.NewFailedMarketCompletionService(repository.NewFailedMarketCompletionRepository(config.DB))
 	authHandler := handler.NewAuthHandler(authService)
 	marketHandler := handler.NewMarketHandler(marketRulesRegistry)
 	orderBookHandler := handler.NewOrderBookHandler(me)
 	orderHandler := handler.NewOrderHandler(orderService)
 
-	for i := 0; i < config.SettlementWorkersFromEnv(); i++ {
-		go func() {
-			for event := range me.ExecutionCh {
-				processExecutionEvent(event, settlementService, failedSettlementService, orderService, func(msg []byte) {
+	// 심볼 파티셔닝 정산 워커: 같은 심볼의 이벤트는 항상 같은 워커가 FIFO로 처리해
+	// 엔진이 만든 순서(trade들 -> MarketOrderDone)를 보존한다. 워커를 채널 하나로
+	// 경쟁 소비시키면 Done 이벤트가 trade 정산을 앞질러 완료가 유실될 수 있다.
+	settlementQueues := make([]chan matching.ExecutionEvent, config.SettlementWorkersFromEnv())
+	for i := range settlementQueues {
+		settlementQueues[i] = make(chan matching.ExecutionEvent, settlementWorkerQueueSize)
+	}
+	metrics.RegisterSettlementWorkerQueueGauges(settlementQueueLenFns(settlementQueues))
+	go dispatchExecutionEvents(me.ExecutionCh, settlementQueues)
+	for _, queue := range settlementQueues {
+		go func(queue chan matching.ExecutionEvent) {
+			for event := range queue {
+				processExecutionEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, func(msg []byte) {
 					hub.Broadcast <- msg
 				}, log.Default())
 			}
-		}()
+		}(queue)
 	}
+
+	settlementRetryWorker := &service.SettlementRetryWorker{
+		Settler:           settlementService,
+		MarketCompleter:   orderService,
+		FailedSettlements: failedSettlementService,
+		FailedCompletions: failedMarketCompletionService,
+	}
+	go settlementRetryWorker.Run(context.Background())
 
 	go func() {
 		for snapshot := range me.SnapshotCh {
@@ -210,11 +230,56 @@ type marketOrderCompleter interface {
 	CompleteMarketOrder(input service.CompleteMarketOrderInput) error
 }
 
+type marketCompletionFailureRecorder interface {
+	RecordFailure(input service.CompleteMarketOrderInput, coinSymbol string, completionErr error) (*model.FailedMarketCompletion, error)
+}
+
+const settlementWorkerQueueSize = 256
+
+// transientRetryDelays는 데드락 등 일시적 오류의 in-place 재시도 간격입니다.
+// 여기서 못 잡은 실패는 SettlementRetryWorker(10초 주기)가 2차로 처리합니다.
+var transientRetryDelays = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
+
+func dispatchExecutionEvents(events <-chan matching.ExecutionEvent, queues []chan matching.ExecutionEvent) {
+	for event := range events {
+		queues[settlementWorkerIndex(executionEventCoinSymbol(event), len(queues))] <- event
+	}
+}
+
+func executionEventCoinSymbol(event matching.ExecutionEvent) string {
+	if event.Trade != nil {
+		return event.Trade.CoinSymbol
+	}
+	if event.MarketOrderDone != nil {
+		return event.MarketOrderDone.CoinSymbol
+	}
+	return ""
+}
+
+func settlementWorkerIndex(coinSymbol string, workerCount int) int {
+	if workerCount <= 1 {
+		return 0
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(coinSymbol))
+	return int(hash.Sum32() % uint32(workerCount))
+}
+
+func settlementQueueLenFns(queues []chan matching.ExecutionEvent) []func() int {
+	lenFns := make([]func() int, len(queues))
+	for i, queue := range queues {
+		queue := queue
+		lenFns[i] = func() int { return len(queue) }
+	}
+	return lenFns
+}
+
 func processExecutionEvent(
 	event matching.ExecutionEvent,
 	settler tradeSettler,
 	failureRecorder settlementFailureRecorder,
 	marketCompleter marketOrderCompleter,
+	completionFailureRecorder marketCompletionFailureRecorder,
 	broadcast func([]byte),
 	logger *log.Logger,
 ) {
@@ -223,13 +288,14 @@ func processExecutionEvent(
 		return
 	}
 	if event.MarketOrderDone != nil {
-		processMarketOrderDone(event.MarketOrderDone, marketCompleter, logger)
+		processMarketOrderDone(event.MarketOrderDone, marketCompleter, completionFailureRecorder, logger)
 	}
 }
 
 func processMarketOrderDone(
 	done *matching.MarketOrderDone,
 	completer marketOrderCompleter,
+	failureRecorder marketCompletionFailureRecorder,
 	logger *log.Logger,
 ) {
 	if logger == nil {
@@ -238,14 +304,40 @@ func processMarketOrderDone(
 	if completer == nil || done == nil {
 		return
 	}
-	if err := completer.CompleteMarketOrder(service.CompleteMarketOrderInput{
+
+	input := service.CompleteMarketOrderInput{
 		OrderID:              done.OrderID,
 		FilledAmount:         done.FilledAmount,
 		FilledQuoteAmount:    done.FilledQuoteAmount,
 		RemainingQuoteAmount: done.RemainingQuoteAmount,
-	}); err != nil {
-		logger.Printf("complete market order failed: %v", err)
 	}
+	err := completer.CompleteMarketOrder(input)
+	for attempt := 0; err != nil && isRetryableCompletionError(err) && attempt < len(transientRetryDelays); attempt++ {
+		time.Sleep(transientRetryDelays[attempt])
+		err = completer.CompleteMarketOrder(input)
+	}
+	if err == nil {
+		return
+	}
+
+	// Done 이벤트는 엔진 메모리에만 존재하므로, 여기서 버리면 시장가 주문의
+	// 잔여 hold가 영구 동결된다. 내구 기록으로 남겨 재시도 워커에 넘긴다.
+	if failureRecorder != nil {
+		if _, recordErr := failureRecorder.RecordFailure(input, done.CoinSymbol, err); recordErr != nil {
+			logger.Printf("record failed market completion failed: %v", recordErr)
+		}
+	}
+	logger.Printf("complete market order failed: %v", err)
+}
+
+// isRetryableCompletionError: conflict는 같은 심볼의 trade 정산이 아직 안 끝났다는
+// 뜻이고(정상 순서상 곧 끝남), transient는 DB 일시 오류라 둘 다 재시도 가치가 있다.
+func isRetryableCompletionError(err error) bool {
+	if service.IsTransientSettlementError(err) {
+		return true
+	}
+	kind, ok := service.DomainErrorKind(err)
+	return ok && kind == service.ErrorKindConflict
 }
 
 func processTradeSettlement(
@@ -261,6 +353,10 @@ func processTradeSettlement(
 
 	settlementStart := time.Now()
 	result, err := settler.SettleTrade(trade)
+	for attempt := 0; err != nil && service.IsTransientSettlementError(err) && attempt < len(transientRetryDelays); attempt++ {
+		time.Sleep(transientRetryDelays[attempt])
+		result, err = settler.SettleTrade(trade)
+	}
 	metrics.OrderSettlementDuration.Observe(time.Since(settlementStart).Seconds())
 	if err != nil {
 		if failureRecorder != nil {
