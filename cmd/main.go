@@ -127,6 +127,12 @@ func main() {
 	}
 	go settlementRetryWorker.Run(context.Background())
 
+	reconciliationWorker := &service.ReconciliationWorker{
+		Repository: repository.NewReconciliationRepository(config.DB),
+		Interval:   config.ReconciliationIntervalFromEnv(),
+	}
+	go reconciliationWorker.Run(context.Background())
+
 	go func() {
 		for snapshot := range me.SnapshotCh {
 			snapshotJSON, _ := json.Marshal(map[string]interface{}{
