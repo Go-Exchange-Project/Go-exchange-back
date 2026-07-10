@@ -1,34 +1,14 @@
 name: goexchange-stress
 
 services:
-  postgres:
-    image: postgres:18-alpine
-    container_name: goexchange-stress-postgres
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-goexchange}
-      POSTGRES_USER: ${POSTGRES_USER:-goexchange}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-    volumes:
-      - goexchange-stress-postgres-data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-goexchange} -d ${POSTGRES_DB:-goexchange}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - goexchange-stress
-
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     image: goexchange-back:stress
     container_name: goexchange-stress-backend
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      GOEXCHANGE_DB_HOST: postgres
+      GOEXCHANGE_DB_HOST: ${GOEXCHANGE_DB_HOST:?GOEXCHANGE_DB_HOST is required}
       GOEXCHANGE_DB_USER: ${POSTGRES_USER:-goexchange}
       GOEXCHANGE_DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       GOEXCHANGE_DB_NAME: ${POSTGRES_DB:-goexchange}
@@ -60,17 +40,6 @@ services:
     networks:
       - goexchange-stress
 
-  postgres-exporter:
-    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
-    container_name: goexchange-stress-postgres-exporter
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-goexchange}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-goexchange}?sslmode=disable
-    networks:
-      - goexchange-stress
-
   node-exporter:
     image: prom/node-exporter:v1.8.2
     container_name: goexchange-stress-node-exporter
@@ -87,7 +56,6 @@ services:
     container_name: goexchange-stress-prometheus
     depends_on:
       - backend
-      - postgres-exporter
       - node-exporter
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -117,5 +85,4 @@ networks:
     name: goexchange-stress
 
 volumes:
-  goexchange-stress-postgres-data:
   goexchange-stress-grafana-data:

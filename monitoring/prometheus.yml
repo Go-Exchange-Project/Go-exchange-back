@@ -13,4 +13,5 @@ scrape_configs:
 
   - job_name: postgres-exporter
     static_configs:
-      - targets: ["postgres-exporter:9187"]
+      # terraform apply 후 DB 인스턴스의 내부 IP로 교체할 것 (예: 10.10.0.x:9187)
+      - targets: ["change-me-db-instance-internal-ip:9187"]
