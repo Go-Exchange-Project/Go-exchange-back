@@ -30,3 +30,4 @@
 - [09-2026-07-09-matching-engine-channel-length.md](09-2026-07-09-matching-engine-channel-length.md) — 9번째 테스트: 매칭엔진 채널 길이 노출로 병목 메커니즘 확인. 단일 정산 워커가 못 따라가 ExecutionCh/OrderCh가 버퍼 상한(1024)까지 포화 → 매칭 루프 블로킹이 지연의 진짜 원인임을 실측 확인 (커밋 `a3d1226`)
 - [10-2026-07-09-settlement-worker-pool.md](10-2026-07-09-settlement-worker-pool.md) — 10번째 테스트: 정산 워커 풀(1개→10개) 전/후 비교. 처리량 9% 개선됐지만 채널 포화·매칭 지연 최댓값은 거의 그대로 — CPU가 99.3%까지 치솟아 병목이 "정산 워커 부족"에서 "CPU 물리적 한계"로 이동한 것으로 해석 (커밋 `d50e383`)
 - [11-2026-07-09-vm-cpu-scaling-control.md](11-2026-07-09-vm-cpu-scaling-control.md) — 11번째 테스트: VM 코어 수 대조군 실험(2vCPU→4vCPU). 처리량 2.9배, p95 78% 개선(6.02s→1.32s), 채널 포화 대부분 해소 — CPU가 진짜 병목이었음을 확인하고 유지 결정, Terraform 반영 (커밋 `893d548`)
+- [12-2026-07-10-stress-test-vu-ceiling-extension.md](12-2026-07-10-stress-test-vu-ceiling-extension.md) — 12번째 테스트: VU 상한 800→3,000 확장. 부하생성기가 먼저 OOM으로 죽는 걸 발견해 리사이즈 후 재시도 — CPU가 VU 700~800에서 90%로 포화된 뒤로는 크래시 없이 큐잉 지연만 선형 증가함을 확인(p95 14.7s까지) (커밋 `0c1df36`)
