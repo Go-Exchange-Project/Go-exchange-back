@@ -19,7 +19,7 @@ resource "google_compute_firewall" "allow_ssh" {
   name          = "${local.name_prefix}-allow-ssh"
   network       = google_compute_network.this.id
   source_ranges = [var.allowed_admin_cidr]
-  target_tags   = ["goexchange-server", "goexchange-loadgen"]
+  target_tags   = ["goexchange-server", "goexchange-loadgen", "goexchange-db"]
 
   allow {
     protocol = "tcp"
@@ -101,5 +101,44 @@ resource "google_compute_instance" "load_gen" {
 
   metadata = {
     ssh-keys = local.ssh_keys
+  }
+}
+
+resource "google_compute_instance" "db" {
+  name         = "${local.name_prefix}-db"
+  machine_type = var.db_machine_type
+  zone         = var.gcp_zone
+  tags         = ["goexchange-db"]
+
+  boot_disk {
+    initialize_params {
+      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
+      size  = var.root_volume_size_gb
+      type  = "pd-ssd"
+    }
+  }
+
+  network_interface {
+    network    = google_compute_network.this.id
+    subnetwork = google_compute_subnetwork.this.id
+    access_config {}
+  }
+
+  metadata = {
+    ssh-keys = local.ssh_keys
+  }
+}
+
+resource "google_compute_firewall" "allow_postgres" {
+  name    = "${local.name_prefix}-allow-postgres"
+  network = google_compute_network.this.id
+  source_ranges = [
+    "${google_compute_instance.server.network_interface[0].network_ip}/32",
+  ]
+  target_tags = ["goexchange-db"]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["5432"]
   }
 }

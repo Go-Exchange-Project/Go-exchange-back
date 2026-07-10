@@ -39,6 +39,12 @@ variable "load_gen_machine_type" {
   default     = "e2-standard-2"
 }
 
+variable "db_machine_type" {
+  description = "Postgres 전용 인스턴스 머신 타입."
+  type        = string
+  default     = "e2-medium"
+}
+
 variable "root_volume_size_gb" {
   description = "두 인스턴스 공통 루트 디스크 크기(GiB)."
   type        = number
