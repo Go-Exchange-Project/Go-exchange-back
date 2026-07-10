@@ -345,3 +345,54 @@ func TestIntegrationLimitOrderPositiveAmountConstraint(t *testing.T) {
 
 	require.Error(t, db.Create(&order).Error)
 }
+
+func TestIntegrationBatchUpdateBalancesUpdatesMultipleWallets(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userA := repositoryTestUserID(20)
+	userB := repositoryTestUserID(21)
+	defer cleanupRepositoryUsers(t, db, userA, userB)
+
+	repo := NewWalletRepository(db)
+	walletA := model.Wallet{UserID: userA, CoinSymbol: "KRW", KRW: decimal.NewFromInt(1000), AvailableBalance: decimal.NewFromInt(1000), LockedBalance: decimal.Zero}
+	walletB := model.Wallet{UserID: userB, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(5), AvailableBalance: decimal.NewFromInt(5), LockedBalance: decimal.Zero, AvgBuyPrice: decimal.NewFromInt(90)}
+	require.NoError(t, db.Create(&walletA).Error)
+	require.NoError(t, db.Create(&walletB).Error)
+
+	err := repo.BatchUpdateBalances([]WalletBatchUpdate{
+		{WalletID: walletA.ID, AvailableBalance: decimal.NewFromInt(400), LockedBalance: decimal.NewFromInt(600), KRW: decimal.NewFromInt(1000), Quantity: decimal.Zero, AvgBuyPrice: decimal.Zero},
+		{WalletID: walletB.ID, AvailableBalance: decimal.NewFromInt(2), LockedBalance: decimal.NewFromInt(3), KRW: decimal.Zero, Quantity: decimal.NewFromInt(5), AvgBuyPrice: decimal.NewFromInt(100)},
+	})
+	require.NoError(t, err)
+
+	updatedA, err := repo.FindByUserIDAndCoinSymbol(userA, "KRW")
+	require.NoError(t, err)
+	assert.True(t, updatedA.AvailableBalance.Equal(decimal.NewFromInt(400)))
+	assert.True(t, updatedA.LockedBalance.Equal(decimal.NewFromInt(600)))
+	assert.True(t, updatedA.KRW.Equal(decimal.NewFromInt(1000)))
+
+	updatedB, err := repo.FindByUserIDAndCoinSymbol(userB, "BTC")
+	require.NoError(t, err)
+	assert.True(t, updatedB.AvailableBalance.Equal(decimal.NewFromInt(2)))
+	assert.True(t, updatedB.LockedBalance.Equal(decimal.NewFromInt(3)))
+	assert.True(t, updatedB.Quantity.Equal(decimal.NewFromInt(5)))
+	assert.True(t, updatedB.AvgBuyPrice.Equal(decimal.NewFromInt(100)))
+}
+
+func TestIntegrationBatchUpdateBalancesEmptySliceIsNoop(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewWalletRepository(db)
+
+	require.NoError(t, repo.BatchUpdateBalances(nil))
+}
+
+func TestIntegrationBatchUpdateBalancesMissingWalletReturnsError(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewWalletRepository(db)
+
+	err := repo.BatchUpdateBalances([]WalletBatchUpdate{
+		{WalletID: 999999999, AvailableBalance: decimal.NewFromInt(1), LockedBalance: decimal.Zero, KRW: decimal.NewFromInt(1), Quantity: decimal.Zero, AvgBuyPrice: decimal.Zero},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected")
+}

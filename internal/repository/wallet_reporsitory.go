@@ -3,6 +3,7 @@ package repository
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
@@ -174,6 +175,54 @@ func requireRowsAffected(result *gorm.DB, operation string) error {
 	}
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("%s affected no rows", operation)
+	}
+	return nil
+}
+
+type WalletBatchUpdate struct {
+	WalletID         uint
+	AvailableBalance decimal.Decimal
+	LockedBalance    decimal.Decimal
+	KRW              decimal.Decimal
+	Quantity         decimal.Decimal
+	AvgBuyPrice      decimal.Decimal
+}
+
+func (r *WalletRepository) BatchUpdateBalances(updates []WalletBatchUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	rows := make([]string, 0, len(updates))
+	args := make([]interface{}, 0, len(updates)*6)
+	for i, u := range updates {
+		base := i * 6
+		rows = append(rows, fmt.Sprintf(
+			"($%d::bigint, $%d::numeric, $%d::numeric, $%d::numeric, $%d::numeric, $%d::numeric)",
+			base+1, base+2, base+3, base+4, base+5, base+6,
+		))
+		args = append(args, u.WalletID, u.AvailableBalance, u.LockedBalance, u.KRW, u.Quantity, u.AvgBuyPrice)
+	}
+
+	sql := fmt.Sprintf(`
+		UPDATE wallets AS w
+		SET
+			available_balance = v.available_balance,
+			locked_balance = v.locked_balance,
+			krw = v.krw,
+			quantity = v.quantity,
+			avg_buy_price = v.avg_buy_price
+		FROM (VALUES %s) AS v(id, available_balance, locked_balance, krw, quantity, avg_buy_price)
+		WHERE w.id = v.id`,
+		strings.Join(rows, ", "),
+	)
+
+	result := r.DB.Exec(sql, args...)
+	if result.Error != nil {
+		return result.Error
+	}
+	if int(result.RowsAffected) != len(updates) {
+		return fmt.Errorf("wallet batch update affected %d rows, expected %d", result.RowsAffected, len(updates))
 	}
 	return nil
 }
