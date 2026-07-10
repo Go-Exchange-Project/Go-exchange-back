@@ -4,6 +4,7 @@ services:
   postgres:
     image: postgres:18-alpine
     container_name: goexchange-db-postgres
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=all"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-goexchange}
       POSTGRES_USER: ${POSTGRES_USER:-goexchange}
