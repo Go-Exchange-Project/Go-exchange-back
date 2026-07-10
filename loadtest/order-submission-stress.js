@@ -34,6 +34,8 @@ export const options = {
   // TOTAL_USERS=25000, http.batch()로 병렬화해도 250개 배치(SETUP_BATCH_SIZE=100)를
   // 순차 실행하므로 k6 기본 60초를 훨씬 초과한다.
   setupTimeout: '20m',
+  batch: SETUP_BATCH_SIZE,
+  batchPerHost: SETUP_BATCH_SIZE,
   scenarios: {
     order_submission_stress: {
       executor: 'ramping-vus',
@@ -70,7 +72,7 @@ export function setup() {
     ]);
     const registerResponses = http.batch(registerRequests);
 
-    // 2단계: 409(이미 등록됨)인 유저만 모아 로그인 요청을 동시에 전송
+    // 2단계: 가입-또는-로그인 폴백 — 같은 테스트 DB에 여러 번 실행해도 안전하게 재실행 가능하도록, 409(이미 등록됨)인 유저만 모아 로그인 요청을 동시에 전송
     const loginNeeded = [];
     const tokensByIndex = {};
     registerResponses.forEach((res, idx) => {
@@ -103,6 +105,7 @@ export function setup() {
 
     // 3단계: 이 배치의 지갑 충전 요청을 동시에 전송
     const fundRequests = batchIndices.map((i) => {
+      // 홀/짝수로 역할을 배정해, VU ID가 낮은 램프업 초반 구간에도 매수자/매도자가 함께 활성화되도록 한다
       const role = i % 2 === 1 ? 'buyer' : 'seller';
       const fundBody =
         role === 'buyer'
