@@ -35,6 +35,21 @@ var (
 		Help:    "Time to persist trade settlement (wallet/ledger updates) after a match event.",
 		Buckets: matchLatencyBuckets,
 	})
+
+	ReconciliationViolations = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "reconciliation_violations",
+		Help: "Violation count from the most recent reconciliation run, labeled by check name.",
+	}, []string{"check"})
+
+	ReconciliationLastRunTimestamp = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "reconciliation_last_run_timestamp_seconds",
+		Help: "Unix timestamp of the most recent reconciliation run.",
+	})
+
+	ReconciliationCheckErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "reconciliation_check_errors_total",
+		Help: "Total number of reconciliation check queries that failed to execute, labeled by check name.",
+	}, []string{"check"})
 )
 
 // RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를
