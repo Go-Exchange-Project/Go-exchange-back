@@ -58,3 +58,46 @@ func (r *ReconciliationRepository) CheckLedgerWalletPage(afterWalletID uint, lim
 	`, afterWalletID, limit).Scan(&rows).Error
 	return rows, err
 }
+
+// AssetConservationRow는 검사 2(asset_conservation)의 자산 하나에 대한 총량 보존 결과입니다.
+type AssetConservationRow struct {
+	CoinSymbol  string
+	WalletTotal decimal.Decimal
+	FeeTotal    decimal.Decimal
+	FundedTotal decimal.Decimal
+}
+
+// CheckAssetConservation은 자산(coin_symbol)별로 Σ(available+locked) + (KRW일 때만 누적 수수료)
+// == Σ(DEV_FUND delta)인지 확인합니다. 수수료는 internal/service/fee.go에서 항상 KRW로만
+// 부과되므로 코인 자산은 fee_total이 0이 되어 동일한 쿼리 형태로 일반화됩니다. 지갑 배치
+// 순회와 무관하게 매 실행 1회만 수행합니다.
+func (r *ReconciliationRepository) CheckAssetConservation() ([]AssetConservationRow, error) {
+	var rows []AssetConservationRow
+	err := r.DB.Raw(`
+		WITH wallet_totals AS (
+			SELECT coin_symbol, SUM(available_balance + locked_balance) AS total
+			FROM wallets
+			GROUP BY coin_symbol
+		),
+		fee_totals AS (
+			SELECT 'KRW' AS coin_symbol,
+			       COALESCE(SUM(buyer_fee), 0) + COALESCE(SUM(seller_fee), 0) AS total
+			FROM trades
+		),
+		funded_totals AS (
+			SELECT coin_symbol, SUM(available_delta) AS total
+			FROM ledger_entries
+			WHERE entry_type = 'DEV_FUND'
+			GROUP BY coin_symbol
+		)
+		SELECT
+			COALESCE(w.coin_symbol, f.coin_symbol) AS coin_symbol,
+			COALESCE(w.total, 0) AS wallet_total,
+			COALESCE(fee.total, 0) AS fee_total,
+			COALESCE(f.total, 0) AS funded_total
+		FROM wallet_totals w
+		FULL OUTER JOIN funded_totals f ON f.coin_symbol = w.coin_symbol
+		LEFT JOIN fee_totals fee ON fee.coin_symbol = COALESCE(w.coin_symbol, f.coin_symbol)
+	`).Scan(&rows).Error
+	return rows, err
+}

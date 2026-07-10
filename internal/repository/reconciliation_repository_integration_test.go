@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
@@ -140,6 +142,53 @@ func TestIntegrationCheckLedgerWalletPagePaginatesByWalletID(t *testing.T) {
 func findLedgerWalletRow(rows []LedgerWalletRow, walletID uint) *LedgerWalletRow {
 	for i := range rows {
 		if rows[i].WalletID == walletID {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func TestIntegrationCheckAssetConservationBalancesForDevFundedSymbol(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(810)
+	defer cleanupRepositoryUsers(t, db, userID)
+
+	symbol := fmt.Sprintf("RCN%d", time.Now().UnixNano())
+	wallet := model.Wallet{
+		UserID:           userID,
+		CoinSymbol:       symbol,
+		Quantity:         decimal.NewFromInt(10),
+		AvailableBalance: decimal.NewFromInt(10),
+		LockedBalance:    decimal.Zero,
+	}
+	require.NoError(t, db.Create(&wallet).Error)
+	require.NoError(t, db.Create(&model.LedgerEntry{
+		UserID:                userID,
+		CoinSymbol:            symbol,
+		EntryType:             model.LedgerEntryTypeDevFund,
+		AvailableDelta:        decimal.NewFromInt(10),
+		LockedDelta:           decimal.Zero,
+		AvailableBalanceAfter: decimal.NewFromInt(10),
+		LockedBalanceAfter:    decimal.Zero,
+		ReferenceType:         model.LedgerReferenceTypeDevFund,
+		ReferenceID:           0,
+	}).Error)
+
+	repo := NewReconciliationRepository(db)
+	rows, err := repo.CheckAssetConservation()
+	require.NoError(t, err)
+
+	row := findAssetConservationRow(rows, symbol)
+	require.NotNil(t, row, "expected a row for the isolated test symbol")
+	assert.True(t, row.WalletTotal.Equal(decimal.NewFromInt(10)))
+	assert.True(t, row.FundedTotal.Equal(decimal.NewFromInt(10)))
+	assert.True(t, row.FeeTotal.IsZero(), "non-KRW symbol should have zero fee total")
+	assert.True(t, row.WalletTotal.Add(row.FeeTotal).Equal(row.FundedTotal))
+}
+
+func findAssetConservationRow(rows []AssetConservationRow, coinSymbol string) *AssetConservationRow {
+	for i := range rows {
+		if rows[i].CoinSymbol == coinSymbol {
 			return &rows[i]
 		}
 	}
