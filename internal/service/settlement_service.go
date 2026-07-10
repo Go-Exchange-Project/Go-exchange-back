@@ -175,16 +175,12 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 			return err
 		}
 
-		if err := walletRepo.UpdateBalances(participants.BuyerUserID, model.KRWAssetSymbol, buyerKRWUpdate.AvailableBalance, buyerKRWUpdate.LockedBalance); err != nil {
-			return err
-		}
-		if err := walletRepo.UpdateBalancesAndAvgBuyPrice(participants.BuyerUserID, trade.CoinSymbol, buyerCoinUpdate.AvailableBalance, buyerCoinUpdate.LockedBalance, buyerCoinUpdate.AvgBuyPrice); err != nil {
-			return err
-		}
-		if err := walletRepo.UpdateBalancesAndAvgBuyPrice(participants.SellerUserID, trade.CoinSymbol, sellerCoinUpdate.AvailableBalance, sellerCoinUpdate.LockedBalance, sellerCoinUpdate.AvgBuyPrice); err != nil {
-			return err
-		}
-		if err := walletRepo.UpdateBalances(participants.SellerUserID, model.KRWAssetSymbol, sellerKRWUpdate.AvailableBalance, sellerKRWUpdate.LockedBalance); err != nil {
+		if err := walletRepo.BatchUpdateBalances([]repository.WalletBatchUpdate{
+			{WalletID: buyerKRW.ID, AvailableBalance: buyerKRWUpdate.AvailableBalance, LockedBalance: buyerKRWUpdate.LockedBalance, KRW: buyerKRWUpdate.KRW, Quantity: buyerKRWUpdate.Quantity, AvgBuyPrice: buyerKRWUpdate.AvgBuyPrice},
+			{WalletID: buyerCoin.ID, AvailableBalance: buyerCoinUpdate.AvailableBalance, LockedBalance: buyerCoinUpdate.LockedBalance, KRW: buyerCoinUpdate.KRW, Quantity: buyerCoinUpdate.Quantity, AvgBuyPrice: buyerCoinUpdate.AvgBuyPrice},
+			{WalletID: sellerCoin.ID, AvailableBalance: sellerCoinUpdate.AvailableBalance, LockedBalance: sellerCoinUpdate.LockedBalance, KRW: sellerCoinUpdate.KRW, Quantity: sellerCoinUpdate.Quantity, AvgBuyPrice: sellerCoinUpdate.AvgBuyPrice},
+			{WalletID: sellerKRW.ID, AvailableBalance: sellerKRWUpdate.AvailableBalance, LockedBalance: sellerKRWUpdate.LockedBalance, KRW: sellerKRWUpdate.KRW, Quantity: sellerKRWUpdate.Quantity, AvgBuyPrice: sellerKRWUpdate.AvgBuyPrice},
+		}); err != nil {
 			return err
 		}
 
