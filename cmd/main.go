@@ -53,6 +53,7 @@ func main() {
 		&model.FailedSettlement{},
 		&model.FailedMarketCompletion{},
 		&model.LedgerEntry{},
+		&model.ReconciliationViolation{},
 	); err != nil {
 		log.Fatal("auto migrate failed: ", err)
 	}

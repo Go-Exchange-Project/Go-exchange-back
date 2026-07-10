@@ -3,18 +3,21 @@ package config
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 const (
-	EnvGOExchangeEnableDevTools    = "GOEXCHANGE_ENABLE_DEV_TOOLS"
-	EnvGOExchangeDevToolsToken     = "GOEXCHANGE_DEV_TOOLS_TOKEN"
-	EnvGOExchangeEnableUpbit       = "GOEXCHANGE_ENABLE_UPBIT"
-	EnvGOExchangeCORSOrigins       = "GOEXCHANGE_CORS_ALLOWED_ORIGINS"
-	EnvGOExchangeEnablePprof       = "GOEXCHANGE_ENABLE_PPROF"
-	EnvGOExchangeSettlementWorkers = "GOEXCHANGE_SETTLEMENT_WORKERS"
+	EnvGOExchangeEnableDevTools         = "GOEXCHANGE_ENABLE_DEV_TOOLS"
+	EnvGOExchangeDevToolsToken          = "GOEXCHANGE_DEV_TOOLS_TOKEN"
+	EnvGOExchangeEnableUpbit            = "GOEXCHANGE_ENABLE_UPBIT"
+	EnvGOExchangeCORSOrigins            = "GOEXCHANGE_CORS_ALLOWED_ORIGINS"
+	EnvGOExchangeEnablePprof            = "GOEXCHANGE_ENABLE_PPROF"
+	EnvGOExchangeSettlementWorkers      = "GOEXCHANGE_SETTLEMENT_WORKERS"
+	EnvGOExchangeReconciliationInterval = "GOEXCHANGE_RECONCILIATION_INTERVAL"
 )
 
 const defaultSettlementWorkers = 10
+const defaultReconciliationIntervalSeconds = 3600
 
 var defaultCORSAllowedOrigins = []string{
 	"http://localhost:3000",
@@ -72,4 +75,9 @@ func parseBoolEnv(value string) bool {
 
 func SettlementWorkersFromEnv() int {
 	return parsePositiveIntEnv(EnvGOExchangeSettlementWorkers, defaultSettlementWorkers)
+}
+
+func ReconciliationIntervalFromEnv() time.Duration {
+	seconds := parsePositiveIntEnv(EnvGOExchangeReconciliationInterval, defaultReconciliationIntervalSeconds)
+	return time.Duration(seconds) * time.Second
 }

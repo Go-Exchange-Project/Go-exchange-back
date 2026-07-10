@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -131,4 +132,19 @@ func TestSettlementWorkersFromEnvInvalidValueFallsBackToDefault(t *testing.T) {
 	t.Setenv(EnvGOExchangeSettlementWorkers, "not-a-number")
 
 	assert.Equal(t, 10, SettlementWorkersFromEnv())
+}
+
+func TestReconciliationIntervalFromEnvDefaultsTo3600Seconds(t *testing.T) {
+	t.Setenv(EnvGOExchangeReconciliationInterval, "")
+	assert.Equal(t, 3600*time.Second, ReconciliationIntervalFromEnv())
+}
+
+func TestReconciliationIntervalFromEnvUsesOverride(t *testing.T) {
+	t.Setenv(EnvGOExchangeReconciliationInterval, "120")
+	assert.Equal(t, 120*time.Second, ReconciliationIntervalFromEnv())
+}
+
+func TestReconciliationIntervalFromEnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv(EnvGOExchangeReconciliationInterval, "not-a-number")
+	assert.Equal(t, 3600*time.Second, ReconciliationIntervalFromEnv())
 }
