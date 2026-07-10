@@ -139,6 +139,6 @@ resource "google_compute_firewall" "allow_postgres" {
 
   allow {
     protocol = "tcp"
-    ports    = ["5432"]
+    ports    = ["5432", "9187"]
   }
 }
