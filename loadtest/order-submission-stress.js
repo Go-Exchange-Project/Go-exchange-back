@@ -7,6 +7,7 @@ const DEV_TOOLS_TOKEN = __ENV.DEV_TOOLS_TOKEN;
 const DEV_TOOLS_TOKEN_HEADER = 'X-GoExchange-Dev-Token';
 
 const TOTAL_USERS = 25000;
+const SETUP_BATCH_SIZE = 100;
 const COIN_SYMBOL = 'BTC';
 const FIXED_PRICE = '50000000';
 const ORDER_AMOUNT = '0.001';
@@ -51,66 +52,85 @@ export function setup() {
   }
 
   const users = [];
-  for (let i = 1; i <= TOTAL_USERS; i++) {
-    // 홀/짝수로 역할을 배정해, VU ID가 낮은 구간(램프업 초반)에도 매수자/매도자가
-    // 함께 활성화되도록 한다.
-    const role = i % 2 === 1 ? 'buyer' : 'seller';
-    const email = `stress-user-${i}@test.local`;
+  for (let batchStart = 1; batchStart <= TOTAL_USERS; batchStart += SETUP_BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + SETUP_BATCH_SIZE - 1, TOTAL_USERS);
+    const batchIndices = [];
+    for (let i = batchStart; i <= batchEnd; i++) batchIndices.push(i);
 
-    // 가입-또는-로그인 폴백: 같은 테스트 DB에 스크립트를 여러 번 실행해도
-    // 안전하게 재실행 가능하도록 한다.
-    const registerRes = http.post(
+    // 1단계: 이 배치의 등록 요청을 동시에 전송
+    const registerRequests = batchIndices.map((i) => [
+      'POST',
       `${BASE_URL}/auth/register`,
       JSON.stringify({
         name: `Stress Test User ${i}`,
-        email: email,
+        email: `stress-user-${i}@test.local`,
         password: 'loadtest-password-123',
       }),
-      { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } }
-    );
+      { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } },
+    ]);
+    const registerResponses = http.batch(registerRequests);
 
-    let token;
-    if (registerRes.status === 201) {
-      token = registerRes.json('data.token');
-    } else if (registerRes.status === 409) {
-      const loginRes = http.post(
-        `${BASE_URL}/auth/login`,
-        JSON.stringify({ email: email, password: 'loadtest-password-123' }),
-        { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } }
-      );
-      if (loginRes.status !== 200) {
-        throw new Error(
-          `setup: user ${i} (${email}) already registered but login failed: ${loginRes.status} ${loginRes.body}`
-        );
+    // 2단계: 409(이미 등록됨)인 유저만 모아 로그인 요청을 동시에 전송
+    const loginNeeded = [];
+    const tokensByIndex = {};
+    registerResponses.forEach((res, idx) => {
+      const i = batchIndices[idx];
+      if (res.status === 201) {
+        tokensByIndex[i] = res.json('data.token');
+      } else if (res.status === 409) {
+        loginNeeded.push(i);
+      } else {
+        throw new Error(`setup: failed to register user ${i}: ${res.status} ${res.body}`);
       }
-      token = loginRes.json('data.token');
-    } else {
-      throw new Error(
-        `setup: failed to register user ${i} (${email}): ${registerRes.status} ${registerRes.body}`
-      );
-    }
-
-    const fundBody =
-      role === 'buyer'
-        ? { coin_symbol: 'KRW', amount: BUYER_KRW_FUNDING }
-        : { coin_symbol: COIN_SYMBOL, amount: SELLER_BTC_FUNDING };
-
-    const fundRes = http.post(`${BASE_URL}/dev/wallets/fund`, JSON.stringify(fundBody), {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        [DEV_TOOLS_TOKEN_HEADER]: DEV_TOOLS_TOKEN,
-      },
-      tags: { name: 'setup' },
     });
 
-    if (fundRes.status !== 200) {
-      throw new Error(
-        `setup: failed to fund wallet for user ${i} (${email}): ${fundRes.status} ${fundRes.body}`
-      );
+    if (loginNeeded.length > 0) {
+      const loginRequests = loginNeeded.map((i) => [
+        'POST',
+        `${BASE_URL}/auth/login`,
+        JSON.stringify({ email: `stress-user-${i}@test.local`, password: 'loadtest-password-123' }),
+        { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } },
+      ]);
+      const loginResponses = http.batch(loginRequests);
+      loginResponses.forEach((res, idx) => {
+        const i = loginNeeded[idx];
+        if (res.status !== 200) {
+          throw new Error(`setup: user ${i} already registered but login failed: ${res.status} ${res.body}`);
+        }
+        tokensByIndex[i] = res.json('data.token');
+      });
     }
 
-    users.push({ token, role });
+    // 3단계: 이 배치의 지갑 충전 요청을 동시에 전송
+    const fundRequests = batchIndices.map((i) => {
+      const role = i % 2 === 1 ? 'buyer' : 'seller';
+      const fundBody =
+        role === 'buyer'
+          ? { coin_symbol: 'KRW', amount: BUYER_KRW_FUNDING }
+          : { coin_symbol: COIN_SYMBOL, amount: SELLER_BTC_FUNDING };
+      return [
+        'POST',
+        `${BASE_URL}/dev/wallets/fund`,
+        JSON.stringify(fundBody),
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokensByIndex[i]}`,
+            [DEV_TOOLS_TOKEN_HEADER]: DEV_TOOLS_TOKEN,
+          },
+          tags: { name: 'setup' },
+        },
+      ];
+    });
+    const fundResponses = http.batch(fundRequests);
+    fundResponses.forEach((res, idx) => {
+      const i = batchIndices[idx];
+      if (res.status !== 200) {
+        throw new Error(`setup: failed to fund wallet for user ${i}: ${res.status} ${res.body}`);
+      }
+      const role = i % 2 === 1 ? 'buyer' : 'seller';
+      users.push({ token: tokensByIndex[i], role });
+    });
   }
 
   return { users };
