@@ -36,7 +36,7 @@ variable "server_machine_type" {
 variable "load_gen_machine_type" {
   description = "k6 부하생성 인스턴스 머신 타입."
   type        = string
-  default     = "e2-small"
+  default     = "e2-standard-2"
 }
 
 variable "root_volume_size_gb" {
