@@ -42,7 +42,7 @@ variable "load_gen_machine_type" {
 variable "db_machine_type" {
   description = "Postgres 전용 인스턴스 머신 타입."
   type        = string
-  default     = "e2-medium"
+  default     = "e2-highcpu-4"
 }
 
 variable "root_volume_size_gb" {
