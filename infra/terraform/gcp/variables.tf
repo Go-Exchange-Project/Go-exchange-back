@@ -46,7 +46,7 @@ variable "db_machine_type" {
 }
 
 variable "root_volume_size_gb" {
-  description = "두 인스턴스 공통 루트 디스크 크기(GiB)."
+  description = "세 인스턴스 공통 루트 디스크 크기(GiB)."
   type        = number
   default     = 30
 
