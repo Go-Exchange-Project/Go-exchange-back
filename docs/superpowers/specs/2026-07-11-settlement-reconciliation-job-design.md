@@ -287,3 +287,27 @@ func (w *ReconciliationWorker) RunOnce() {
 - 검사 4(미체결 주문별 잔여 hold 재계산) — 2단계.
 - 위반 자동 복구/교정.
 - 원장 증분 집계/스냅샷 테이블로의 전환.
+
+## 검증 결과 (2026-07-11 구현 완료 후 실측)
+
+- **단위 테스트** (`internal/service/reconciliation_worker_test.go`, DB 불필요):
+  분류 로직 7건 — gap 없음/레거시로 설명되는 gap/locked gap 존재 시 항상 진짜
+  위반/implied와 불일치하는 gap/원장 없는 지갑(NULL→ledger_wallet)/보존식
+  성립·불성립 — 전부 통과. RunOnce 오케스트레이션 4건 — 위반 기록+게이지 set,
+  위반 0건일 때 게이지 0으로 명시적 갱신, **검사 쿼리 실패 시 게이지 미갱신 +
+  에러 카운터 증가**, 풀 페이지 후 다음 keyset 페이지 요청 — 전부 통과.
+- **리포지토리 통합 테스트** (실제 Postgres 16): 원장-지갑 일치/불일치(gap 700-500=200
+  정확히 산출)/원장 없는 지갑의 implied NULL/keyset 커서 동작/유니크 심볼
+  자산 보존/오래된·신선한 시장가 주문 구분/위반 insert — 전부 통과.
+- **워커 엔드투엔드 통합 테스트** (`reconciliation_worker_integration_test.go`):
+  위반 3종(진짜 원장 괴리, 레거시 패턴, 10분 경과 시장가)을 주입하고 RunOnce 실행 →
+  `reconciliation_violations` 테이블에 각각 `ledger_wallet` / `legacy_mismatch` /
+  `stale_market_order`로 정확히 분류·기록되고, 정상 지갑은 기록되지 않음을 확인.
+  위반을 해소한 뒤 재실행하면 새 행이 쌓이지 않는 것도 확인.
+- **전체 스위트**: `go test ./... -count=1` (통합 포함) 전 패키지 통과.
+- **구현 중 발견한 픽스처 버그**: 시장가 매수 주문 픽스처가 `amount=1`로 생성되어
+  `ck_orders_shape_by_type`(003 마이그레이션: 시장가 매수는 `amount=0 AND
+  quote_amount>0`) 제약에 걸렸다 — 검사 3용 테스트 픽스처 2곳을 올바른 형태로
+  수정. DB 제약이 테스트 픽스처의 잘못된 데이터를 잡아낸 사례.
+- **남은 수동 확인**: 스트레스 DB(dev-fund 경로만 사용)에서 서버 기동 후 첫 실행이
+  전 검사 위반 0건(legacy_mismatch 포함)을 보고하는지 — 다음 배포 때 확인.

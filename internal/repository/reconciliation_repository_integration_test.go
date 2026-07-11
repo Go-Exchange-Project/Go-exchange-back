@@ -207,7 +207,8 @@ func TestIntegrationCheckStaleMarketOrdersFindsOldPendingMarketOrder(t *testing.
 		OrderType:    model.OrderTypeMarket,
 		Status:       model.OrderStatusPending,
 		Price:        decimal.Zero,
-		Amount:       decimal.NewFromInt(1),
+		Amount:       decimal.Zero,
+		QuoteAmount:  decimal.NewFromInt(100_000),
 		FilledAmount: decimal.Zero,
 		CreatedAt:    time.Now().UTC().Add(-10 * time.Minute),
 	}
@@ -220,7 +221,8 @@ func TestIntegrationCheckStaleMarketOrdersFindsOldPendingMarketOrder(t *testing.
 		OrderType:    model.OrderTypeMarket,
 		Status:       model.OrderStatusPending,
 		Price:        decimal.Zero,
-		Amount:       decimal.NewFromInt(1),
+		Amount:       decimal.Zero,
+		QuoteAmount:  decimal.NewFromInt(100_000),
 		FilledAmount: decimal.Zero,
 		CreatedAt:    time.Now().UTC(),
 	}

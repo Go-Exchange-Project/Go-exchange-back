@@ -8,7 +8,7 @@ import "time"
 // 위반 지속 이력 자체가 유용한 데이터).
 type ReconciliationViolation struct {
 	ID         uint      `gorm:"primaryKey"`
-	CheckName  string    `gorm:"not null"` // ledger_wallet | asset_conservation | stale_market_order | legacy_mismatch
+	CheckName  string    `gorm:"not null"`       // ledger_wallet | asset_conservation | stale_market_order | legacy_mismatch
 	SubjectKey string    `gorm:"not null;index"` // 예: "wallet:123", "coin:BTC", "order:42"
 	Detail     string    `gorm:"type:text;not null"`
 	DetectedAt time.Time `gorm:"not null"`
