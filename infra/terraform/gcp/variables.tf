@@ -56,6 +56,17 @@ variable "root_volume_size_gb" {
   }
 }
 
+variable "db_snapshot_retention_days" {
+  description = "DB 부트 디스크 자동 스냅샷 보존 일수."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.db_snapshot_retention_days >= 1
+    error_message = "db_snapshot_retention_days must be at least 1."
+  }
+}
+
 variable "allowed_admin_cidr" {
   description = "SSH/Grafana/Prometheus/API에 접근을 허용할 내 공인 IP. 예: 203.0.113.10/32"
   type        = string
