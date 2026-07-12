@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/config"
@@ -54,6 +59,7 @@ func main() {
 		&model.FailedMarketCompletion{},
 		&model.LedgerEntry{},
 		&model.ReconciliationViolation{},
+		&model.TradeOutboxEvent{},
 	); err != nil {
 		log.Fatal("auto migrate failed: ", err)
 	}
@@ -100,24 +106,94 @@ func main() {
 	orderBookHandler := handler.NewOrderBookHandler(me)
 	orderHandler := handler.NewOrderHandler(orderService)
 
+	broadcast := func(msg []byte) {
+		hub.Broadcast <- msg
+	}
+
+	// A-3 write-ahead outbox: 정산은 outbox에 커밋된 이벤트만 처리한다.
+	// outbox 커밋 이전 크래시는 매칭 자체가 롤백되고(자금 무변동, 부트스트랩이
+	// 미체결 주문을 재투입), 이후 크래시는 아래 리플레이가 PENDING을 재처리한다.
+	// 부팅 순서가 곧 정확성이다: ① 리플레이 → ② 시장가 파이널라이저 →
+	// ③ 라이브 파이프라인 → ④ 부트스트랩 → ⑤ HTTP 개시.
+	outboxRepo := repository.NewTradeOutboxRepository(config.DB)
+	replayer := &service.OutboxReplayer{
+		Repo: outboxRepo,
+		Process: func(event matching.ExecutionEvent) bool {
+			return processExecutionEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, log.Default())
+		},
+	}
+	replayResult, err := replayer.Replay()
+	if err != nil {
+		log.Fatal("trade outbox replay failed: ", err)
+	}
+	log.Printf(
+		"trade outbox replay completed: replayed=%d deferred=%d corrupted=%d",
+		replayResult.Replayed, replayResult.Deferred, replayResult.Corrupted,
+	)
+
+	// 리플레이 완료 시점에 PENDING/PARTIAL로 남은 시장가 주문은 엔진 메모리가
+	// 사라졌으므로 더 이상 체결될 수 없다 — 잔여 hold를 해제해 영구 동결을 막는다.
+	// 반드시 리플레이 뒤여야 한다(정산 완료 전 완료 시도는 filled 검증 conflict).
+	finalizer := &service.StaleMarketOrderFinalizer{
+		Orders:          orderRepo,
+		Completer:       orderService,
+		FailureRecorder: failedMarketCompletionService,
+	}
+	finalizeResult, err := finalizer.FinalizeAll()
+	if err != nil {
+		log.Fatal("stale market order finalize failed: ", err)
+	}
+	log.Printf("stale market orders finalized: finalized=%d failed=%d", finalizeResult.Finalized, finalizeResult.Failed)
+
 	// 심볼 파티셔닝 정산 워커: 같은 심볼의 이벤트는 항상 같은 워커가 FIFO로 처리해
 	// 엔진이 만든 순서(trade들 -> MarketOrderDone)를 보존한다. 워커를 채널 하나로
 	// 경쟁 소비시키면 Done 이벤트가 trade 정산을 앞질러 완료가 유실될 수 있다.
-	settlementQueues := make([]chan matching.ExecutionEvent, config.SettlementWorkersFromEnv())
+	settlementQueues := make([]chan service.OutboxEvent, config.SettlementWorkersFromEnv())
 	for i := range settlementQueues {
-		settlementQueues[i] = make(chan matching.ExecutionEvent, settlementWorkerQueueSize)
+		settlementQueues[i] = make(chan service.OutboxEvent, settlementWorkerQueueSize)
 	}
 	metrics.RegisterSettlementWorkerQueueGauges(settlementQueueLenFns(settlementQueues))
-	go dispatchExecutionEvents(me.ExecutionCh, settlementQueues)
+	var settlementWg sync.WaitGroup
 	for _, queue := range settlementQueues {
-		go func(queue chan matching.ExecutionEvent) {
-			for event := range queue {
-				processExecutionEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, func(msg []byte) {
-					hub.Broadcast <- msg
-				}, log.Default())
+		settlementWg.Add(1)
+		go func(queue chan service.OutboxEvent) {
+			defer settlementWg.Done()
+			for outboxEvent := range queue {
+				handled := processExecutionEvent(outboxEvent.Event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, log.Default())
+				if !handled {
+					// 내구 확정 실패(정산 실패의 기록조차 실패) — PENDING으로 남겨
+					// 다음 부팅 리플레이가 재시도한다.
+					continue
+				}
+				if err := outboxRepo.MarkProcessed(outboxEvent.OutboxID); err != nil {
+					// 마킹 실패는 유실이 아니라 다음 리플레이의 멱등 재처리일 뿐.
+					log.Printf("mark outbox event %d processed failed: %v", outboxEvent.OutboxID, err)
+				}
 			}
 		}(queue)
 	}
+
+	// OutboxWriter는 ExecutionCh의 유일한 소비자: 배치 커밋(group commit) 후에만
+	// 심볼 파티셔닝 큐로 전달한다. 엔진이 ExecutionCh를 닫으면(graceful shutdown)
+	// 잔여 배치를 flush하고 큐를 닫아 워커 종료를 전파한다.
+	outboxWriter := &service.OutboxWriter{
+		Repo:   outboxRepo,
+		Source: me.ExecutionCh,
+		Forward: func(outboxEvent service.OutboxEvent) {
+			forwardToSettlementQueue(settlementQueues, outboxEvent)
+		},
+	}
+	outboxWriterDone := make(chan struct{})
+	go func() {
+		outboxWriter.Run()
+		for _, queue := range settlementQueues {
+			close(queue)
+		}
+		close(outboxWriterDone)
+	}()
+
+	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	defer cancelBackground()
 
 	settlementRetryWorker := &service.SettlementRetryWorker{
 		Settler:           settlementService,
@@ -125,13 +201,13 @@ func main() {
 		FailedSettlements: failedSettlementService,
 		FailedCompletions: failedMarketCompletionService,
 	}
-	go settlementRetryWorker.Run(context.Background())
+	go settlementRetryWorker.Run(backgroundCtx)
 
 	reconciliationWorker := &service.ReconciliationWorker{
 		Repository: repository.NewReconciliationRepository(config.DB),
 		Interval:   config.ReconciliationIntervalFromEnv(),
 	}
-	go reconciliationWorker.Run(context.Background())
+	go reconciliationWorker.Run(backgroundCtx)
 
 	go func() {
 		for snapshot := range me.SnapshotCh {
@@ -222,7 +298,55 @@ func main() {
 		dev.POST("/wallets/fund", devHandler.FundWallet)
 	}
 
-	r.Run(":8080")
+	// graceful shutdown 체인: HTTP 차단 → 엔진 드레인(ExecutionCh close) →
+	// outbox writer flush(큐 close) → 정산 워커 드레인 → 백그라운드 워커 취소.
+	// 상한 초과로 강제 종료돼도 outbox 덕에 유실은 없다 — 다음 부팅 리플레이가 처리한다.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	srv := &http.Server{Addr: ":8080", Handler: r}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal("http server failed: ", err)
+		}
+	}()
+	log.Println("server listening on :8080")
+
+	<-signalCtx.Done()
+	stopSignals()
+	log.Println("shutdown: signal received, draining pipeline")
+
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := srv.Shutdown(httpCtx); err != nil {
+		log.Printf("shutdown: http server shutdown failed: %v", err)
+	}
+	cancelHTTP()
+
+	drainDeadline := time.After(30 * time.Second)
+	me.Stop()
+	select {
+	case <-me.Done():
+	case <-drainDeadline:
+		log.Println("shutdown: matching engine drain timed out")
+	}
+	select {
+	case <-outboxWriterDone:
+	case <-drainDeadline:
+		log.Println("shutdown: outbox writer flush timed out")
+	}
+	settlementDrained := make(chan struct{})
+	go func() {
+		settlementWg.Wait()
+		close(settlementDrained)
+	}()
+	select {
+	case <-settlementDrained:
+	case <-drainDeadline:
+		log.Println("shutdown: settlement workers drain timed out, next boot replay will finish the rest")
+	}
+
+	cancelBackground()
+	log.Println("shutdown complete")
 }
 
 type tradeSettler interface {
@@ -247,10 +371,10 @@ const settlementWorkerQueueSize = 256
 // 여기서 못 잡은 실패는 SettlementRetryWorker(10초 주기)가 2차로 처리합니다.
 var transientRetryDelays = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
 
-func dispatchExecutionEvents(events <-chan matching.ExecutionEvent, queues []chan matching.ExecutionEvent) {
-	for event := range events {
-		queues[settlementWorkerIndex(executionEventCoinSymbol(event), len(queues))] <- event
-	}
+// forwardToSettlementQueue는 outbox에 커밋된 이벤트를 심볼 해시로 정해지는
+// 워커 큐에 넣는다. 같은 심볼은 항상 같은 큐 — 엔진 방출 순서가 보존된다.
+func forwardToSettlementQueue(queues []chan service.OutboxEvent, event service.OutboxEvent) {
+	queues[settlementWorkerIndex(executionEventCoinSymbol(event.Event), len(queues))] <- event
 }
 
 func executionEventCoinSymbol(event matching.ExecutionEvent) string {
@@ -272,7 +396,7 @@ func settlementWorkerIndex(coinSymbol string, workerCount int) int {
 	return int(hash.Sum32() % uint32(workerCount))
 }
 
-func settlementQueueLenFns(queues []chan matching.ExecutionEvent) []func() int {
+func settlementQueueLenFns(queues []chan service.OutboxEvent) []func() int {
 	lenFns := make([]func() int, len(queues))
 	for i, queue := range queues {
 		queue := queue
@@ -281,6 +405,10 @@ func settlementQueueLenFns(queues []chan matching.ExecutionEvent) []func() int {
 	return lenFns
 }
 
+// processExecutionEvent는 이벤트 처리 결과가 내구적으로 확정됐는지를 반환한다:
+// 정산 성공, 멱등 no-op, 또는 실패의 내구 기록(failed_settlements/
+// failed_market_completions) 완료면 true — 호출자가 outbox 행을 PROCESSED로
+// 마킹해도 안전하다. false면 PENDING으로 남겨 다음 부팅 리플레이가 재시도한다.
 func processExecutionEvent(
 	event matching.ExecutionEvent,
 	settler tradeSettler,
@@ -289,14 +417,14 @@ func processExecutionEvent(
 	completionFailureRecorder marketCompletionFailureRecorder,
 	broadcast func([]byte),
 	logger *log.Logger,
-) {
+) bool {
 	if event.Trade != nil {
-		processTradeSettlement(event.Trade, settler, failureRecorder, broadcast, logger)
-		return
+		return processTradeSettlement(event.Trade, settler, failureRecorder, broadcast, logger)
 	}
 	if event.MarketOrderDone != nil {
-		processMarketOrderDone(event.MarketOrderDone, marketCompleter, completionFailureRecorder, logger)
+		return processMarketOrderDone(event.MarketOrderDone, marketCompleter, completionFailureRecorder, logger)
 	}
+	return true
 }
 
 func processMarketOrderDone(
@@ -304,12 +432,12 @@ func processMarketOrderDone(
 	completer marketOrderCompleter,
 	failureRecorder marketCompletionFailureRecorder,
 	logger *log.Logger,
-) {
+) bool {
 	if logger == nil {
 		logger = log.Default()
 	}
 	if completer == nil || done == nil {
-		return
+		return true
 	}
 
 	input := service.CompleteMarketOrderInput{
@@ -324,17 +452,20 @@ func processMarketOrderDone(
 		err = completer.CompleteMarketOrder(input)
 	}
 	if err == nil {
-		return
+		return true
 	}
 
-	// Done 이벤트는 엔진 메모리에만 존재하므로, 여기서 버리면 시장가 주문의
-	// 잔여 hold가 영구 동결된다. 내구 기록으로 남겨 재시도 워커에 넘긴다.
-	if failureRecorder != nil {
-		if _, recordErr := failureRecorder.RecordFailure(input, done.CoinSymbol, err); recordErr != nil {
-			logger.Printf("record failed market completion failed: %v", recordErr)
-		}
-	}
+	// Done 이벤트를 여기서 버리면 시장가 주문의 잔여 hold가 영구 동결된다.
+	// 내구 기록으로 남겨 재시도 워커에 넘긴다.
 	logger.Printf("complete market order failed: %v", err)
+	if failureRecorder == nil {
+		return false
+	}
+	if _, recordErr := failureRecorder.RecordFailure(input, done.CoinSymbol, err); recordErr != nil {
+		logger.Printf("record failed market completion failed: %v", recordErr)
+		return false
+	}
+	return true
 }
 
 // isRetryableCompletionError: conflict는 같은 심볼의 trade 정산이 아직 안 끝났다는
@@ -353,7 +484,7 @@ func processTradeSettlement(
 	failureRecorder settlementFailureRecorder,
 	broadcast func([]byte),
 	logger *log.Logger,
-) {
+) bool {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -366,16 +497,18 @@ func processTradeSettlement(
 	}
 	metrics.OrderSettlementDuration.Observe(time.Since(settlementStart).Seconds())
 	if err != nil {
-		if failureRecorder != nil {
-			if _, recordErr := failureRecorder.RecordFailure(trade, err); recordErr != nil {
-				logger.Printf("record failed settlement failed: %v", recordErr)
-			}
-		}
 		logger.Printf("settle trade failed: %v", err)
-		return
+		if failureRecorder == nil {
+			return false
+		}
+		if _, recordErr := failureRecorder.RecordFailure(trade, err); recordErr != nil {
+			logger.Printf("record failed settlement failed: %v", recordErr)
+			return false
+		}
+		return true
 	}
 	if !result.Applied {
-		return
+		return true
 	}
 
 	tradeJSON, err := json.Marshal(map[string]interface{}{
@@ -396,8 +529,10 @@ func processTradeSettlement(
 		},
 	})
 	if err != nil {
+		// 브로드캐스트 실패는 정산 내구성과 무관하다 — 정산은 이미 커밋됐다.
 		logger.Printf("marshal trade broadcast failed: %v", err)
-		return
+		return true
 	}
 	broadcast(tradeJSON)
+	return true
 }

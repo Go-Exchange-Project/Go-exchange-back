@@ -283,11 +283,11 @@ func TestSettlementWorkerIndexIsStableAndBounded(t *testing.T) {
 	}
 }
 
-func TestDispatchExecutionEventsRoutesSameSymbolInOrder(t *testing.T) {
+func TestForwardToSettlementQueueRoutesSameSymbolInOrder(t *testing.T) {
 	const workerCount = 4
-	queues := make([]chan matching.ExecutionEvent, workerCount)
+	queues := make([]chan service.OutboxEvent, workerCount)
 	for i := range queues {
-		queues[i] = make(chan matching.ExecutionEvent, 8)
+		queues[i] = make(chan service.OutboxEvent, 8)
 	}
 
 	// BTC와 다른 워커로 해시되는 심볼을 런타임에 고른다(해시 충돌에 안전하게).
@@ -300,22 +300,28 @@ func TestDispatchExecutionEventsRoutesSameSymbolInOrder(t *testing.T) {
 	}
 	require.NotEmpty(t, otherSymbol, "BTC와 다른 워커로 가는 심볼이 있어야 한다")
 
-	events := make(chan matching.ExecutionEvent, 8)
-	events <- matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: "BTC", EngineSequence: 1}}
-	events <- matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: otherSymbol, EngineSequence: 2}}
-	events <- matching.ExecutionEvent{MarketOrderDone: testMarketOrderDone()}
-	close(events)
-
-	dispatchExecutionEvents(events, queues)
+	forwardToSettlementQueue(queues, service.OutboxEvent{
+		OutboxID: 1,
+		Event:    matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: "BTC", EngineSequence: 1}},
+	})
+	forwardToSettlementQueue(queues, service.OutboxEvent{
+		OutboxID: 2,
+		Event:    matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: otherSymbol, EngineSequence: 2}},
+	})
+	forwardToSettlementQueue(queues, service.OutboxEvent{
+		OutboxID: 3,
+		Event:    matching.ExecutionEvent{MarketOrderDone: testMarketOrderDone()},
+	})
 
 	btcQueue := queues[settlementWorkerIndex("BTC", workerCount)]
 	require.Equal(t, 2, len(btcQueue), "BTC trade와 Done은 같은 워커 큐로 가야 한다")
 	first := <-btcQueue
 	second := <-btcQueue
-	require.NotNil(t, first.Trade, "trade가 Done보다 먼저 나와야 한다")
-	assert.Equal(t, int64(1), first.Trade.EngineSequence)
-	require.NotNil(t, second.MarketOrderDone)
-	assert.Equal(t, uint(42), second.MarketOrderDone.OrderID)
+	require.NotNil(t, first.Event.Trade, "trade가 Done보다 먼저 나와야 한다")
+	assert.Equal(t, int64(1), first.Event.Trade.EngineSequence)
+	assert.Equal(t, uint64(1), first.OutboxID, "outbox ID가 이벤트와 함께 전달돼야 한다")
+	require.NotNil(t, second.Event.MarketOrderDone)
+	assert.Equal(t, uint(42), second.Event.MarketOrderDone.OrderID)
 
 	otherQueue := queues[settlementWorkerIndex(otherSymbol, workerCount)]
 	assert.Equal(t, 1, len(otherQueue))

@@ -3,6 +3,7 @@ package matching
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,10 @@ type MatchingEngine struct {
 	tradeSeq    int64
 
 	MatchLatencyObserver func(time.Duration)
+
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+	stopOnce sync.Once
 }
 
 const DefaultSnapshotDepth = 30
@@ -100,39 +105,90 @@ func NewMatchingEngine() *MatchingEngine {
 		ExecutionCh: make(chan ExecutionEvent, 1024),
 		SnapshotCh:  make(chan OrderBookSnapshot, 256),
 		engineID:    newEngineID(),
+		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
 	}
 }
 
 func (me *MatchingEngine) Start() {
 	go func() {
+		defer close(me.doneCh)
 		for {
 			select {
 			case order := <-me.OrderCh:
-				if order == nil {
-					continue
-				}
-				me.Match(order)
-				if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
-					me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
-				}
-				me.SnapshotCh <- me.GetOrderBookSnapshot(order.CoinSymbol)
+				me.processOrder(order)
 			case cmd := <-me.CancelCh:
-				result := me.handleCancel(cmd)
-				if cmd.ResponseCh != nil {
-					cmd.ResponseCh <- result
-				}
-				if result.Removed {
-					me.SnapshotCh <- me.GetOrderBookSnapshot(cmd.CoinSymbol)
-				}
+				me.processCancel(cmd)
 			case req := <-me.SnapshotReq:
 				if req.ResponseCh != nil {
 					req.ResponseCh <- OrderBookSnapshotResult{
 						Snapshot: me.GetOrderBookSnapshotWithDepth(req.CoinSymbol, req.Depth),
 					}
 				}
+			case <-me.stopCh:
+				// graceful shutdown: 이미 접수된 주문/취소를 모두 처리한 뒤 종료한다.
+				// 이 루프가 ExecutionCh와 SnapshotCh의 유일한 writer이므로, 드레인
+				// 완료 후의 close가 downstream(outbox writer, 스냅샷 소비자) 종료를
+				// 도미노로 전파한다.
+				me.drainPendingWork()
+				if me.ExecutionCh != nil {
+					close(me.ExecutionCh)
+				}
+				close(me.SnapshotCh)
+				return
 			}
 		}
 	}()
+}
+
+func (me *MatchingEngine) processOrder(order *Order) {
+	if order == nil {
+		return
+	}
+	me.Match(order)
+	if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
+		me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
+	}
+	me.SnapshotCh <- me.GetOrderBookSnapshot(order.CoinSymbol)
+}
+
+func (me *MatchingEngine) processCancel(cmd CancelOrderCommand) {
+	result := me.handleCancel(cmd)
+	if cmd.ResponseCh != nil {
+		cmd.ResponseCh <- result
+	}
+	if result.Removed {
+		me.SnapshotCh <- me.GetOrderBookSnapshot(cmd.CoinSymbol)
+	}
+}
+
+func (me *MatchingEngine) drainPendingWork() {
+	for {
+		select {
+		case order := <-me.OrderCh:
+			me.processOrder(order)
+		case cmd := <-me.CancelCh:
+			me.processCancel(cmd)
+		default:
+			return
+		}
+	}
+}
+
+// Stop은 엔진 루프에 종료를 지시합니다. 루프는 접수된 주문/취소를 드레인한 뒤
+// ExecutionCh·SnapshotCh를 닫고 Done()을 통해 완료를 알립니다.
+// HTTP 서버가 먼저 닫혀 새 주문 유입이 멈춘 뒤에 호출해야 합니다.
+func (me *MatchingEngine) Stop() {
+	me.stopOnce.Do(func() {
+		if me.stopCh != nil {
+			close(me.stopCh)
+		}
+	})
+}
+
+// Done은 엔진 루프가 드레인을 마치고 종료됐을 때 닫히는 채널을 반환합니다.
+func (me *MatchingEngine) Done() <-chan struct{} {
+	return me.doneCh
 }
 
 func (me *MatchingEngine) RequestOrderBookSnapshot(coinSymbol string, depth int) (OrderBookSnapshot, error) {

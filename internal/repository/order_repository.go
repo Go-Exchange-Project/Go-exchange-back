@@ -89,6 +89,19 @@ func (r *OrderRepository) FindByIDForUpdate(orderID uint) (*model.Order, error) 
 	return &order, err
 }
 
+// FindOpenMarketOrders는 부팅 시 파이널라이저용으로 PENDING/PARTIAL 시장가 주문을
+// 조회합니다. 시장가는 오더북에 rest하지 않으므로 리플레이가 끝난 부팅 시점에
+// 이 상태로 남은 주문은 더 이상 체결될 수 없습니다.
+func (r *OrderRepository) FindOpenMarketOrders() ([]model.Order, error) {
+	var orders []model.Order
+	err := r.DB.
+		Where("status IN ?", []model.OrderStatus{model.OrderStatusPending, model.OrderStatusPartial}).
+		Where("order_type = ?", model.OrderTypeMarket).
+		Order("id ASC").
+		Find(&orders).Error
+	return orders, err
+}
+
 func (r *OrderRepository) FindOpenOrdersForBootstrap() ([]model.Order, error) {
 	var orders []model.Order
 	err := r.DB.
