@@ -33,7 +33,7 @@ func waitEngineDone(t *testing.T, me *MatchingEngine) {
 }
 
 func TestEngineStopDrainsQueuedOrdersThenClosesChannels(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	// 스냅샷 소비자(main의 브로드캐스트 goroutine에 해당) — close로 종료돼야 한다.
 	snapshotsDone := make(chan struct{})
@@ -69,7 +69,7 @@ func TestEngineStopDrainsQueuedOrdersThenClosesChannels(t *testing.T) {
 }
 
 func TestEngineStopIsIdempotent(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 	go func() {
 		for range me.SnapshotCh {

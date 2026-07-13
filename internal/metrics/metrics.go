@@ -82,14 +82,13 @@ func RegisterSettlementWorkerQueueGauges(queueLenFns []func() int) {
 	}
 }
 
-func RegisterMatchingEngineChannelLenGauges(orderLen, cancelLen, snapshotReqLen, executionLen, snapshotLen func() int) {
+func RegisterMatchingEngineChannelLenGauges(orderLen, cancelLen, executionLen, snapshotLen func() int) {
 	gauges := []struct {
 		channel string
 		lenFn   func() int
 	}{
 		{"order", orderLen},
 		{"cancel", cancelLen},
-		{"snapshot_request", snapshotReqLen},
 		{"execution", executionLen},
 		{"snapshot", snapshotLen},
 	}

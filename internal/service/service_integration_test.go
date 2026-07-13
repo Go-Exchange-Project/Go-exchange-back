@@ -290,7 +290,12 @@ func TestIntegrationBootstrapOpenOrdersRestoresOrderBook(t *testing.T) {
 	result, err := bootstrapService.BootstrapOpenOrders(context.Background())
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, result.Submitted, 2)
-	requireCoinSnapshots(t, snapshots, coinSymbol, 2)
+	// Stop이 투입된 두 주문을 모두 처리한 뒤 마지막 스냅샷을 flush하고 종료하므로,
+	// 이후 오더북은 불변이고 엔진 goroutine과의 레이스가 없다. 스냅샷은 코얼레싱으로
+	// 심볼당 1개 이상(주문 2개가 한 스냅샷으로 합쳐질 수 있음)만 확인한다.
+	me.Stop()
+	<-me.Done()
+	requireCoinSnapshots(t, snapshots, coinSymbol, 1)
 
 	book := me.GetOrderBook(coinSymbol)
 	buyLevel, ok := book.BuyOrders.Max()

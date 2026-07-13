@@ -12,7 +12,7 @@ import (
 )
 
 func TestMatchingEngineReportsMatchLatencyAfterProcessingOrder(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	var mu sync.Mutex
 	var observed time.Duration
@@ -49,7 +49,7 @@ func TestMatchingEngineReportsMatchLatencyAfterProcessingOrder(t *testing.T) {
 }
 
 func TestMatchingEngineSkipsObserverWhenEnqueuedAtIsZero(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	called := make(chan struct{}, 1)
 	me.MatchLatencyObserver = func(time.Duration) {

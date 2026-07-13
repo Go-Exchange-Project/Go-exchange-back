@@ -25,7 +25,6 @@ type MatchingEngine struct {
 	OrderBooks  map[string]*OrderBook
 	OrderCh     chan *Order
 	CancelCh    chan CancelOrderCommand
-	SnapshotReq chan OrderBookSnapshotRequest
 	TradeCh     chan *model.Trade
 	ExecutionCh chan ExecutionEvent
 	SnapshotCh  chan OrderBookSnapshot
@@ -34,12 +33,22 @@ type MatchingEngine struct {
 
 	MatchLatencyObserver func(time.Duration)
 
+	// snapshotCache는 심볼별 최신 스냅샷(*OrderBookSnapshot)을 담는다. 엔진 goroutine이
+	// 코얼레싱 티커에서 Store하고, REST 핸들러가 락 없이 Load한다.
+	snapshotCache    sync.Map
+	dirtySymbols     map[string]bool // 엔진 goroutine 로컬 — 락 불필요
+	snapshotInterval time.Duration
+
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 	stopOnce sync.Once
 }
 
 const DefaultSnapshotDepth = 30
+
+// defaultSnapshotInterval은 스냅샷 코얼레싱 주기입니다. 이 주기 동안 한 심볼에
+// 주문이 아무리 많이 와도 스냅샷은 1회만 생성·브로드캐스트됩니다.
+const defaultSnapshotInterval = 100 * time.Millisecond
 
 var engineInstanceCounter uint64
 
@@ -54,17 +63,6 @@ type CancelOrderCommand struct {
 type CancelOrderResult struct {
 	Removed bool
 	Err     error
-}
-
-type OrderBookSnapshotRequest struct {
-	CoinSymbol string
-	Depth      int
-	ResponseCh chan OrderBookSnapshotResult
-}
-
-type OrderBookSnapshotResult struct {
-	Snapshot OrderBookSnapshot
-	Err      error
 }
 
 type ExecutionEvent struct {
@@ -96,41 +94,42 @@ type PriceLevelData struct {
 func NewMatchingEngine() *MatchingEngine {
 	defaultBook := NewOrderBook()
 	return &MatchingEngine{
-		OrderBook:   defaultBook,
-		OrderBooks:  make(map[string]*OrderBook),
-		OrderCh:     make(chan *Order, 1024),
-		CancelCh:    make(chan CancelOrderCommand, 1024),
-		SnapshotReq: make(chan OrderBookSnapshotRequest, 1024),
-		TradeCh:     make(chan *model.Trade, 1024),
-		ExecutionCh: make(chan ExecutionEvent, 1024),
-		SnapshotCh:  make(chan OrderBookSnapshot, 256),
-		engineID:    newEngineID(),
-		stopCh:      make(chan struct{}),
-		doneCh:      make(chan struct{}),
+		OrderBook:        defaultBook,
+		OrderBooks:       make(map[string]*OrderBook),
+		OrderCh:          make(chan *Order, 1024),
+		CancelCh:         make(chan CancelOrderCommand, 1024),
+		TradeCh:          make(chan *model.Trade, 1024),
+		ExecutionCh:      make(chan ExecutionEvent, 1024),
+		SnapshotCh:       make(chan OrderBookSnapshot, 256),
+		engineID:         newEngineID(),
+		dirtySymbols:     make(map[string]bool),
+		snapshotInterval: defaultSnapshotInterval,
+		stopCh:           make(chan struct{}),
+		doneCh:           make(chan struct{}),
 	}
 }
 
 func (me *MatchingEngine) Start() {
 	go func() {
 		defer close(me.doneCh)
+		ticker := time.NewTicker(me.interval())
+		defer ticker.Stop()
 		for {
 			select {
 			case order := <-me.OrderCh:
 				me.processOrder(order)
 			case cmd := <-me.CancelCh:
 				me.processCancel(cmd)
-			case req := <-me.SnapshotReq:
-				if req.ResponseCh != nil {
-					req.ResponseCh <- OrderBookSnapshotResult{
-						Snapshot: me.GetOrderBookSnapshotWithDepth(req.CoinSymbol, req.Depth),
-					}
-				}
+			case <-ticker.C:
+				// 코얼레싱: dirty 심볼의 스냅샷만 생성해 캐시 저장 + 논블로킹 브로드캐스트.
+				me.flushSnapshots()
 			case <-me.stopCh:
-				// graceful shutdown: 이미 접수된 주문/취소를 모두 처리한 뒤 종료한다.
-				// 이 루프가 ExecutionCh와 SnapshotCh의 유일한 writer이므로, 드레인
-				// 완료 후의 close가 downstream(outbox writer, 스냅샷 소비자) 종료를
-				// 도미노로 전파한다.
+				// graceful shutdown: 이미 접수된 주문/취소를 모두 처리한 뒤 마지막
+				// 스냅샷을 flush하고 종료한다. 이 루프가 ExecutionCh와 SnapshotCh의
+				// 유일한 writer이므로, 드레인 완료 후의 close가 downstream(outbox
+				// writer, 스냅샷 소비자) 종료를 도미노로 전파한다.
 				me.drainPendingWork()
+				me.flushSnapshots()
 				if me.ExecutionCh != nil {
 					close(me.ExecutionCh)
 				}
@@ -141,6 +140,8 @@ func (me *MatchingEngine) Start() {
 	}()
 }
 
+// processOrder는 매칭 후 심볼을 dirty로 표시만 한다. 스냅샷 생성·브로드캐스트는
+// 코얼레싱 티커가 담당하므로, 매칭 루프가 스냅샷 비용이나 소비자 속도에 결박되지 않는다.
 func (me *MatchingEngine) processOrder(order *Order) {
 	if order == nil {
 		return
@@ -149,7 +150,7 @@ func (me *MatchingEngine) processOrder(order *Order) {
 	if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
 		me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
 	}
-	me.SnapshotCh <- me.GetOrderBookSnapshot(order.CoinSymbol)
+	me.markDirty(order.CoinSymbol)
 }
 
 func (me *MatchingEngine) processCancel(cmd CancelOrderCommand) {
@@ -158,8 +159,44 @@ func (me *MatchingEngine) processCancel(cmd CancelOrderCommand) {
 		cmd.ResponseCh <- result
 	}
 	if result.Removed {
-		me.SnapshotCh <- me.GetOrderBookSnapshot(cmd.CoinSymbol)
+		me.markDirty(cmd.CoinSymbol)
 	}
+}
+
+// markDirty는 다음 티커에 스냅샷을 다시 만들어야 할 심볼을 기록한다.
+// 엔진 goroutine에서만 호출되므로 락이 필요 없다.
+func (me *MatchingEngine) markDirty(coinSymbol string) {
+	if me.dirtySymbols == nil {
+		me.dirtySymbols = make(map[string]bool)
+	}
+	me.dirtySymbols[coinSymbol] = true
+}
+
+// flushSnapshots는 dirty 심볼의 최신 스냅샷을 생성해 캐시에 저장하고, 소비자에게
+// 논블로킹으로 전송한다. SnapshotCh가 가득 차면 건너뛴다 — 어차피 다음 티커에
+// 더 최신 스냅샷을 다시 보내므로 오래된 스냅샷을 기다릴 이유가 없다.
+func (me *MatchingEngine) flushSnapshots() {
+	for coinSymbol := range me.dirtySymbols {
+		snapshot := me.GetOrderBookSnapshot(coinSymbol)
+		me.storeSnapshot(coinSymbol, snapshot)
+		select {
+		case me.SnapshotCh <- snapshot:
+		default:
+		}
+		delete(me.dirtySymbols, coinSymbol)
+	}
+}
+
+func (me *MatchingEngine) storeSnapshot(coinSymbol string, snapshot OrderBookSnapshot) {
+	cached := snapshot
+	me.snapshotCache.Store(coinSymbol, &cached)
+}
+
+func (me *MatchingEngine) interval() time.Duration {
+	if me.snapshotInterval > 0 {
+		return me.snapshotInterval
+	}
+	return defaultSnapshotInterval
 }
 
 func (me *MatchingEngine) drainPendingWork() {
@@ -191,29 +228,45 @@ func (me *MatchingEngine) Done() <-chan struct{} {
 	return me.doneCh
 }
 
+// RequestOrderBookSnapshot은 캐시에서 최신 스냅샷을 락 없이 읽어 반환합니다.
+// 엔진 루프에 요청을 보내지 않으므로 조회가 매칭과 경쟁하지 않습니다. 캐시는
+// DefaultSnapshotDepth로 생성되므로 요청 depth는 그 값으로 상한 클램프한 뒤
+// 캐시본을 잘라 반환합니다. 아직 스냅샷이 없는 심볼은 빈 오더북을 반환합니다
+// (신규 심볼은 실제로 비어 있고, 첫 티커 후 채워집니다).
 func (me *MatchingEngine) RequestOrderBookSnapshot(coinSymbol string, depth int) (OrderBookSnapshot, error) {
-	if me == nil || me.SnapshotReq == nil {
+	if me == nil {
 		return OrderBookSnapshot{}, ErrSnapshotEngineUnavailable
 	}
-
-	req := OrderBookSnapshotRequest{
-		CoinSymbol: coinSymbol,
-		Depth:      depth,
-		ResponseCh: make(chan OrderBookSnapshotResult, 1),
+	depth = normalizeSnapshotDepth(depth)
+	if depth > DefaultSnapshotDepth {
+		depth = DefaultSnapshotDepth
 	}
+	cached := me.loadSnapshot(coinSymbol)
+	return truncateSnapshot(cached, depth), nil
+}
 
-	select {
-	case me.SnapshotReq <- req:
-	case <-time.After(time.Second):
-		return OrderBookSnapshot{}, ErrSnapshotTimedOut
+func (me *MatchingEngine) loadSnapshot(coinSymbol string) OrderBookSnapshot {
+	if value, ok := me.snapshotCache.Load(coinSymbol); ok {
+		if snapshot, ok := value.(*OrderBookSnapshot); ok && snapshot != nil {
+			return *snapshot
+		}
 	}
+	return OrderBookSnapshot{CoinSymbol: coinSymbol}
+}
 
-	select {
-	case result := <-req.ResponseCh:
-		return result.Snapshot, result.Err
-	case <-time.After(time.Second):
-		return OrderBookSnapshot{}, ErrSnapshotTimedOut
+// truncateSnapshot은 스냅샷을 요청 depth로 자릅니다. 캐시본을 변형하지 않도록
+// 슬라이스를 복사합니다(캐시된 스냅샷은 여러 조회가 공유하는 불변 데이터).
+func truncateSnapshot(snapshot OrderBookSnapshot, depth int) OrderBookSnapshot {
+	result := OrderBookSnapshot{CoinSymbol: snapshot.CoinSymbol}
+	if len(snapshot.Asks) > 0 {
+		n := min(depth, len(snapshot.Asks))
+		result.Asks = append([]PriceLevelData(nil), snapshot.Asks[:n]...)
 	}
+	if len(snapshot.Bids) > 0 {
+		n := min(depth, len(snapshot.Bids))
+		result.Bids = append([]PriceLevelData(nil), snapshot.Bids[:n]...)
+	}
+	return result
 }
 
 func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {

@@ -21,7 +21,7 @@ func drainEngineEvents(me *MatchingEngine, done <-chan struct{}) {
 }
 
 func BenchmarkMatch_ImmediateCross(b *testing.B) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Match(testOrder(1, "BTC", model.OrderSideSell, 50000, int64(b.N)+1))
 
 	done := make(chan struct{})
@@ -47,7 +47,7 @@ func BenchmarkOrderBookDepth(b *testing.B) {
 	depths := []int{100, 1000, 10000}
 	for _, depth := range depths {
 		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
-			me := NewMatchingEngine()
+			me := newTestEngine()
 			buildSellWall(me, depth)
 
 			done := make(chan struct{})
@@ -78,7 +78,7 @@ func BenchmarkBulkFill(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		me := NewMatchingEngine()
+		me := newTestEngine()
 		buildSellWall(me, wallDepth)
 
 		localDone := make(chan struct{})
@@ -103,7 +103,7 @@ func reportTPS(b *testing.B) {
 }
 
 func BenchmarkTPS_LimitOrder(b *testing.B) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Match(testOrder(1, "BTC", model.OrderSideSell, 50000, int64(b.N)+1))
 
 	done := make(chan struct{})
@@ -120,7 +120,7 @@ func BenchmarkTPS_LimitOrder(b *testing.B) {
 }
 
 func BenchmarkTPS_MarketOrder(b *testing.B) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	done := make(chan struct{})
 	go drainEngineEvents(me, done)
@@ -145,7 +145,7 @@ func BenchmarkTPS_MarketOrder(b *testing.B) {
 }
 
 func BenchmarkTPS_MixedOrder(b *testing.B) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	done := make(chan struct{})
 	go drainEngineEvents(me, done)

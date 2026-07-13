@@ -11,6 +11,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newTestEngine은 코얼레싱 티커를 짧게 설정한 엔진을 만든다. 프로덕션 기본값
+// (100ms)은 순차 테스트를 느리게 하므로, 테스트에서는 스냅샷이 빠르게 방출되도록
+// 짧은 주기를 쓴다. 순차 테스트는 주문 사이에 다른 주문이 없어 dirty 심볼이
+// 티커마다 1개씩이므로 submitAndWaitSnapshot의 1:1 대기가 그대로 성립한다.
+func newTestEngine() *MatchingEngine {
+	engine := NewMatchingEngine()
+	engine.snapshotInterval = 2 * time.Millisecond
+	return engine
+}
+
 func testOrder(id uint, symbol string, side model.OrderSide, price int64, amount int64) *Order {
 	return &Order{
 		ID:         id,
@@ -88,7 +98,7 @@ func requireCancelSnapshot(t *testing.T, me *MatchingEngine) OrderBookSnapshot {
 }
 
 func TestMatch_BuyPriceCrossesAsk(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 50000, 1))
@@ -104,7 +114,7 @@ func TestMatch_BuyPriceCrossesAsk(t *testing.T) {
 }
 
 func TestMatch_BuyPriceBelowAskDoesNotCross(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 55000, 1))
@@ -114,7 +124,7 @@ func TestMatch_BuyPriceBelowAskDoesNotCross(t *testing.T) {
 }
 
 func TestMatch_EmptyOppositeBookDoesNotCross(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(2, "BTC", model.OrderSideBuy, 55000, 10))
@@ -123,7 +133,7 @@ func TestMatch_EmptyOppositeBookDoesNotCross(t *testing.T) {
 }
 
 func TestMatch_DifferentSymbolsDoNotCross(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 50000, 1))
@@ -135,7 +145,7 @@ func TestMatch_DifferentSymbolsDoNotCross(t *testing.T) {
 }
 
 func TestMatch_BuyPriorityUsesHighestPrice(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideBuy, 40000, 1))
@@ -150,7 +160,7 @@ func TestMatch_BuyPriorityUsesHighestPrice(t *testing.T) {
 }
 
 func TestMatch_SellPriorityUsesLowestPrice(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 60000, 1))
@@ -165,7 +175,7 @@ func TestMatch_SellPriorityUsesLowestPrice(t *testing.T) {
 }
 
 func TestMatch_FIFOWithinSamePriceLevel(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideBuy, 50000, 1))
@@ -181,7 +191,7 @@ func TestMatch_FIFOWithinSamePriceLevel(t *testing.T) {
 }
 
 func TestMatch_BuySkipsOwnSellOrderAndMatchesOtherUser(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	ownSell := testUserOrder(1, 10, "BTC", model.OrderSideSell, 50000, 1)
@@ -203,7 +213,7 @@ func TestMatch_BuySkipsOwnSellOrderAndMatchesOtherUser(t *testing.T) {
 }
 
 func TestMatch_SellSkipsOwnBuyOrderAndMatchesOtherUser(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	ownBuy := testUserOrder(1, 10, "BTC", model.OrderSideBuy, 50000, 1)
@@ -225,7 +235,7 @@ func TestMatch_SellSkipsOwnBuyOrderAndMatchesOtherUser(t *testing.T) {
 }
 
 func TestMatch_SelfTradeOnlyDoesNotEmitTrade(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testUserOrder(1, 10, "BTC", model.OrderSideSell, 50000, 1))
@@ -237,7 +247,7 @@ func TestMatch_SelfTradeOnlyDoesNotEmitTrade(t *testing.T) {
 }
 
 func TestMatch_LargeBuyMatchesMultipleSellOrders(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 50000, 2))
@@ -260,7 +270,7 @@ func TestMatch_LargeBuyMatchesMultipleSellOrders(t *testing.T) {
 }
 
 func TestMatch_LargeSellMatchesMultipleBuyOrders(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideBuy, 60000, 2))
@@ -283,7 +293,7 @@ func TestMatch_LargeSellMatchesMultipleBuyOrders(t *testing.T) {
 }
 
 func TestMatch_PartialFillLeavesRemainingQuantityOnBook(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	buyOrder := testOrder(2, "BTC", model.OrderSideBuy, 55000, 10)
@@ -300,7 +310,7 @@ func TestMatch_PartialFillLeavesRemainingQuantityOnBook(t *testing.T) {
 }
 
 func TestMatch_FilledOrdersAndEmptyPriceLevelsAreRemoved(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 50000, 1))
@@ -314,7 +324,7 @@ func TestMatch_FilledOrdersAndEmptyPriceLevelsAreRemoved(t *testing.T) {
 }
 
 func TestMarketBuyConsumesAsksByQuoteBudgetAndDoesNotRest(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	me.Match(testUserOrder(1, 20, "BTC", model.OrderSideSell, 5000, 1))
 	me.Match(testUserOrder(2, 30, "BTC", model.OrderSideSell, 7000, 2))
@@ -350,7 +360,7 @@ func TestMarketBuyConsumesAsksByQuoteBudgetAndDoesNotRest(t *testing.T) {
 }
 
 func TestMarketBuyWithNoLiquidityDoesNotRest(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	me.Match(&Order{
 		ID:          3,
@@ -369,7 +379,7 @@ func TestMarketBuyWithNoLiquidityDoesNotRest(t *testing.T) {
 }
 
 func TestMarketBuySkipsOwnAskOnlyAndDoesNotRest(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	me.Match(testUserOrder(1, 10, "BTC", model.OrderSideSell, 5000, 1))
 	me.Match(&Order{
@@ -394,7 +404,7 @@ func TestMarketBuySkipsOwnAskOnlyAndDoesNotRest(t *testing.T) {
 }
 
 func TestMarketSellConsumesHighestBidsAndDoesNotRest(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	me.Match(testUserOrder(1, 20, "BTC", model.OrderSideBuy, 7000, 1))
 	me.Match(testUserOrder(2, 30, "BTC", model.OrderSideBuy, 5000, 2))
@@ -428,7 +438,7 @@ func TestMarketSellConsumesHighestBidsAndDoesNotRest(t *testing.T) {
 }
 
 func TestMarketSellSkipsOwnBidOnlyAndDoesNotRest(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	me.Match(testUserOrder(1, 10, "BTC", model.OrderSideBuy, 5000, 1))
 	me.Match(&Order{
@@ -453,7 +463,7 @@ func TestMarketSellSkipsOwnBidOnlyAndDoesNotRest(t *testing.T) {
 }
 
 func TestGetOrderBookSnapshot_AsksAscendingBidsDescending(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "BTC", model.OrderSideSell, 70000, 1))
@@ -472,7 +482,7 @@ func TestGetOrderBookSnapshot_AsksAscendingBidsDescending(t *testing.T) {
 }
 
 func TestRequestOrderBookSnapshot_ReturnsCurrentSymbolBook(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	submitAndWaitSnapshot(t, me, testOrder(1, "AVAX", model.OrderSideSell, 10300, 1))
@@ -489,7 +499,7 @@ func TestRequestOrderBookSnapshot_ReturnsCurrentSymbolBook(t *testing.T) {
 }
 
 func TestGetOrderBookSnapshot_LimitsDepth(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	for i := int64(0); i < int64(DefaultSnapshotDepth+5); i++ {
 		me.Match(testOrder(uint(i+1), "BTC", model.OrderSideSell, 1000+i, 1))
@@ -507,7 +517,7 @@ func TestGetOrderBookSnapshot_LimitsDepth(t *testing.T) {
 }
 
 func TestGetOrderBookSnapshotWithDepth_UsesCustomDepth(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 
 	for i := int64(0); i < 5; i++ {
 		me.Match(testOrder(uint(i+1), "BTC", model.OrderSideSell, 1000+i, 1))
@@ -525,7 +535,7 @@ func TestGetOrderBookSnapshotWithDepth_UsesCustomDepth(t *testing.T) {
 }
 
 func TestCancelOrder_RemovesOrderFromOrderBook(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	order := testOrder(10, "BTC", model.OrderSideBuy, 50000, 2)
@@ -545,7 +555,7 @@ func TestCancelOrder_RemovesOrderFromOrderBook(t *testing.T) {
 }
 
 func TestCancelOrder_PublishesUpdatedSnapshot(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	first := testOrder(11, "BTC", model.OrderSideBuy, 50000, 2)
@@ -568,7 +578,7 @@ func TestCancelOrder_PublishesUpdatedSnapshot(t *testing.T) {
 }
 
 func TestCancelOrder_ReturnsNotFoundForMissingOrder(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	result := me.CancelOrder(CancelOrderCommand{
@@ -584,7 +594,7 @@ func TestCancelOrder_ReturnsNotFoundForMissingOrder(t *testing.T) {
 }
 
 func TestCancelOrder_DoesNotRemoveDifferentSymbolOrder(t *testing.T) {
-	me := NewMatchingEngine()
+	me := newTestEngine()
 	me.Start()
 
 	order := testOrder(13, "BTC", model.OrderSideSell, 50000, 2)
