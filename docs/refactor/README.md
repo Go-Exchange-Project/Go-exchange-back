@@ -20,7 +20,7 @@
 | 1 | **A-1/A-2** | 정산 정합성 버그 2건: 시장가 완료(MarketOrderDone) 레이스, 지갑 락 데드락 | ✅ 완료 | [1_A-1_A-2_정산_정합성_버그_수정_완료.md](1_A-1_A-2_정산_정합성_버그_수정_완료.md) |
 | 2 | **A-6** | 리컨실리에이션 잡: 원장-지갑 일치, 자산 총량 보존, 오래된 시장가 탐지 | ✅ 완료 | [2_A-6_리컨실리에이션_잡_완료.md](2_A-6_리컨실리에이션_잡_완료.md) |
 | 3 | **C-2 (+C-1)** | DB 백업: 일일 디스크 스냅샷(Terraform) + 복원 리허설 실측. C-1(DB 외부 IP 제거, Cloud NAT/IAP SSH 대체) 포함 | ✅ 완료 | [3_C-2_C-1_DB_백업과_네트워크_격리_완료.md](3_C-2_C-1_DB_백업과_네트워크_격리_완료.md) |
-| 4 | **A-3** | trade outbox(write-ahead) + 부팅 리플레이 + 시장가 파이널라이저 + graceful shutdown. 크래시/배포 시 체결 유실 창 제거, 엔진-정산 속도 분리(B-2 해소 겸함) | ✅ 완료 (k6 재측정만 잔여) | [4_A-3_trade_outbox와_graceful_shutdown_완료.md](4_A-3_trade_outbox와_graceful_shutdown_완료.md) |
+| 4 | **A-3** | trade outbox(write-ahead) + 부팅 리플레이 + 시장가 파이널라이저 + graceful shutdown. 크래시/배포 시 체결 유실 창 제거, 엔진-정산 속도 분리(B-2 해소 겸함) | ✅ 완료 (k6 A/B 측정 포함, 처리량 −17% 트레이드오프 확인) | [4_A-3_trade_outbox와_graceful_shutdown_완료.md](4_A-3_trade_outbox와_graceful_shutdown_완료.md) |
 | 5 | **B-1** | 스냅샷 코얼레싱(심볼별 ~100ms) + atomic.Value 스냅샷 캐시 + WS 심볼 구독 모델. 급등락 시 엔진이 브로드캐스트에 결박되는 문제 해소 | 🔲 예정 | — |
 | 6 | **B-4** | 정산 그룹커밋(여러 체결을 한 트랜잭션으로). 심볼 파티셔닝(A-1)이 전제 | 🔲 예정 | — |
 | 7 | **B-3** | 매칭 엔진 심볼 샤딩(심볼 해시 → N개 엔진 goroutine). B-4 이후에 해야 효과 측정 가능 | 🔲 예정 | — |
@@ -35,6 +35,7 @@
 | ~~C-1~~ | ~~DB VM 외부 IP 제거(Terraform)~~ | C-2에 합류해 진행 중 |
 | HTTP 서버 정비 | `gin.New()` 전환(요청 로깅 제거) + `http.Server` 읽기/쓰기 타임아웃 (`http.Server` 전환 자체는 A-3에서 완료) | B-1 성능 작업과 같이 |
 | outbox 보존 정리 | PROCESSED 행 아카이빙/삭제 정책 | outbox 테이블이 관측상 커지면 |
+| MarkProcessed 흡수 | outbox PROCESSED 마킹을 정산 트랜잭션에 합쳐 trade당 DB 왕복 2회→1회 (17번 벤치마크가 A-3 처리량 −17%의 주범으로 지목) | B-4(정산 그룹커밋)와 함께 |
 | k6 재측정 | A-1~A-6 반영 후 전후 비교 + `http_req_failed 0.64%` 원인 조사 | 큰 변경 하나 끝날 때마다 |
 
 ## 리뷰에서 나왔지만 채택하지 않은 것

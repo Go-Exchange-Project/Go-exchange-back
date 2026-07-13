@@ -46,8 +46,23 @@
 - 부수 효과: 엔진이 정산 속도에 결박되던 문제(B-2)가 outbox 경유로 분리됐고,
   group commit 인프라가 B-4의 토대가 된다.
 
+## k6 전후 비교 결과 (2026-07-13 실측)
+
+[docs/benchmarks/17-2026-07-13-trade-outbox-throughput-impact.md](../benchmarks/17-2026-07-13-trade-outbox-throughput-impact.md)
+— 같은 VM 연속 A/B(before=`f2ec22a`, after=`37a3e49`), 램프업·hold 두 프로파일:
+
+| 프로파일 | 처리량 변화 | p95 변화 | 실패율 |
+|---|---|---|---|
+| 램프업(VU 50→3000) | 154.8→128.9 iter/s (**−16.7%**) | 14.88→18.66s | 0% |
+| hold(VU 3000 8분) | 162.7→133.8 iter/s (**−17.8%**) | 16.7→21.07s | 0% |
+
+두 프로파일 일관 ~17% 감소 = 노이즈 아닌 실제 비용. **원인은 outbox INSERT가
+아니라 MarkProcessed UPDATE**: INSERT는 991배치로 뭉쳐(44.7건/배치) 왕복이 적은
+반면, MarkProcessed는 trade당 개별 UPDATE 44,300회. 정합성(유실 0)의 대가지만
+대부분 회수 가능한 종류다.
+
 ## 남은 것
 
-- k6 전후 비교(outbox 쓰기의 정산 처리량/레이턴시 영향) — GCP 배포 후 측정,
-  `docs/benchmarks/` 컨벤션.
+- **MarkProcessed를 정산 트랜잭션에 흡수**(왕복 2회→1회) — 위 벤치마크가 지목한
+  최적화. B-4(정산 그룹커밋)와 함께 다루면 자연스럽다. 백로그 등록됨.
 - PROCESSED 행 보존 정리(아카이빙) — 백로그.
