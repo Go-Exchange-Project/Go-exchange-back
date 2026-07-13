@@ -35,7 +35,7 @@
 | ~~C-1~~ | ~~DB VM 외부 IP 제거(Terraform)~~ | C-2에 합류해 진행 중 |
 | HTTP 서버 정비 | `gin.New()` 전환(요청 로깅 제거) + `http.Server` 읽기/쓰기 타임아웃 (`http.Server` 전환 자체는 A-3에서 완료) | B-1 성능 작업과 같이 |
 | outbox 보존 정리 | PROCESSED 행 아카이빙/삭제 정책 | outbox 테이블이 관측상 커지면 |
-| MarkProcessed 흡수 | outbox PROCESSED 마킹을 정산 트랜잭션에 합쳐 trade당 DB 왕복 2회→1회 (17번 벤치마크가 A-3 처리량 −17%의 주범으로 지목) | B-4(정산 그룹커밋)와 함께 |
+| ~~MarkProcessed 흡수~~ | ~~outbox PROCESSED 마킹을 정산 트랜잭션에 합쳐 trade당 DB 왕복 2회→1회~~ ✅ 완료 (`bc8c00f`): [18번 벤치마크](../benchmarks/18-2026-07-13-outbox-markprocessed-absorption.md) 같은 세션 A/B로 처리량 +20.6%, A-3 손실을 pre-A-3 수준으로 회복 | — |
 | k6 재측정 | A-1~A-6 반영 후 전후 비교 + `http_req_failed 0.64%` 원인 조사 | 큰 변경 하나 끝날 때마다 |
 
 ## 리뷰에서 나왔지만 채택하지 않은 것

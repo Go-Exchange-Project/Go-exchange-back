@@ -61,8 +61,14 @@
 반면, MarkProcessed는 trade당 개별 UPDATE 44,300회. 정합성(유실 0)의 대가지만
 대부분 회수 가능한 종류다.
 
+## 후속 최적화 (완료)
+
+- **MarkProcessed를 정산 트랜잭션에 흡수**(왕복 2회→1회) — ✅ 완료 (`bc8c00f`).
+  [18번 벤치마크](../benchmarks/18-2026-07-13-outbox-markprocessed-absorption.md)
+  같은 세션 A/B로 처리량 +20.6%, p95 −17% — **A-3의 처리량 손실을 완전히 회복해
+  pre-A-3 수준으로 되돌렸다.** 정합성(크래시 유실 0)은 그대로 유지. 설계:
+  [docs/superpowers/specs/2026-07-13-outbox-markprocessed-absorption-design.md](../superpowers/specs/2026-07-13-outbox-markprocessed-absorption-design.md).
+
 ## 남은 것
 
-- **MarkProcessed를 정산 트랜잭션에 흡수**(왕복 2회→1회) — 위 벤치마크가 지목한
-  최적화. B-4(정산 그룹커밋)와 함께 다루면 자연스럽다. 백로그 등록됨.
 - PROCESSED 행 보존 정리(아카이빙) — 백로그.
