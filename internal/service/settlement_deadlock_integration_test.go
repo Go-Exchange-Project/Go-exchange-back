@@ -37,12 +37,12 @@ func TestIntegrationConcurrentReversedSettlementsDoNotDeadlock(t *testing.T) {
 		wg.Add(2)
 		go func(round int) {
 			defer wg.Done()
-			_, err := settlementService.SettleTrade(deadlockTestTrade(buyAB.ID, sellAB.ID, testRunID, round, "ab"))
+			_, err := settlementService.SettleTrade(deadlockTestTrade(buyAB.ID, sellAB.ID, testRunID, round, "ab"), 0)
 			errs <- err
 		}(round)
 		go func(round int) {
 			defer wg.Done()
-			_, err := settlementService.SettleTrade(deadlockTestTrade(buyBA.ID, sellBA.ID, testRunID, round, "ba"))
+			_, err := settlementService.SettleTrade(deadlockTestTrade(buyBA.ID, sellBA.ID, testRunID, round, "ba"), 0)
 			errs <- err
 		}(round)
 		wg.Wait()

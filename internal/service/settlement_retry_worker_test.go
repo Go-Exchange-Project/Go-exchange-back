@@ -18,14 +18,16 @@ func discardServiceLogger() *log.Logger {
 }
 
 type fakeRetrySettler struct {
-	err    error
-	calls  int
-	trades []*model.Trade
+	err               error
+	calls             int
+	trades            []*model.Trade
+	lastOutboxEventID uint64
 }
 
-func (f *fakeRetrySettler) SettleTrade(trade *model.Trade) (SettlementResult, error) {
+func (f *fakeRetrySettler) SettleTrade(trade *model.Trade, outboxEventID uint64) (SettlementResult, error) {
 	f.calls++
 	f.trades = append(f.trades, trade)
+	f.lastOutboxEventID = outboxEventID
 	if f.err != nil {
 		return SettlementResult{}, f.err
 	}

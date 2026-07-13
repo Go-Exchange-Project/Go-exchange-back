@@ -16,7 +16,7 @@ const (
 )
 
 type retryTradeSettler interface {
-	SettleTrade(trade *model.Trade) (SettlementResult, error)
+	SettleTrade(trade *model.Trade, outboxEventID uint64) (SettlementResult, error)
 }
 
 type retryMarketOrderCompleter interface {
@@ -92,7 +92,8 @@ func (w *SettlementRetryWorker) retryFailedSettlements() {
 		}
 
 		trade := tradeFromFailedSettlement(failure)
-		if _, err := w.Settler.SettleTrade(trade); err != nil {
+		// outboxEventID=0: 재시도는 failed_settlements 기반이라 outbox와 무관하다.
+		if _, err := w.Settler.SettleTrade(trade, 0); err != nil {
 			if _, recordErr := w.FailedSettlements.RecordFailure(trade, err); recordErr != nil {
 				w.logf("retry worker: record failed settlement failed: %v", recordErr)
 			}

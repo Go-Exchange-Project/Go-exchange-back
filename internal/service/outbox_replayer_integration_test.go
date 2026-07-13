@@ -47,7 +47,7 @@ func TestIntegrationOutboxReplaySettlesPendingTradeExactlyOnce(t *testing.T) {
 	replayer := &OutboxReplayer{
 		Repo: outboxRepo,
 		Process: func(event matching.ExecutionEvent) bool {
-			_, err := settlementService.SettleTrade(event.Trade)
+			_, err := settlementService.SettleTrade(event.Trade, 0)
 			return err == nil
 		},
 		Logger: discardServiceLogger(),

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
@@ -42,7 +43,11 @@ func NewSettlementService(db *gorm.DB, orderRepo *repository.OrderRepository, wa
 	}
 }
 
-func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, error) {
+// SettleTrade는 체결을 정산합니다. outboxEventID > 0이면 정산과 같은 트랜잭션에서
+// 해당 outbox 행을 PROCESSED로 마킹합니다(A-3 라이브 경로의 왕복 2회 → 1회).
+// 정산 실패로 트랜잭션이 롤백되면 마킹도 롤백되므로, 흡수는 성공/중복 경로에서만
+// 일어납니다. 리플레이·재시도 워커는 outboxEventID=0으로 호출해 마킹을 위임합니다.
+func (s *SettlementService) SettleTrade(trade *model.Trade, outboxEventID uint64) (SettlementResult, error) {
 	if trade == nil {
 		return SettlementResult{}, fmt.Errorf("trade is required")
 	}
@@ -61,7 +66,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 				return err
 			}
 			result = duplicateSettlementResult(existingTrade)
-			return nil
+			return markSettledOutbox(tx, outboxEventID)
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -83,7 +88,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 				return err
 			}
 			result = duplicateSettlementResult(existingTrade)
-			return nil
+			return markSettledOutbox(tx, outboxEventID)
 		}
 
 		orderRepo := s.OrderRepository.WithTx(tx)
@@ -188,9 +193,24 @@ func (s *SettlementService) SettleTrade(trade *model.Trade) (SettlementResult, e
 		}
 
 		result = SettlementResult{Applied: true, TradeID: trade.ID}
-		return nil
+		return markSettledOutbox(tx, outboxEventID)
 	})
 	return result, err
+}
+
+// markSettledOutbox는 정산과 같은 트랜잭션에서 outbox 행을 PROCESSED로 마킹합니다.
+// outboxEventID==0(리플레이·재시도 경로)이면 아무것도 하지 않습니다. 라이브 경로의
+// ID는 OutboxWriter가 방금 커밋한 행이라 항상 존재하므로 RowsAffected 검사는 생략합니다.
+func markSettledOutbox(tx *gorm.DB, outboxEventID uint64) error {
+	if outboxEventID == 0 {
+		return nil
+	}
+	return tx.Model(&model.TradeOutboxEvent{}).
+		Where("id = ?", outboxEventID).
+		Updates(map[string]interface{}{
+			"status":       model.TradeOutboxStatusProcessed,
+			"processed_at": time.Now().UTC(),
+		}).Error
 }
 
 type settlementWallets struct {

@@ -328,7 +328,7 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 		SellOrderID:    sellOrder.ID,
 	}
 
-	result, err := settlementService.SettleTrade(trade)
+	result, err := settlementService.SettleTrade(trade, 0)
 	require.NoError(t, err)
 	assert.True(t, result.Applied)
 	assert.False(t, result.Duplicate)
@@ -432,7 +432,7 @@ func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
 		TradedAt:    time.Now(),
 		BuyOrderID:  buyOrder.ID,
 		SellOrderID: sellOrder.ID,
-	})
+	}, 0)
 
 	require.NoError(t, err)
 
@@ -468,7 +468,7 @@ func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
 		SellOrderID:    sellOrder.ID,
 	}
 
-	_, err := settlementService.SettleTrade(trade)
+	_, err := settlementService.SettleTrade(trade, 0)
 	require.Error(t, err)
 
 	var tradeCount int64
@@ -515,7 +515,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 		SellOrderID:    sellOrder.ID,
 	}
 
-	firstResult, err := settlementService.SettleTrade(trade)
+	firstResult, err := settlementService.SettleTrade(trade, 0)
 	require.NoError(t, err)
 	assert.True(t, firstResult.Applied)
 	assert.False(t, firstResult.Duplicate)
@@ -527,7 +527,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	duplicate.IdempotencyKey = ""
 	duplicate.TradedAt = trade.TradedAt.Add(time.Second)
 
-	secondResult, err := settlementService.SettleTrade(&duplicate)
+	secondResult, err := settlementService.SettleTrade(&duplicate, 0)
 	require.NoError(t, err)
 	assert.False(t, secondResult.Applied)
 	assert.True(t, secondResult.Duplicate)
@@ -585,7 +585,7 @@ func TestIntegrationSettleTradeSameIdempotencyKeyDifferentPayloadReturnsConflict
 		SellOrderID:    sellOrder.ID,
 	}
 
-	firstResult, err := settlementService.SettleTrade(trade)
+	firstResult, err := settlementService.SettleTrade(trade, 0)
 	require.NoError(t, err)
 	assert.True(t, firstResult.Applied)
 
@@ -599,7 +599,7 @@ func TestIntegrationSettleTradeSameIdempotencyKeyDifferentPayloadReturnsConflict
 		SellOrderID:    sellOrder.ID,
 	}
 
-	conflictResult, err := settlementService.SettleTrade(conflictingTrade)
+	conflictResult, err := settlementService.SettleTrade(conflictingTrade, 0)
 	require.Error(t, err)
 	assert.False(t, conflictResult.Applied)
 	assert.Contains(t, err.Error(), "idempotency key conflict")
@@ -631,7 +631,7 @@ func TestIntegrationSettleTradeRejectsCancelledBuyOrder(t *testing.T) {
 		SellOrderID: sellOrder.ID,
 	}
 
-	result, err := settlementService.SettleTrade(trade)
+	result, err := settlementService.SettleTrade(trade, 0)
 
 	require.Error(t, err)
 	assert.False(t, result.Applied)
@@ -659,7 +659,7 @@ func TestIntegrationFailedSettlementRecordedForCancelledOrderTrade(t *testing.T)
 		SellOrderID: sellOrder.ID,
 	}
 
-	result, err := settlementService.SettleTrade(trade)
+	result, err := settlementService.SettleTrade(trade, 0)
 	require.Error(t, err)
 	assert.False(t, result.Applied)
 
@@ -695,7 +695,7 @@ func TestIntegrationSettleTradeRejectsCancelledSellOrder(t *testing.T) {
 		SellOrderID: sellOrder.ID,
 	}
 
-	result, err := settlementService.SettleTrade(trade)
+	result, err := settlementService.SettleTrade(trade, 0)
 
 	require.Error(t, err)
 	assert.False(t, result.Applied)
@@ -750,7 +750,7 @@ func TestIntegrationCancelEngineMissThenLateTradeIsRejected(t *testing.T) {
 		SellOrderID: sellOrder.ID,
 	}
 
-	settleResult, err := settlementService.SettleTrade(lateTrade)
+	settleResult, err := settlementService.SettleTrade(lateTrade, 0)
 
 	require.Error(t, err)
 	assert.False(t, settleResult.Applied)
