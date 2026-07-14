@@ -105,8 +105,10 @@ func main() {
 	orderBookHandler := handler.NewOrderBookHandler(me)
 	orderHandler := handler.NewOrderHandler(orderService)
 
-	broadcast := func(msg []byte) {
-		hub.Broadcast <- msg
+	// 심볼을 태깅해 발행한다 — hub가 해당 심볼 구독자(또는 legacy full-feed
+	// 클라이언트)에게만 전달한다(B-1b).
+	broadcast := func(coinSymbol string, msg []byte) {
+		hub.Broadcast <- ws.Message{CoinSymbol: coinSymbol, Payload: msg}
 	}
 
 	// A-3 write-ahead outbox: 정산은 outbox에 커밋된 이벤트만 처리한다.
@@ -221,7 +223,7 @@ func main() {
 				"type": "orderbook",
 				"data": snapshot,
 			})
-			hub.Broadcast <- snapshotJSON
+			hub.Broadcast <- ws.Message{CoinSymbol: snapshot.CoinSymbol, Payload: snapshotJSON}
 		}
 	}()
 
@@ -257,7 +259,8 @@ func main() {
 
 		go upbitClient.Listen(func(code string, price float64) {
 			msg := fmt.Sprintf(`{"type":"ticker","code":"%s","price":%f}`, code, price)
-			hub.Broadcast <- []byte(msg)
+			// ticker는 소량이라 전역 발행 — 심볼 필터 없이 모든 클라이언트에게.
+			hub.Broadcast <- ws.Message{Payload: []byte(msg)}
 		})
 	} else {
 		log.Println("upbit feed disabled by GOEXCHANGE_ENABLE_UPBIT")
@@ -427,7 +430,7 @@ func processExecutionEvent(
 	failureRecorder settlementFailureRecorder,
 	marketCompleter marketOrderCompleter,
 	completionFailureRecorder marketCompletionFailureRecorder,
-	broadcast func([]byte),
+	broadcast func(coinSymbol string, payload []byte),
 	logger *log.Logger,
 ) (handled bool, markedInTx bool) {
 	if event.Trade != nil {
@@ -498,7 +501,7 @@ func processTradeSettlement(
 	outboxEventID uint64,
 	settler tradeSettler,
 	failureRecorder settlementFailureRecorder,
-	broadcast func([]byte),
+	broadcast func(coinSymbol string, payload []byte),
 	logger *log.Logger,
 ) (handled bool, markedInTx bool) {
 	if logger == nil {
@@ -551,6 +554,6 @@ func processTradeSettlement(
 		logger.Printf("marshal trade broadcast failed: %v", err)
 		return true, markedInTx
 	}
-	broadcast(tradeJSON)
+	broadcast(trade.CoinSymbol, tradeJSON)
 	return true, markedInTx
 }

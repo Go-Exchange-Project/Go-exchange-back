@@ -67,7 +67,7 @@ func TestProcessTradeSettlementRecordsFailureWithoutBroadcast(t *testing.T) {
 	recorder := &fakeFailureRecorder{}
 	var broadcasts int
 
-	processTradeSettlement(testTrade(), 0, settler, recorder, func([]byte) {
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {
 		broadcasts++
 	}, discardLogger())
 
@@ -81,7 +81,7 @@ func TestProcessTradeSettlementContinuesWhenFailureRecordFails(t *testing.T) {
 	var logBuffer bytes.Buffer
 	logger := log.New(&logBuffer, "", 0)
 
-	processTradeSettlement(testTrade(), 0, settler, recorder, func([]byte) {
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {
 		t.Fatal("unexpected broadcast")
 	}, logger)
 
@@ -94,7 +94,7 @@ func TestProcessTradeSettlementDoesNotBroadcastDuplicate(t *testing.T) {
 	settler := &fakeTradeSettler{result: service.SettlementResult{Applied: false, Duplicate: true, TradeID: 1}}
 	recorder := &fakeFailureRecorder{}
 
-	processTradeSettlement(testTrade(), 0, settler, recorder, func([]byte) {
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {
 		t.Fatal("unexpected duplicate broadcast")
 	}, discardLogger())
 
@@ -105,7 +105,7 @@ func TestProcessTradeSettlementBroadcastsAppliedTrade(t *testing.T) {
 	settler := &fakeTradeSettler{result: service.SettlementResult{Applied: true, TradeID: 1}}
 	var broadcast []byte
 
-	processTradeSettlement(testTrade(), 0, settler, nil, func(msg []byte) {
+	processTradeSettlement(testTrade(), 0, settler, nil, func(_ string, msg []byte) {
 		broadcast = msg
 	}, discardLogger())
 
@@ -120,14 +120,14 @@ func TestProcessTradeSettlementBroadcastsAppliedTrade(t *testing.T) {
 func TestProcessTradeSettlementReportsMarkedInTxOnlyWhenOutboxIDGiven(t *testing.T) {
 	// outboxEventID=0: SettleTrade가 마킹하지 않으므로 호출자가 fallback 마킹해야 한다.
 	settler := &fakeTradeSettler{result: service.SettlementResult{Applied: true, TradeID: 1}}
-	handled, markedInTx := processTradeSettlement(testTrade(), 0, settler, nil, func([]byte) {}, discardLogger())
+	handled, markedInTx := processTradeSettlement(testTrade(), 0, settler, nil, func(string, []byte) {}, discardLogger())
 	assert.True(t, handled)
 	assert.False(t, markedInTx, "outboxEventID=0이면 트랜잭션 흡수 마킹이 없어야 한다")
 	assert.Equal(t, uint64(0), settler.lastOutboxEventID)
 
 	// outboxEventID>0: SettleTrade가 정산 트랜잭션에서 마킹까지 했으므로 markedInTx=true.
 	settler = &fakeTradeSettler{result: service.SettlementResult{Applied: true, TradeID: 1}}
-	handled, markedInTx = processTradeSettlement(testTrade(), 77, settler, nil, func([]byte) {}, discardLogger())
+	handled, markedInTx = processTradeSettlement(testTrade(), 77, settler, nil, func(string, []byte) {}, discardLogger())
 	assert.True(t, handled)
 	assert.True(t, markedInTx, "정산 성공 + outboxEventID>0이면 트랜잭션이 이미 마킹했다")
 	assert.Equal(t, uint64(77), settler.lastOutboxEventID, "outboxEventID가 SettleTrade로 전달돼야 한다")
@@ -138,7 +138,7 @@ func TestProcessTradeSettlementFailureNeverReportsMarkedInTx(t *testing.T) {
 	// 호출자가 내구기록 후 fallback 마킹을 해야 한다.
 	settler := &fakeTradeSettler{err: errors.New("settlement failed")}
 	recorder := &fakeFailureRecorder{}
-	handled, markedInTx := processTradeSettlement(testTrade(), 77, settler, recorder, func([]byte) {}, discardLogger())
+	handled, markedInTx := processTradeSettlement(testTrade(), 77, settler, recorder, func(string, []byte) {}, discardLogger())
 	assert.True(t, handled, "내구기록 성공이므로 handled=true")
 	assert.False(t, markedInTx, "정산 롤백 경로는 트랜잭션 마킹이 없어야 한다")
 	assert.Equal(t, 1, recorder.calls)
@@ -171,7 +171,7 @@ func TestProcessTradeSettlementRecordsSettlementDuration(t *testing.T) {
 	before := histogramSampleCount(t, metrics.OrderSettlementDuration)
 
 	settler := &fakeTradeSettler{result: service.SettlementResult{Applied: true, TradeID: 1}}
-	processTradeSettlement(testTrade(), 0, settler, nil, func([]byte) {}, discardLogger())
+	processTradeSettlement(testTrade(), 0, settler, nil, func(string, []byte) {}, discardLogger())
 
 	after := histogramSampleCount(t, metrics.OrderSettlementDuration)
 	assert.Equal(t, before+1, after)
@@ -191,7 +191,7 @@ func TestProcessTradeSettlementRetriesTransientErrorInPlace(t *testing.T) {
 	recorder := &fakeFailureRecorder{}
 	var broadcasts int
 
-	processTradeSettlement(testTrade(), 0, settler, recorder, func([]byte) {
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {
 		broadcasts++
 	}, discardLogger())
 
@@ -206,7 +206,7 @@ func TestProcessTradeSettlementRecordsFailureAfterTransientRetriesExhausted(t *t
 	settler := &fakeTradeSettler{err: deadlockError()}
 	recorder := &fakeFailureRecorder{}
 
-	processTradeSettlement(testTrade(), 0, settler, recorder, func([]byte) {
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {
 		t.Fatal("unexpected broadcast")
 	}, discardLogger())
 
@@ -220,7 +220,7 @@ func TestProcessTradeSettlementDoesNotRetryPermanentError(t *testing.T) {
 	settler := &fakeTradeSettler{err: errors.New("cancelled order cannot be settled")}
 	recorder := &fakeFailureRecorder{}
 
-	processTradeSettlement(testTrade(), 0, settler, recorder, func([]byte) {}, discardLogger())
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {}, discardLogger())
 
 	assert.Equal(t, 1, settler.calls)
 	assert.Equal(t, 1, recorder.calls)

@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -87,6 +88,13 @@ func NewOriginChecker(cfg OriginCheckerConfig) func(r *http.Request) bool {
 	}
 }
 
+// clientCommand는 클라이언트가 보내는 구독 제어 메시지입니다.
+// 예: {"action":"subscribe","coin_symbols":["BTC","ETH"]}
+type clientCommand struct {
+	Action      string   `json:"action"`
+	CoinSymbols []string `json:"coin_symbols"`
+}
+
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
 		hub.Unregister <- c
@@ -100,10 +108,43 @@ func (c *Client) readPump(hub *Hub) {
 	})
 
 	for {
-		if _, _, err := c.Conn.ReadMessage(); err != nil {
+		_, payload, err := c.Conn.ReadMessage()
+		if err != nil {
 			return
 		}
+		if update, ok := parseSubscriptionCommand(c, payload); ok {
+			hub.Subscribe <- update
+		}
+		// 그 외 메시지는 무시 — 클라이언트 버그가 연결을 죽일 이유는 없다.
 	}
+}
+
+func parseSubscriptionCommand(client *Client, payload []byte) (SubscriptionUpdate, bool) {
+	var cmd clientCommand
+	if err := json.Unmarshal(payload, &cmd); err != nil {
+		return SubscriptionUpdate{}, false
+	}
+
+	var unsubscribe bool
+	switch strings.ToLower(strings.TrimSpace(cmd.Action)) {
+	case "subscribe":
+		unsubscribe = false
+	case "unsubscribe":
+		unsubscribe = true
+	default:
+		return SubscriptionUpdate{}, false
+	}
+
+	coinSymbols := make([]string, 0, len(cmd.CoinSymbols))
+	for _, coinSymbol := range cmd.CoinSymbols {
+		coinSymbol = strings.ToUpper(strings.TrimSpace(coinSymbol))
+		if coinSymbol == "" {
+			continue
+		}
+		coinSymbols = append(coinSymbols, coinSymbol)
+	}
+
+	return SubscriptionUpdate{Client: client, CoinSymbols: coinSymbols, Unsubscribe: unsubscribe}, true
 }
 
 func (c *Client) writePump(hub *Hub) {
