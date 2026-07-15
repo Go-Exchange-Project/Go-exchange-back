@@ -15,6 +15,11 @@ type WalletRepository struct {
 	DB *gorm.DB
 }
 
+type WalletKey struct {
+	UserID     uint
+	CoinSymbol string
+}
+
 func NewWalletRepository(db *gorm.DB) *WalletRepository {
 	return &WalletRepository{DB: db}
 }
@@ -114,6 +119,45 @@ func (r *WalletRepository) LockByIDs(ids []uint) ([]model.Wallet, error) {
 		return nil, fmt.Errorf("wallet lock expected %d rows, locked %d", len(ids), len(wallets))
 	}
 	return wallets, nil
+}
+
+// FindByKeys는 (user_id, coin_symbol) 조합들을 1왕복으로 조회합니다. 없는 키는
+// 결과에서 빠질 뿐 에러가 아닙니다 — 생성 여부 판단은 호출자 몫입니다.
+func (r *WalletRepository) FindByKeys(keys []WalletKey) ([]model.Wallet, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	pairs := make([][]interface{}, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, []interface{}{key.UserID, key.CoinSymbol})
+	}
+	var wallets []model.Wallet
+	err := r.DB.Where("(user_id, coin_symbol) IN ?", pairs).Find(&wallets).Error
+	return wallets, err
+}
+
+// CreateZeroBalanceWallets는 createZeroBalanceWallet의 배치 버전입니다(같은
+// ON CONFLICT DO NOTHING 의미론 — 경쟁 생성과 겹쳐도 안전).
+func (r *WalletRepository) CreateZeroBalanceWallets(keys []WalletKey) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	wallets := make([]model.Wallet, 0, len(keys))
+	for _, key := range keys {
+		wallets = append(wallets, model.Wallet{
+			UserID:           key.UserID,
+			CoinSymbol:       key.CoinSymbol,
+			KRW:              decimal.Zero,
+			Quantity:         decimal.Zero,
+			AvailableBalance: decimal.Zero,
+			LockedBalance:    decimal.Zero,
+			AvgBuyPrice:      decimal.Zero,
+		})
+	}
+	return r.DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_id"}, {Name: "coin_symbol"}},
+		DoNothing: true,
+	}).Create(&wallets).Error
 }
 
 func (r *WalletRepository) UpdateKRW(userID uint, krw decimal.Decimal) error {

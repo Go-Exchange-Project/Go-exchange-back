@@ -396,3 +396,70 @@ func TestIntegrationBatchUpdateBalancesMissingWalletReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expected")
 }
+
+func TestIntegrationFindByKeysReturnsOnlyMatchingWallets(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userA := repositoryTestUserID(50)
+	userB := repositoryTestUserID(51)
+	defer cleanupRepositoryUsers(t, db, userA, userB)
+
+	repo := NewWalletRepository(db)
+	walletA_KRW := model.Wallet{UserID: userA, CoinSymbol: "KRW", KRW: decimal.NewFromInt(1000), AvailableBalance: decimal.NewFromInt(1000), LockedBalance: decimal.Zero}
+	walletA_BTC := model.Wallet{UserID: userA, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(5), AvailableBalance: decimal.NewFromInt(5), LockedBalance: decimal.Zero}
+	walletB_KRW := model.Wallet{UserID: userB, CoinSymbol: "KRW", KRW: decimal.NewFromInt(2000), AvailableBalance: decimal.NewFromInt(2000), LockedBalance: decimal.Zero}
+
+	require.NoError(t, db.Create(&walletA_KRW).Error)
+	require.NoError(t, db.Create(&walletA_BTC).Error)
+	require.NoError(t, db.Create(&walletB_KRW).Error)
+
+	// Find only (userA, KRW) and (userB, KRW)
+	got, err := repo.FindByKeys([]WalletKey{
+		{UserID: userA, CoinSymbol: "KRW"},
+		{UserID: userB, CoinSymbol: "KRW"},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got, 2)
+	// Verify we got the right wallets (exact matches only, not BTC)
+	foundKRWCount := 0
+	for _, w := range got {
+		assert.Equal(t, "KRW", w.CoinSymbol)
+		if w.UserID == userA || w.UserID == userB {
+			foundKRWCount++
+		}
+	}
+	assert.Equal(t, 2, foundKRWCount)
+}
+
+func TestIntegrationCreateZeroBalanceWalletsIsIdempotent(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(52)
+	defer cleanupRepositoryUsers(t, db, userID)
+
+	repo := NewWalletRepository(db)
+	key := WalletKey{UserID: userID, CoinSymbol: "TEST"}
+
+	// First call: create the wallet
+	err := repo.CreateZeroBalanceWallets([]WalletKey{key})
+	require.NoError(t, err)
+
+	wallet1, err := repo.FindByUserIDAndCoinSymbol(userID, "TEST")
+	require.NoError(t, err)
+	walletID1 := wallet1.ID
+
+	// Second call: try to create again (should be idempotent)
+	err = repo.CreateZeroBalanceWallets([]WalletKey{key})
+	require.NoError(t, err)
+
+	wallet2, err := repo.FindByUserIDAndCoinSymbol(userID, "TEST")
+	require.NoError(t, err)
+
+	// Same wallet ID, not a duplicate
+	assert.Equal(t, walletID1, wallet2.ID)
+	// All balances are zero
+	assert.True(t, wallet2.KRW.Equal(decimal.Zero))
+	assert.True(t, wallet2.Quantity.Equal(decimal.Zero))
+	assert.True(t, wallet2.AvailableBalance.Equal(decimal.Zero))
+	assert.True(t, wallet2.LockedBalance.Equal(decimal.Zero))
+	assert.True(t, wallet2.AvgBuyPrice.Equal(decimal.Zero))
+}

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/shopspring/decimal"
@@ -17,6 +18,13 @@ type OrderListFilter struct {
 	Status     *model.OrderStatus
 	CoinSymbol string
 	Limit      int
+}
+
+type OrderExecutionBatchUpdate struct {
+	OrderID           uint
+	FilledAmount      decimal.Decimal
+	FilledQuoteAmount decimal.Decimal
+	Status            model.OrderStatus
 }
 
 func NewOrderRepository(db *gorm.DB) *OrderRepository {
@@ -112,4 +120,59 @@ func (r *OrderRepository) FindOpenOrdersForBootstrap() ([]model.Order, error) {
 		Order("id ASC").
 		Find(&orders).Error
 	return orders, err
+}
+
+// LockByIDs는 배치 정산용으로 주문들을 ID 오름차순 FOR UPDATE로 잠급니다.
+// 요청한 ID 수와 잠근 행 수가 다르면 에러입니다 — 배치는 부분 성공이 없습니다.
+func (r *OrderRepository) LockByIDs(ids []uint) ([]model.Order, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var orders []model.Order
+	err := r.DB.
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id IN ?", ids).
+		Order("id ASC").
+		Find(&orders).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(orders) != len(ids) {
+		return nil, fmt.Errorf("order lock expected %d rows, locked %d", len(ids), len(orders))
+	}
+	return orders, nil
+}
+
+func (r *OrderRepository) BatchUpdateExecutions(updates []OrderExecutionBatchUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	rows := make([]string, 0, len(updates))
+	args := make([]interface{}, 0, len(updates)*4)
+	for i, u := range updates {
+		base := i * 4
+		rows = append(rows, fmt.Sprintf(
+			"($%d::bigint, $%d::text, $%d::numeric, $%d::numeric)",
+			base+1, base+2, base+3, base+4,
+		))
+		args = append(args, u.OrderID, string(u.Status), u.FilledAmount, u.FilledQuoteAmount)
+	}
+	sql := fmt.Sprintf(`
+		UPDATE orders AS o
+		SET
+			status = v.status,
+			filled_amount = v.filled_amount,
+			filled_quote_amount = v.filled_quote_amount
+		FROM (VALUES %s) AS v(id, status, filled_amount, filled_quote_amount)
+		WHERE o.id = v.id`,
+		strings.Join(rows, ", "),
+	)
+	result := r.DB.Exec(sql, args...)
+	if result.Error != nil {
+		return result.Error
+	}
+	if int(result.RowsAffected) != len(updates) {
+		return fmt.Errorf("order batch update affected %d rows, expected %d", result.RowsAffected, len(updates))
+	}
+	return nil
 }

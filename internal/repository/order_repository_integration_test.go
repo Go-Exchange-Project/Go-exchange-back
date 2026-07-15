@@ -109,6 +109,118 @@ func bootstrapRepositoryOrder(userID uint, coinSymbol string, status model.Order
 	}
 }
 
+func TestIntegrationOrderLockByIDsReturnsAllRequestedRowsInIDOrder(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(40)
+	defer cleanupBootstrapRepositoryOrders(t, db, userID)
+
+	repo := NewOrderRepository(db)
+	order1 := bootstrapRepositoryOrder(userID, "LOCK-TEST", model.OrderStatusPending, time.Now().UTC().Add(-time.Minute), decimal.NewFromInt(10), decimal.Zero)
+	order2 := bootstrapRepositoryOrder(userID, "LOCK-TEST", model.OrderStatusPending, time.Now().UTC(), decimal.NewFromInt(20), decimal.Zero)
+
+	require.NoError(t, db.Create(&order1).Error)
+	require.NoError(t, db.Create(&order2).Error)
+
+	// Request in non-sorted order: [id2, id1]
+	ids := []uint{order2.ID, order1.ID}
+	got, err := repo.LockByIDs(ids)
+	require.NoError(t, err)
+
+	// Should return 2 rows in ID ascending order
+	require.Len(t, got, 2)
+	assert.Equal(t, order1.ID, got[0].ID)
+	assert.Equal(t, order2.ID, got[1].ID)
+}
+
+func TestIntegrationOrderLockByIDsFailsWhenARowIsMissing(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(41)
+	defer cleanupBootstrapRepositoryOrders(t, db, userID)
+
+	repo := NewOrderRepository(db)
+	order1 := bootstrapRepositoryOrder(userID, "LOCK-MISSING", model.OrderStatusPending, time.Now().UTC(), decimal.NewFromInt(10), decimal.Zero)
+	require.NoError(t, db.Create(&order1).Error)
+
+	// Request existing ID + non-existent ID
+	ids := []uint{order1.ID, 999999999}
+	_, err := repo.LockByIDs(ids)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected 2 rows, locked 1")
+}
+
+func TestIntegrationBatchUpdateExecutionsUpdatesAllColumns(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(42)
+	defer cleanupBootstrapRepositoryOrders(t, db, userID)
+
+	repo := NewOrderRepository(db)
+	order1 := bootstrapRepositoryOrder(userID, "BATCH-UPDATE", model.OrderStatusPending, time.Now().UTC().Add(-time.Minute), decimal.NewFromInt(10), decimal.Zero)
+	order2 := bootstrapRepositoryOrder(userID, "BATCH-UPDATE", model.OrderStatusPending, time.Now().UTC(), decimal.NewFromInt(20), decimal.Zero)
+
+	require.NoError(t, db.Create(&order1).Error)
+	require.NoError(t, db.Create(&order2).Error)
+
+	// Update with different values
+	err := repo.BatchUpdateExecutions([]OrderExecutionBatchUpdate{
+		{
+			OrderID:           order1.ID,
+			FilledAmount:      decimal.NewFromInt(5),
+			FilledQuoteAmount: decimal.NewFromInt(500),
+			Status:            model.OrderStatusPartial,
+		},
+		{
+			OrderID:           order2.ID,
+			FilledAmount:      decimal.NewFromInt(20),
+			FilledQuoteAmount: decimal.NewFromInt(2000),
+			Status:            model.OrderStatusFilled,
+		},
+	})
+	require.NoError(t, err)
+
+	// Verify updates
+	updated1, err := repo.FindByID(order1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderStatusPartial, updated1.Status)
+	assert.True(t, updated1.FilledAmount.Equal(decimal.NewFromInt(5)))
+	assert.True(t, updated1.FilledQuoteAmount.Equal(decimal.NewFromInt(500)))
+
+	updated2, err := repo.FindByID(order2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderStatusFilled, updated2.Status)
+	assert.True(t, updated2.FilledAmount.Equal(decimal.NewFromInt(20)))
+	assert.True(t, updated2.FilledQuoteAmount.Equal(decimal.NewFromInt(2000)))
+}
+
+func TestIntegrationBatchUpdateExecutionsFailsOnRowCountMismatch(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(43)
+	defer cleanupBootstrapRepositoryOrders(t, db, userID)
+
+	repo := NewOrderRepository(db)
+	order1 := bootstrapRepositoryOrder(userID, "BATCH-MISSING", model.OrderStatusPending, time.Now().UTC(), decimal.NewFromInt(10), decimal.Zero)
+	require.NoError(t, db.Create(&order1).Error)
+
+	// Try to update existing order + non-existent order
+	err := repo.BatchUpdateExecutions([]OrderExecutionBatchUpdate{
+		{
+			OrderID:           order1.ID,
+			FilledAmount:      decimal.NewFromInt(5),
+			FilledQuoteAmount: decimal.NewFromInt(500),
+			Status:            model.OrderStatusPartial,
+		},
+		{
+			OrderID:           999999999,
+			FilledAmount:      decimal.NewFromInt(1),
+			FilledQuoteAmount: decimal.NewFromInt(100),
+			Status:            model.OrderStatusFilled,
+		},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected 2")
+}
+
 func cleanupBootstrapRepositoryOrders(t *testing.T, db *gorm.DB, userID uint) {
 	t.Helper()
 
