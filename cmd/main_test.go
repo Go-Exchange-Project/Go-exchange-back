@@ -312,6 +312,169 @@ func TestSettlementWorkerIndexIsStableAndBounded(t *testing.T) {
 	}
 }
 
+type fakeTradeBatchSettler struct {
+	results []service.SettlementResult
+	err     error
+	calls   int
+	lastLen int
+}
+
+func (f *fakeTradeBatchSettler) SettleTradeBatch(items []service.TradeBatchItem) ([]service.SettlementResult, error) {
+	f.calls++
+	f.lastLen = len(items)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.results, nil
+}
+
+type fakeOutboxMarker struct {
+	calls int
+}
+
+func (f *fakeOutboxMarker) MarkProcessed(uint64) error {
+	f.calls++
+	return nil
+}
+
+func TestSettleTradeBatchWithFallbackFallsBackToPerTradeOnBatchError(t *testing.T) {
+	batchSettler := &fakeTradeBatchSettler{err: errors.New("batch settle failed")}
+	settler := &fakeTradeSettler{result: service.SettlementResult{Applied: true, TradeID: 1}}
+	recorder := &fakeFailureRecorder{}
+	marker := &fakeOutboxMarker{}
+	var broadcasts int
+	before := counterValue(t, metrics.SettlementBatchFallbacksTotal)
+
+	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
+	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, func(string, []byte) {
+		broadcasts++
+	}, marker, discardLogger())
+
+	assert.Equal(t, 1, batchSettler.calls)
+	assert.Equal(t, len(batch), settler.calls, "배치 전 건이 단건 경로로 재처리돼야 한다")
+	assert.Equal(t, len(batch), broadcasts)
+	assert.Equal(t, before+1, counterValue(t, metrics.SettlementBatchFallbacksTotal))
+}
+
+func TestSettleTradeBatchWithFallbackBroadcastsOnlyAppliedOnSuccess(t *testing.T) {
+	batchSettler := &fakeTradeBatchSettler{results: []service.SettlementResult{
+		{Applied: true, TradeID: 1},
+		{Applied: false, Duplicate: true, TradeID: 2},
+		{Applied: true, TradeID: 3},
+	}}
+	settler := &fakeTradeSettler{}
+	marker := &fakeOutboxMarker{}
+	var broadcasts int
+	before := histogramSampleCount(t, metrics.SettlementBatchSize)
+
+	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
+	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, func(string, []byte) {
+		broadcasts++
+	}, marker, discardLogger())
+
+	assert.Equal(t, 1, batchSettler.calls)
+	assert.Equal(t, 3, batchSettler.lastLen)
+	assert.Equal(t, 0, settler.calls, "배치 성공 시 단건 경로를 타면 안 된다")
+	assert.Equal(t, 2, broadcasts, "Applied 결과만 브로드캐스트돼야 한다")
+	assert.Equal(t, before+1, histogramSampleCount(t, metrics.SettlementBatchSize))
+}
+
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, c.Write(m))
+	return m.GetCounter().GetValue()
+}
+
+func tradeOutboxEvent(outboxID uint64, engineSequence int64) service.OutboxEvent {
+	return service.OutboxEvent{
+		OutboxID: outboxID,
+		Event:    matching.ExecutionEvent{Trade: &model.Trade{CoinSymbol: "BTC", EngineSequence: engineSequence}},
+	}
+}
+
+func doneOutboxEvent(outboxID uint64) service.OutboxEvent {
+	return service.OutboxEvent{
+		OutboxID: outboxID,
+		Event:    matching.ExecutionEvent{MarketOrderDone: testMarketOrderDone()},
+	}
+}
+
+func TestCollectTradeBatchDrainsQueuedTrades(t *testing.T) {
+	queue := make(chan service.OutboxEvent, 8)
+	queue <- tradeOutboxEvent(2, 2)
+	queue <- tradeOutboxEvent(3, 3)
+
+	batch, pending, open := collectTradeBatch(tradeOutboxEvent(1, 1), queue, settlementBatchMaxSize)
+
+	require.True(t, open)
+	require.Nil(t, pending)
+	require.Len(t, batch, 3)
+	assert.Equal(t, uint64(1), batch[0].OutboxID)
+	assert.Equal(t, uint64(2), batch[1].OutboxID)
+	assert.Equal(t, uint64(3), batch[2].OutboxID)
+}
+
+func TestCollectTradeBatchReturnsImmediatelyWhenQueueIsEmpty(t *testing.T) {
+	queue := make(chan service.OutboxEvent, 8)
+
+	batch, pending, open := collectTradeBatch(tradeOutboxEvent(1, 1), queue, settlementBatchMaxSize)
+
+	require.True(t, open)
+	require.Nil(t, pending)
+	require.Len(t, batch, 1)
+	assert.Equal(t, uint64(1), batch[0].OutboxID)
+}
+
+func TestCollectTradeBatchStopsAtMarketOrderDoneBoundary(t *testing.T) {
+	queue := make(chan service.OutboxEvent, 8)
+	queue <- tradeOutboxEvent(2, 2)
+	queue <- doneOutboxEvent(3)
+	queue <- tradeOutboxEvent(4, 4)
+
+	batch, pending, open := collectTradeBatch(tradeOutboxEvent(1, 1), queue, settlementBatchMaxSize)
+
+	require.True(t, open)
+	require.Len(t, batch, 2)
+	assert.Equal(t, uint64(1), batch[0].OutboxID)
+	assert.Equal(t, uint64(2), batch[1].OutboxID)
+	require.NotNil(t, pending)
+	assert.Equal(t, uint64(3), pending.OutboxID)
+	assert.NotNil(t, pending.Event.MarketOrderDone)
+
+	// Done 뒤의 trade는 큐에 남아 있다 — 아직 소비되지 않았다.
+	require.Len(t, queue, 1)
+}
+
+func TestCollectTradeBatchCapsAtMaxBatchSize(t *testing.T) {
+	const maxBatch = 3
+	queue := make(chan service.OutboxEvent, 8)
+	queue <- tradeOutboxEvent(2, 2)
+	queue <- tradeOutboxEvent(3, 3)
+	queue <- tradeOutboxEvent(4, 4)
+	queue <- tradeOutboxEvent(5, 5)
+
+	batch, pending, open := collectTradeBatch(tradeOutboxEvent(1, 1), queue, maxBatch)
+
+	require.True(t, open)
+	require.Nil(t, pending)
+	require.Len(t, batch, maxBatch)
+	// maxBatch를 채우고 남은 이벤트(4, 5)는 큐에 그대로 남아 있어야 한다.
+	require.Len(t, queue, 2)
+}
+
+func TestCollectTradeBatchReportsClosedChannel(t *testing.T) {
+	queue := make(chan service.OutboxEvent, 8)
+	queue <- tradeOutboxEvent(2, 2)
+	close(queue)
+
+	batch, pending, open := collectTradeBatch(tradeOutboxEvent(1, 1), queue, settlementBatchMaxSize)
+
+	require.False(t, open)
+	require.Nil(t, pending)
+	require.Len(t, batch, 2)
+}
+
 func TestForwardToSettlementQueueRoutesSameSymbolInOrder(t *testing.T) {
 	const workerCount = 4
 	queues := make([]chan service.OutboxEvent, workerCount)

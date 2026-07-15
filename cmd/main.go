@@ -162,20 +162,28 @@ func main() {
 		settlementWg.Add(1)
 		go func(queue chan service.OutboxEvent) {
 			defer settlementWg.Done()
-			for outboxEvent := range queue {
-				handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, log.Default())
-				if !handled {
-					// 내구 확정 실패(정산 실패의 기록조차 실패) — PENDING으로 남겨
-					// 다음 부팅 리플레이가 재시도한다.
+			var pending *service.OutboxEvent
+			for {
+				var event service.OutboxEvent
+				if pending != nil {
+					event, pending = *pending, nil
+				} else {
+					received, ok := <-queue
+					if !ok {
+						return
+					}
+					event = received
+				}
+				if event.Event.Trade == nil {
+					processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, outboxRepo, log.Default())
 					continue
 				}
-				if markedInTx {
-					// 정산 트랜잭션이 outbox 마킹까지 이미 커밋했다 — 별도 왕복 불필요.
-					continue
-				}
-				if err := outboxRepo.MarkProcessed(outboxEvent.OutboxID); err != nil {
-					// 마킹 실패는 유실이 아니라 다음 리플레이의 멱등 재처리일 뿐.
-					log.Printf("mark outbox event %d processed failed: %v", outboxEvent.OutboxID, err)
+				batch, next, open := collectTradeBatch(event, queue, settlementBatchMaxSize)
+				pending = next
+				settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, outboxRepo, log.Default())
+				if !open {
+					// 채널 닫힘 — 잔여 배치는 방금 처리했고 pending은 nil.
+					return
 				}
 			}
 		}(queue)
@@ -362,6 +370,10 @@ type tradeSettler interface {
 	SettleTrade(trade *model.Trade, outboxEventID uint64) (service.SettlementResult, error)
 }
 
+type tradeBatchSettler interface {
+	SettleTradeBatch(items []service.TradeBatchItem) ([]service.SettlementResult, error)
+}
+
 type settlementFailureRecorder interface {
 	RecordFailure(trade *model.Trade, settlementErr error) (*model.FailedSettlement, error)
 }
@@ -374,7 +386,14 @@ type marketCompletionFailureRecorder interface {
 	RecordFailure(input service.CompleteMarketOrderInput, coinSymbol string, completionErr error) (*model.FailedMarketCompletion, error)
 }
 
+type outboxMarker interface {
+	MarkProcessed(id uint64) error
+}
+
 const settlementWorkerQueueSize = 256
+
+// settlementBatchMaxSize는 collectTradeBatch가 한 번에 모으는 trade 상한이다.
+const settlementBatchMaxSize = 32
 
 // transientRetryDelays는 데드락 등 일시적 오류의 in-place 재시도 간격입니다.
 // 여기서 못 잡은 실패는 SettlementRetryWorker(10초 주기)가 2차로 처리합니다.
@@ -440,6 +459,95 @@ func processExecutionEvent(
 		return processMarketOrderDone(event.MarketOrderDone, marketCompleter, completionFailureRecorder, logger), false
 	}
 	return true, false
+}
+
+// processSingleOutboxEvent는 outbox 이벤트 1건을 단건 경로로 처리한다 — 워커 루프의
+// 비-trade(MarketOrderDone) 분기와, 배치 정산 실패 시 폴백 분기가 공유한다.
+func processSingleOutboxEvent(
+	outboxEvent service.OutboxEvent,
+	settler tradeSettler,
+	failureRecorder settlementFailureRecorder,
+	marketCompleter marketOrderCompleter,
+	completionFailureRecorder marketCompletionFailureRecorder,
+	broadcast func(coinSymbol string, payload []byte),
+	outboxRepo outboxMarker,
+	logger *log.Logger,
+) {
+	handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, settler, failureRecorder, marketCompleter, completionFailureRecorder, broadcast, logger)
+	if !handled {
+		// 내구 확정 실패(정산 실패의 기록조차 실패) — PENDING으로 남겨
+		// 다음 부팅 리플레이가 재시도한다.
+		return
+	}
+	if markedInTx {
+		// 정산 트랜잭션이 outbox 마킹까지 이미 커밋했다 — 별도 왕복 불필요.
+		return
+	}
+	if err := outboxRepo.MarkProcessed(outboxEvent.OutboxID); err != nil {
+		// 마킹 실패는 유실이 아니라 다음 리플레이의 멱등 재처리일 뿐.
+		logger.Printf("mark outbox event %d processed failed: %v", outboxEvent.OutboxID, err)
+	}
+}
+
+// collectTradeBatch는 first(반드시 trade)에 이어 큐에 이미 쌓인 trade를 논블로킹으로
+// 최대 maxBatch까지 모은다. 티머 없음 — 이벤트는 이미 outbox에 커밋된 뒤라 모으려고
+// 기다릴 이유가 없다(부하 낮으면 배치 1, 백로그가 있을 때만 커지는 적응형).
+// 비-trade(MarketOrderDone)를 만나면 배치를 끊고 pending으로 돌려준다(순서 보존).
+func collectTradeBatch(first service.OutboxEvent, queue <-chan service.OutboxEvent, maxBatch int) (batch []service.OutboxEvent, pending *service.OutboxEvent, open bool) {
+	batch = append(batch, first)
+	open = true
+	for len(batch) < maxBatch {
+		select {
+		case event, ok := <-queue:
+			if !ok {
+				open = false
+				return
+			}
+			if event.Event.Trade == nil {
+				pending = &event
+				return
+			}
+			batch = append(batch, event)
+		default:
+			return
+		}
+	}
+	return
+}
+
+// settleTradeBatchWithFallback: 배치 성공 시 Applied trade만 브로드캐스트.
+// 실패 시 전체 롤백된 상태이므로 기존 단건 경로로 건별 재처리 —
+// 불량 trade만 실패 기록으로 빠지고 나머지는 정상 정산된다.
+func settleTradeBatchWithFallback(
+	batch []service.OutboxEvent,
+	batchSettler tradeBatchSettler,
+	settler tradeSettler,
+	failureRecorder settlementFailureRecorder,
+	marketCompleter marketOrderCompleter,
+	completionFailureRecorder marketCompletionFailureRecorder,
+	broadcast func(coinSymbol string, payload []byte),
+	outboxRepo outboxMarker,
+	logger *log.Logger,
+) {
+	items := make([]service.TradeBatchItem, len(batch))
+	for i, event := range batch {
+		items[i] = service.TradeBatchItem{Trade: event.Event.Trade, OutboxEventID: event.OutboxID}
+	}
+	results, err := batchSettler.SettleTradeBatch(items)
+	if err != nil {
+		metrics.SettlementBatchFallbacksTotal.Inc()
+		logger.Printf("settle trade batch of %d failed, falling back to per-trade settlement: %v", len(batch), err)
+		for _, event := range batch {
+			processSingleOutboxEvent(event, settler, failureRecorder, marketCompleter, completionFailureRecorder, broadcast, outboxRepo, logger)
+		}
+		return
+	}
+	metrics.SettlementBatchSize.Observe(float64(len(batch)))
+	for i, result := range results {
+		if result.Applied {
+			broadcastSettledTrade(batch[i].Event.Trade, broadcast, logger)
+		}
+	}
 }
 
 func processMarketOrderDone(
@@ -532,6 +640,13 @@ func processTradeSettlement(
 		return true, markedInTx
 	}
 
+	broadcastSettledTrade(trade, broadcast, logger)
+	return true, markedInTx
+}
+
+// broadcastSettledTrade는 이미 커밋된 정산의 trade를 JSON으로 마샬해 브로드캐스트한다.
+// 마샬 실패는 정산 내구성과 무관하므로 로그만 남기고 조용히 건너뛴다.
+func broadcastSettledTrade(trade *model.Trade, broadcast func(coinSymbol string, payload []byte), logger *log.Logger) {
 	tradeJSON, err := json.Marshal(map[string]interface{}{
 		"type": "trade",
 		"data": map[string]interface{}{
@@ -550,10 +665,8 @@ func processTradeSettlement(
 		},
 	})
 	if err != nil {
-		// 브로드캐스트 실패는 정산 내구성과 무관하다 — 정산은 이미 커밋됐다.
 		logger.Printf("marshal trade broadcast failed: %v", err)
-		return true, markedInTx
+		return
 	}
 	broadcast(trade.CoinSymbol, tradeJSON)
-	return true, markedInTx
 }
