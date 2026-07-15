@@ -498,6 +498,26 @@ func TestIntegrationSettleTradeBatchFailureRollsBackEverything(t *testing.T) {
 		assert.Equal(t, model.TradeOutboxStatusPending, row.Status, "정산 롤백 시 outbox 마킹도 롤백돼 PENDING으로 남아야 한다")
 		assert.Nil(t, row.ProcessedAt)
 	}
+
+	// goodTrade는 2단계 배치 INSERT에서 RETURNING id로 ID를 부여받지만, 그 INSERT는
+	// badTrade 때문에 이후 롤백된다. 호출자가 들고 있는 포인터(goodTrade)에 phantom
+	// ID가 남아있으면 안 된다 — cmd/main.go의 폴백 경로가 이 포인터를 그대로 재사용해
+	// SettleTrade를 호출하기 때문이다.
+	assert.Equal(t, uint(0), goodTrade.ID, "롤백된 배치의 trade.ID는 0으로 리셋되어야 한다")
+	assert.Equal(t, uint(0), badTrade.ID, "롤백된 배치의 trade.ID는 0으로 리셋되어야 한다")
+
+	// 실제 폴백 경로 재현: 같은 포인터로 SettleTrade를 호출해도 정상적으로 신규
+	// insert·정산되어야 한다. phantom ID가 남아있으면 GORM이 명시적 id로 INSERT를
+	// 시도하게 되어, 이 계약이 문서화도 테스트도 되지 않은 채 방치된다.
+	fallbackResult, err := settlementService.SettleTrade(goodTrade, uint64(goodOutbox.ID))
+	require.NoError(t, err, "롤백 후 단건 폴백은 성공해야 한다")
+	assert.True(t, fallbackResult.Applied)
+	assert.NotZero(t, goodTrade.ID, "폴백 정산 후에는 실제 auto-generated ID가 채워져야 한다")
+
+	var settledGoodBuy model.Order
+	require.NoError(t, db.First(&settledGoodBuy, goodTrade.BuyOrderID).Error)
+	assert.Equal(t, model.OrderStatusFilled, settledGoodBuy.Status)
+	assert.True(t, settledGoodBuy.FilledAmount.Equal(decimal.NewFromInt(5)))
 }
 
 // (d) outbox 흡수: 성공 배치 → 모든 outbox 행이 같은 트랜잭션에서 PROCESSED된다.

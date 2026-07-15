@@ -323,6 +323,13 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 		return markSettledOutboxBatch(tx, collectOutboxIDs(items))
 	})
 	if err != nil {
+		// 2단계 배치 INSERT는 RETURNING id로 items[i].Trade.ID를 호출자 소유 포인터에
+		// 직접 채운다. 트랜잭션이 이후 단계에서 실패해 롤백되면 그 ID는 커밋된 적 없는
+		// phantom 값인데 포인터에는 그대로 남는다 — 폴백 경로가 같은 포인터로
+		// SettleTrade를 재호출하므로 여기서 원상복구해야 한다.
+		for _, item := range items {
+			item.Trade.ID = 0
+		}
 		return nil, err
 	}
 	return results, nil
