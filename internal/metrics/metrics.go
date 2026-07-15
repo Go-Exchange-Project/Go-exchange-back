@@ -67,6 +67,17 @@ var (
 		Name: "trade_outbox_write_errors_total",
 		Help: "Total outbox batch INSERT failures (each retried until success).",
 	})
+
+	SettlementBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "settlement_batch_size",
+		Help:    "Number of trades per committed settlement batch. Stuck at 1 indicates low load or drain not happening.",
+		Buckets: []float64{1, 2, 4, 8, 16, 32},
+	})
+
+	SettlementBatchFallbacksTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "settlement_batch_fallbacks_total",
+		Help: "Total number of times batch settlement failed and fell back to per-trade settlement.",
+	})
 )
 
 // RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를
