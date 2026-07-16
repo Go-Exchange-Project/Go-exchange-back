@@ -57,13 +57,13 @@ func TestBroadcastSettledTradesEmptyIsNoop(t *testing.T)
 - [x] **Step 4: 통과 확인** — Run: `go test ./cmd/... -run TestBroadcastSettledTrades -v` → PASS (3개 전부)
 - [x] **Step 5: 회귀** — `go build ./...` OK. `go test ./cmd/... ./internal/ws/... -count=1` → PASS (ws 패키지 무변경·무영향의 증거). 통합 포함 전체 `go test ./... -count=1 -v`(테스트 DB `docker compose -f docker-compose.test.yml up -d --wait` 기동, `GOEXCHANGE_TEST_DATABASE_DSN` 설정) → **390 PASS / 0 SKIP / 0 FAIL** (SKIP 0건으로 통합 테스트가 실제 DB에서 돌았음을 확인).
 - [x] **Step 6: 로컬 E2E 수동 확인** — 로컬 백엔드(임시 postgres, 포트 5433) + 프론트 dev 서버(localhost:3000) 기동 후, 헤드리스 브라우저가 없어 `ws://localhost:8080/ws`에 직접 연결하는 Node 스크립트로 원본 메시지를 캡처: 유저 2명 생성·충전 후 지정가 매도/매수 쌍 2회 제출 → 실서버가 `"type":"trades","data":[...]`만 발행(레거시 `"type":"trade"` 0건)함을 확인. 필드 구성(`coin_symbol`/`engine_sequence`/`fee_rate`/... )도 기존과 동일. 확인 후 임시 DB·dev 서버 정리.
-- [ ] **Step 7: Commit** (author→reviewer 절차) — 초안: `perf(ws): 체결 브로드캐스트를 정산 배치 단위로 묶어 fanout 비용 축소 (B-1c)`
+- [x] **Step 7: Commit** (author→reviewer 절차) — `perf(ws): 체결 브로드캐스트를 정산 배치 단위로 묶어 fanout 비용 축소 (B-1c)` (`83d3f4c`)
 
 ---
 
 ### Task 3: 문서 + 푸시
 
-- [ ] **Step 1**: `docs/refactor/7_B-1c_체결_브로드캐스트_배치화_완료.md` 작성(왜 문제였나: 19번 해석 2 / 어떻게: 스펙 링크 + 요지 / 결과: 테스트 요약, GCP 측정은 다음 사이클 병기). README 현황판에 B-1c 행 추가(✅, 19번에서 발견된 병목의 후속임을 명기), 기존 7번(B-3)은 8번으로 밀림.
+- [x] **Step 1**: `docs/refactor/7_B-1c_체결_브로드캐스트_배치화_완료.md` 작성(왜 문제였나: 19번 해석 2 / 어떻게: 스펙 링크 + 요지 / 결과: 테스트 요약, GCP 측정은 다음 사이클 병기). README 현황판에 B-1c 행 추가(✅, 19번에서 발견된 병목의 후속임을 명기), 기존 7번(B-3)은 8번으로 밀림.
 - [ ] **Step 2**: Commit (author→reviewer 절차) + 두 리포 푸시 + `gh run watch`로 백엔드 CI 그린 확인.
 
 ---
