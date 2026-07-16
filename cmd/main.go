@@ -543,11 +543,13 @@ func settleTradeBatchWithFallback(
 		return
 	}
 	metrics.SettlementBatchSize.Observe(float64(len(batch)))
+	applied := make([]*model.Trade, 0, len(batch))
 	for i, result := range results {
 		if result.Applied {
-			broadcastSettledTrade(batch[i].Event.Trade, broadcast, logger)
+			applied = append(applied, batch[i].Event.Trade)
 		}
 	}
+	broadcastSettledTrades(applied, broadcast, logger)
 }
 
 func processMarketOrderDone(
@@ -640,16 +642,26 @@ func processTradeSettlement(
 		return true, markedInTx
 	}
 
-	broadcastSettledTrade(trade, broadcast, logger)
+	broadcastSettledTrades([]*model.Trade{trade}, broadcast, logger)
 	return true, markedInTx
 }
 
-// broadcastSettledTrade는 이미 커밋된 정산의 trade를 JSON으로 마샬해 브로드캐스트한다.
-// 마샬 실패는 정산 내구성과 무관하므로 로그만 남기고 조용히 건너뛴다.
-func broadcastSettledTrade(trade *model.Trade, broadcast func(coinSymbol string, payload []byte), logger *log.Logger) {
-	tradeJSON, err := json.Marshal(map[string]interface{}{
-		"type": "trade",
-		"data": map[string]interface{}{
+// broadcastSettledTrades는 이미 커밋된 정산의 trade들을 심볼별로 그룹핑해(등장 순서·
+// 배치 내 순서 보존) 심볼당 "trades" 배열 메시지 1건으로 마샬·브로드캐스트한다. 단건
+// 경로도 원소 1개짜리 배치로 호출해 와이어 형식을 하나로 유지한다. 마샬 실패는 정산
+// 내구성과 무관하므로 로그만 남기고 조용히 건너뛴다.
+func broadcastSettledTrades(trades []*model.Trade, broadcast func(coinSymbol string, payload []byte), logger *log.Logger) {
+	if len(trades) == 0 {
+		return
+	}
+
+	symbolOrder := make([]string, 0, len(trades))
+	grouped := make(map[string][]map[string]interface{}, len(trades))
+	for _, trade := range trades {
+		if _, seen := grouped[trade.CoinSymbol]; !seen {
+			symbolOrder = append(symbolOrder, trade.CoinSymbol)
+		}
+		grouped[trade.CoinSymbol] = append(grouped[trade.CoinSymbol], map[string]interface{}{
 			"coin_symbol":      trade.CoinSymbol,
 			"engine_sequence":  trade.EngineSequence,
 			"engine_event_id":  trade.EngineEventID,
@@ -662,11 +674,18 @@ func broadcastSettledTrade(trade *model.Trade, broadcast func(coinSymbol string,
 			"seller_fee":       trade.SellerFee,
 			"seller_fee_asset": trade.SellerFeeAsset,
 			"time":             trade.TradedAt,
-		},
-	})
-	if err != nil {
-		logger.Printf("marshal trade broadcast failed: %v", err)
-		return
+		})
 	}
-	broadcast(trade.CoinSymbol, tradeJSON)
+
+	for _, symbol := range symbolOrder {
+		tradesJSON, err := json.Marshal(map[string]interface{}{
+			"type": "trades",
+			"data": grouped[symbol],
+		})
+		if err != nil {
+			logger.Printf("marshal trades broadcast failed: %v", err)
+			continue
+		}
+		broadcast(symbol, tradesJSON)
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"log"
 	"testing"
@@ -110,7 +111,7 @@ func TestProcessTradeSettlementBroadcastsAppliedTrade(t *testing.T) {
 	}, discardLogger())
 
 	require.NotEmpty(t, broadcast)
-	assert.Contains(t, string(broadcast), `"type":"trade"`)
+	assert.Contains(t, string(broadcast), `"type":"trades"`)
 	assert.Contains(t, string(broadcast), `"coin_symbol":"BTC"`)
 	assert.Contains(t, string(broadcast), `"engine_sequence":3`)
 	assert.Contains(t, string(broadcast), `"engine_event_id":"engine-test-3"`)
@@ -365,18 +366,106 @@ func TestSettleTradeBatchWithFallbackBroadcastsOnlyAppliedOnSuccess(t *testing.T
 	settler := &fakeTradeSettler{}
 	marker := &fakeOutboxMarker{}
 	var broadcasts int
+	var lastPayload []byte
 	before := histogramSampleCount(t, metrics.SettlementBatchSize)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, func(string, []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, func(_ string, msg []byte) {
 		broadcasts++
+		lastPayload = msg
 	}, marker, discardLogger())
 
 	assert.Equal(t, 1, batchSettler.calls)
 	assert.Equal(t, 3, batchSettler.lastLen)
 	assert.Equal(t, 0, settler.calls, "배치 성공 시 단건 경로를 타면 안 된다")
-	assert.Equal(t, 2, broadcasts, "Applied 결과만 브로드캐스트돼야 한다")
+	assert.Equal(t, 1, broadcasts, "같은 심볼의 Applied 결과는 배치 메시지 1건으로 묶여야 한다")
+	assert.Contains(t, string(lastPayload), `"engine_sequence":1`)
+	assert.NotContains(t, string(lastPayload), `"engine_sequence":2`, "Duplicate 결과는 브로드캐스트되면 안 된다")
+	assert.Contains(t, string(lastPayload), `"engine_sequence":3`)
 	assert.Equal(t, before+1, histogramSampleCount(t, metrics.SettlementBatchSize))
+}
+
+func TestBroadcastSettledTradesGroupsBySymbolPreservingOrder(t *testing.T) {
+	btc1 := &model.Trade{CoinSymbol: "BTC", EngineSequence: 1}
+	eth1 := &model.Trade{CoinSymbol: "ETH", EngineSequence: 2}
+	btc2 := &model.Trade{CoinSymbol: "BTC", EngineSequence: 3}
+
+	type call struct {
+		symbol  string
+		payload []byte
+	}
+	var calls []call
+	broadcastSettledTrades([]*model.Trade{btc1, eth1, btc2}, func(symbol string, payload []byte) {
+		calls = append(calls, call{symbol, payload})
+	}, discardLogger())
+
+	require.Len(t, calls, 2, "심볼당 1메시지씩 발행돼야 한다")
+	assert.Equal(t, "BTC", calls[0].symbol, "배치에 먼저 등장한 심볼이 먼저 발행돼야 한다")
+	assert.Equal(t, "ETH", calls[1].symbol)
+
+	var btcMsg struct {
+		Type string `json:"type"`
+		Data []struct {
+			EngineSequence int64 `json:"engine_sequence"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(calls[0].payload, &btcMsg))
+	assert.Equal(t, "trades", btcMsg.Type)
+	require.Len(t, btcMsg.Data, 2, "BTC 배치 내 순서가 보존돼야 한다")
+	assert.Equal(t, int64(1), btcMsg.Data[0].EngineSequence)
+	assert.Equal(t, int64(3), btcMsg.Data[1].EngineSequence)
+
+	var ethMsg struct {
+		Data []struct {
+			EngineSequence int64 `json:"engine_sequence"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(calls[1].payload, &ethMsg))
+	require.Len(t, ethMsg.Data, 1)
+	assert.Equal(t, int64(2), ethMsg.Data[0].EngineSequence)
+}
+
+func TestBroadcastSettledTradesPayloadFormat(t *testing.T) {
+	var broadcast []byte
+	broadcastSettledTrades([]*model.Trade{testTrade()}, func(_ string, msg []byte) {
+		broadcast = msg
+	}, discardLogger())
+
+	require.NotEmpty(t, broadcast)
+
+	var msg struct {
+		Type string           `json:"type"`
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(broadcast, &msg))
+	assert.Equal(t, "trades", msg.Type)
+	require.Len(t, msg.Data, 1)
+
+	// 배열 원소는 기존 "type":"trade" 단건 메시지의 data 객체와 필드 구성이 정확히 동일해야
+	// 프론트 toTradeHistoryEntry가 원소 단위로 그대로 재사용된다.
+	wantFields := []string{
+		"coin_symbol", "engine_sequence", "engine_event_id", "idempotency_key",
+		"price", "quantity", "fee_rate", "buyer_fee", "buyer_fee_asset",
+		"seller_fee", "seller_fee_asset", "time",
+	}
+	gotFields := make([]string, 0, len(msg.Data[0]))
+	for k := range msg.Data[0] {
+		gotFields = append(gotFields, k)
+	}
+	assert.ElementsMatch(t, wantFields, gotFields)
+
+	assert.Contains(t, string(broadcast), `"coin_symbol":"BTC"`)
+	assert.Contains(t, string(broadcast), `"engine_sequence":3`)
+	assert.Contains(t, string(broadcast), `"engine_event_id":"engine-test-3"`)
+	assert.Contains(t, string(broadcast), `"price":"90"`)
+}
+
+func TestBroadcastSettledTradesEmptyIsNoop(t *testing.T) {
+	var broadcasts int
+	broadcastSettledTrades(nil, func(string, []byte) {
+		broadcasts++
+	}, discardLogger())
+	assert.Equal(t, 0, broadcasts)
 }
 
 func counterValue(t *testing.T, c prometheus.Counter) float64 {
