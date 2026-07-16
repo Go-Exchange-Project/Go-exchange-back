@@ -64,7 +64,7 @@ func TestBroadcastSettledTradesEmptyIsNoop(t *testing.T)
 ### Task 3: 문서 + 푸시
 
 - [x] **Step 1**: `docs/refactor/7_B-1c_체결_브로드캐스트_배치화_완료.md` 작성(왜 문제였나: 19번 해석 2 / 어떻게: 스펙 링크 + 요지 / 결과: 테스트 요약, GCP 측정은 다음 사이클 병기). README 현황판에 B-1c 행 추가(✅, 19번에서 발견된 병목의 후속임을 명기), 기존 7번(B-3)은 8번으로 밀림.
-- [ ] **Step 2**: Commit (author→reviewer 절차) + 두 리포 푸시 + `gh run watch`로 백엔드 CI 그린 확인.
+- [x] **Step 2**: Commit (author→reviewer 절차) + 두 리포 푸시 + `gh run watch`로 백엔드 CI 그린 확인. 프론트 `49b9f74`, 백엔드 `83d3f4c`+`f018042`. CI 런 [29493606956](https://github.com/Go-Exchange-Project/Go-exchange-back/actions/runs/29493606956) 전 잡 success.
 
 ---
 
