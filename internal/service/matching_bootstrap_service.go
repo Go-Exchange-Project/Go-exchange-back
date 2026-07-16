@@ -17,7 +17,7 @@ type BootstrapOrderRepository interface {
 
 type MatchingBootstrapService struct {
 	OrderRepository BootstrapOrderRepository
-	MatchingEngine  *matching.MatchingEngine
+	MatchingEngine  matching.Engine
 }
 
 type MatchingBootstrapResult struct {
@@ -27,7 +27,7 @@ type MatchingBootstrapResult struct {
 	StatusCounts map[model.OrderStatus]int
 }
 
-func NewMatchingBootstrapService(orderRepo BootstrapOrderRepository, me *matching.MatchingEngine) *MatchingBootstrapService {
+func NewMatchingBootstrapService(orderRepo BootstrapOrderRepository, me matching.Engine) *MatchingBootstrapService {
 	return &MatchingBootstrapService{
 		OrderRepository: orderRepo,
 		MatchingEngine:  me,
@@ -41,7 +41,7 @@ func (s *MatchingBootstrapService) BootstrapOpenOrders(ctx context.Context) (Mat
 	if s == nil || s.OrderRepository == nil {
 		return MatchingBootstrapResult{}, fmt.Errorf("bootstrap order repository is required")
 	}
-	if s.MatchingEngine == nil || s.MatchingEngine.OrderCh == nil {
+	if s.MatchingEngine == nil {
 		return MatchingBootstrapResult{}, fmt.Errorf("matching engine is required")
 	}
 
@@ -66,8 +66,13 @@ func (s *MatchingBootstrapService) BootstrapOpenOrders(ctx context.Context) (Mat
 			continue
 		}
 
+		submitted := make(chan struct{})
+		go func() {
+			s.MatchingEngine.SubmitOrder(matchingOrder)
+			close(submitted)
+		}()
 		select {
-		case s.MatchingEngine.OrderCh <- matchingOrder:
+		case <-submitted:
 			result.Submitted++
 		case <-ctx.Done():
 			return result, fmt.Errorf("bootstrap open orders interrupted after %d/%d submissions: %w", result.Submitted, result.Loaded, ctx.Err())

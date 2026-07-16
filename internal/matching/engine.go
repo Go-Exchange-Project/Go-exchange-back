@@ -20,6 +20,13 @@ var (
 	ErrSnapshotTimedOut             = errors.New("matching snapshot request timed out")
 )
 
+// Engine은 매칭 엔진의 소비자 표면이다. 구현: MatchingEngine(단일), ShardedEngine(B-3).
+type Engine interface {
+	SubmitOrder(*Order)
+	CancelOrder(CancelOrderCommand) CancelOrderResult
+	RequestOrderBookSnapshot(coinSymbol string, depth int) (OrderBookSnapshot, error)
+}
+
 type MatchingEngine struct {
 	OrderBook   *OrderBook
 	OrderBooks  map[string]*OrderBook
@@ -268,6 +275,9 @@ func truncateSnapshot(snapshot OrderBookSnapshot, depth int) OrderBookSnapshot {
 	}
 	return result
 }
+
+// SubmitOrder는 주문을 엔진 루프에 넘긴다(기존 OrderCh 직접 송신과 동일 의미).
+func (me *MatchingEngine) SubmitOrder(order *Order) { me.OrderCh <- order }
 
 func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {
 	if me == nil || me.CancelCh == nil {

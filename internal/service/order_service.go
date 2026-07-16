@@ -16,7 +16,7 @@ import (
 type OrderService struct {
 	OrderRepository  *repository.OrderRepository
 	WalletRepository *repository.WalletRepository
-	MatchingEngine   *matching.MatchingEngine
+	MatchingEngine   matching.Engine
 	TradeRepository  *repository.TradeRepository
 	LedgerRepository *repository.LedgerRepository
 	MarketRules      *MarketRulesRegistry
@@ -70,7 +70,7 @@ type CompleteMarketOrderInput struct {
 	RemainingQuoteAmount decimal.Decimal
 }
 
-func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.WalletRepository, me *matching.MatchingEngine) *OrderService {
+func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.WalletRepository, me matching.Engine) *OrderService {
 	service := &OrderService{
 		OrderRepository:  repo,
 		WalletRepository: walletRepo,
@@ -103,7 +103,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 	}
 
 	if s.MatchingEngine != nil {
-		s.MatchingEngine.OrderCh <- &matching.Order{
+		s.MatchingEngine.SubmitOrder(&matching.Order{
 			ID:                order.ID,
 			UserID:            order.UserID,
 			CoinSymbol:        order.CoinSymbol,
@@ -116,7 +116,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 			OrderType:         order.OrderType,
 			FilledAmount:      order.FilledAmount,
 			FilledQuoteAmount: order.FilledQuoteAmount,
-		}
+		})
 	}
 
 	return order, nil
