@@ -47,7 +47,7 @@ func (me *MatchingEngine) SubmitOrder(order *Order) { me.OrderCh <- order }
 
 - [x] **Step 2**: 소비자 3곳의 필드·파라미터 타입을 `matching.Engine`으로 바꾸고 `OrderCh <-` 직접 송신을 `SubmitOrder()`로 교체. 부트스트랩의 제출 경로는 먼저 코드를 읽고 같은 방식으로. (`order_book_handler.go`는 이미 자체 `OrderBookSnapshotProvider` 최소 인터페이스를 쓰고 있어 변경 불필요 — `matching.Engine`을 만족하는 어떤 구현체도 그대로 호환됨. `cmd/main.go`도 무변경으로 컴파일됨. 부트스트랩의 `ctx.Done()` 취소 가능 제출은 `SubmitOrder`를 goroutine으로 감싸고 `submitted` 채널로 select해 동일 동작 보존.)
 - [x] **Step 3**: 검증 — `go build ./...` 통과 + **기존 테스트 전부 무수정 통과**: `go test ./... -count=1 -v` → 전 패키지 PASS, SKIP 0(통합 테스트 실행 확인). `git status`로 테스트 파일 무변경 확인(동작 불변의 증거).
-- [ ] **Step 4**: Commit (author→reviewer 절차) — 초안: `refactor(matching): 엔진 소비자 표면을 Engine 인터페이스로 전환`
+- [x] **Step 4**: Commit (author→reviewer 절차) — `refactor(matching): 매칭 엔진 소비자 표면을 Engine 인터페이스로 분리 (B-3 사전 작업)` (`955f5ee`, 푸시 완료)
 
 ---
 
@@ -57,7 +57,7 @@ func (me *MatchingEngine) SubmitOrder(order *Order) { me.OrderCh <- order }
 - Create: `internal/matching/sharded.go`
 - Create: `internal/matching/sharded_test.go`
 
-- [ ] **Step 1: 실패하는 단위 테스트 작성** (기존 engine_test의 짧은 티커 패턴 `newTestEngine` 참고 — ShardedEngine 생성자에 스냅샷 간격 주입이 필요하면 내부 생성 헬퍼로):
+- [x] **Step 1: 실패하는 단위 테스트 작성** (기존 engine_test의 짧은 티커 패턴 `newTestEngine` 참고 — ShardedEngine 생성자에 스냅샷 간격 주입이 필요하면 내부 생성 헬퍼로):
 
 ```go
 // 같은 심볼은 항상 같은 샤드, 서로 다른 첫 심볼 N개는 서로 다른 샤드(라운드로빈 균등)
@@ -76,8 +76,8 @@ func TestShardedEngineSnapshotReadsOwningShardCache(t *testing.T)
 func TestShardedEngineStopDrainsAllShardsThenClosesMergedChannels(t *testing.T)
 ```
 
-- [ ] **Step 2: 실패 확인** — Run: `go test ./internal/matching/... -run TestShardedEngine -v` → FAIL (undefined)
-- [ ] **Step 3: 구현** (`sharded.go`) — 스펙의 구조 그대로:
+- [x] **Step 2: 실패 확인** — Run: `go test ./internal/matching/... -run TestShardedEngine -v` → FAIL (undefined: ShardedEngine, NewShardedEngine)
+- [x] **Step 3: 구현** (`sharded.go`) — 스펙의 구조 그대로:
   - `NewShardedEngine(shardCount int)`: 내부에서 `NewMatchingEngine()` N개 생성. 머지 채널 cap: Execution 1024, Snapshot 256.
   - `shardFor(coinSymbol)`: `assignments.Load` 히트 시 그 샤드, 미스 시 `nextShard` atomic 증가로 후보를 정해 `LoadOrStore`(경쟁 시 먼저 저장된 쪽이 이긴다 — 배정 유일성은 LoadOrStore가 보장).
   - `Start()`: 샤드 전부 `Start()` + 샤드당 Execution/Snapshot 포워더 goroutine(각각 WaitGroup) → 두 그룹 완료 시 각 머지 채널 close, 둘 다 닫히면 `doneCh` close.
@@ -85,9 +85,9 @@ func TestShardedEngineStopDrainsAllShardsThenClosesMergedChannels(t *testing.T)
   - `Stop()`: `sync.Once`로 전 샤드 `Stop()` 호출(도미노는 포워더 종료가 이어받음). `Done()`은 doneCh 반환.
   - `MatchLatencyObserver` 전파: 세터 또는 생성 시 주입으로 전 샤드에 동일 옵저버 설정.
   - 샤드별 채널 길이 접근자(Task 3의 메트릭용): `ShardOrderChannelLens() []func() int` 등.
-- [ ] **Step 4: 통과 확인** — Run: `go test ./internal/matching/... -run TestShardedEngine -v` → PASS
-- [ ] **Step 5: 동시성** — 기존 `engine_concurrency_test.go`의 Stop 배리어 패턴으로 다심볼 동시 제출 테스트 추가 후: `go test ./internal/matching/... -race -count=1` → PASS
-- [ ] **Step 6**: Commit (author→reviewer 절차) — 초안: `feat(matching): 심볼 샤딩 ShardedEngine 추가 (B-3)`
+- [x] **Step 4: 통과 확인** — Run: `go test ./internal/matching/... -run TestShardedEngine -v` → PASS(7개 전부). `TestShardedEngineCancelRoutesToOwningShard`는 최초 시도에서 캐시가 다음 코얼레싱 티커 전이라 실패 → 취소 후 스냅샷을 한 번 더 기다리도록 수정 후 PASS.
+- [x] **Step 5: 동시성** — `TestShardedEngineConcurrentMultiSymbolSubmission_NoRace`(8심볼×20건 동시 제출, Stop/Done 배리어) 추가 후: `go test ./internal/matching/... -race -count=1` → PASS
+- [x] **Step 6**: Commit (author→reviewer 절차) — `feat(matching): 심볼 샤딩 ShardedEngine 추가 (B-3)`
 
 ---
 
@@ -98,8 +98,8 @@ func TestShardedEngineStopDrainsAllShardsThenClosesMergedChannels(t *testing.T)
 - Modify: `internal/metrics/metrics.go` (+ 테스트) — 샤드별 order 채널 GaugeVec `matching_engine_shard_order_channel_length{shard}`
 - Modify: `cmd/main.go`
 
-- [ ] **Step 1**: `EnvGOExchangeEngineShards` + `EngineShardsFromEnv()` (TDD: 기본값=NumCPU/오버라이드/비정상 폴백 3케이스 — `ReconciliationIntervalFromEnv` 테스트 패턴).
-- [ ] **Step 2**: 메트릭 추가(TDD) — 기존 4개 채널 게이지는 유지하되 main에서 **샤드 합산 클로저**로 등록(대시보드 호환), 신규 GaugeVec는 샤드 인덱스 라벨.
+- [x] **Step 1**: `EnvGOExchangeEngineShards` + `EngineShardsFromEnv()` (TDD: 기본값=NumCPU/오버라이드/비정상 폴백 3케이스 — `ReconciliationIntervalFromEnv` 테스트 패턴).
+- [x] **Step 2**: 메트릭 추가(TDD) — 기존 4개 채널 게이지는 유지하되 main에서 **샤드 합산 클로저**로 등록(대시보드 호환), 신규 GaugeVec는 샤드 인덱스 라벨. `RegisterMatchingEngineShardOrderChannelLenGauges`를 `testutil.GatherAndCompare`로 검증.
 - [ ] **Step 3**: `cmd/main.go` 전환 — `matching.NewShardedEngine(config.EngineShardsFromEnv())`, MatchLatencyObserver 주입, 게이지 등록(합산+샤드별), OutboxWriter `Source`·스냅샷 소비 루프·`Stop()/Done()`은 머지 채널/라우터 메서드로 그대로 연결. 기동 로그에 샤드 수 출력.
 - [ ] **Step 4: 전체 검증** — `go build ./...`; `go test ./... -count=1`(통합 포함, SKIP 0 확인); `go test ./internal/matching/... ./internal/service/... ./cmd/... -race -count=1`. 특히 부트스트랩·outbox 통합 테스트 그린(도미노·write-ahead 불변의 증거).
 - [ ] **Step 5**: Commit (author→reviewer 절차) — 초안: `feat(matching): 서버 파이프라인을 ShardedEngine으로 전환 (B-3)`
