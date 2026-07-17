@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -147,4 +148,19 @@ func TestReconciliationIntervalFromEnvUsesOverride(t *testing.T) {
 func TestReconciliationIntervalFromEnvFallsBackOnInvalidValue(t *testing.T) {
 	t.Setenv(EnvGOExchangeReconciliationInterval, "not-a-number")
 	assert.Equal(t, 3600*time.Second, ReconciliationIntervalFromEnv())
+}
+
+func TestEngineShardsFromEnvDefaultsToNumCPU(t *testing.T) {
+	requireUnsetEnv(t, EnvGOExchangeEngineShards)
+	assert.Equal(t, runtime.NumCPU(), EngineShardsFromEnv())
+}
+
+func TestEngineShardsFromEnvUsesOverride(t *testing.T) {
+	t.Setenv(EnvGOExchangeEngineShards, "8")
+	assert.Equal(t, 8, EngineShardsFromEnv())
+}
+
+func TestEngineShardsFromEnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv(EnvGOExchangeEngineShards, "not-a-number")
+	assert.Equal(t, runtime.NumCPU(), EngineShardsFromEnv())
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -14,6 +15,7 @@ const (
 	EnvGOExchangeEnablePprof            = "GOEXCHANGE_ENABLE_PPROF"
 	EnvGOExchangeSettlementWorkers      = "GOEXCHANGE_SETTLEMENT_WORKERS"
 	EnvGOExchangeReconciliationInterval = "GOEXCHANGE_RECONCILIATION_INTERVAL"
+	EnvGOExchangeEngineShards           = "GOEXCHANGE_ENGINE_SHARDS"
 )
 
 const defaultSettlementWorkers = 10
@@ -80,4 +82,10 @@ func SettlementWorkersFromEnv() int {
 func ReconciliationIntervalFromEnv() time.Duration {
 	seconds := parsePositiveIntEnv(EnvGOExchangeReconciliationInterval, defaultReconciliationIntervalSeconds)
 	return time.Duration(seconds) * time.Second
+}
+
+// EngineShardsFromEnv은 매칭 엔진 샤드 수를 반환한다. 매칭은 CPU가 아니라
+// 직렬화가 병목이므로(20번 벤치마크) 기본값은 코어 수다.
+func EngineShardsFromEnv() int {
+	return parsePositiveIntEnv(EnvGOExchangeEngineShards, runtime.NumCPU())
 }

@@ -67,17 +67,20 @@ func main() {
 		log.Fatal("db migration failed: ", err)
 	}
 
-	me := matching.NewMatchingEngine()
-	me.MatchLatencyObserver = func(d time.Duration) {
+	engineShards := config.EngineShardsFromEnv()
+	me := matching.NewShardedEngine(engineShards)
+	me.SetMatchLatencyObserver(func(d time.Duration) {
 		metrics.OrderPipelineMatchLatency.Observe(d.Seconds())
-	}
+	})
 	metrics.RegisterMatchingEngineChannelLenGauges(
-		func() int { return len(me.OrderCh) },
-		func() int { return len(me.CancelCh) },
-		func() int { return len(me.ExecutionCh) },
-		func() int { return len(me.SnapshotCh) },
+		me.OrderChannelLen,
+		me.CancelChannelLen,
+		me.ExecutionChannelLen,
+		me.SnapshotChannelLen,
 	)
+	metrics.RegisterMatchingEngineShardOrderChannelLenGauges(me.ShardOrderChannelLens())
 	me.Start()
+	log.Printf("matching engine sharded: shards=%d", engineShards)
 
 	hub := ws.NewHub()
 	go hub.Run()

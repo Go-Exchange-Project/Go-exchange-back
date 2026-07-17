@@ -100,9 +100,9 @@ func TestShardedEngineStopDrainsAllShardsThenClosesMergedChannels(t *testing.T)
 
 - [x] **Step 1**: `EnvGOExchangeEngineShards` + `EngineShardsFromEnv()` (TDD: 기본값=NumCPU/오버라이드/비정상 폴백 3케이스 — `ReconciliationIntervalFromEnv` 테스트 패턴).
 - [x] **Step 2**: 메트릭 추가(TDD) — 기존 4개 채널 게이지는 유지하되 main에서 **샤드 합산 클로저**로 등록(대시보드 호환), 신규 GaugeVec는 샤드 인덱스 라벨. `RegisterMatchingEngineShardOrderChannelLenGauges`를 `testutil.GatherAndCompare`로 검증.
-- [ ] **Step 3**: `cmd/main.go` 전환 — `matching.NewShardedEngine(config.EngineShardsFromEnv())`, MatchLatencyObserver 주입, 게이지 등록(합산+샤드별), OutboxWriter `Source`·스냅샷 소비 루프·`Stop()/Done()`은 머지 채널/라우터 메서드로 그대로 연결. 기동 로그에 샤드 수 출력.
-- [ ] **Step 4: 전체 검증** — `go build ./...`; `go test ./... -count=1`(통합 포함, SKIP 0 확인); `go test ./internal/matching/... ./internal/service/... ./cmd/... -race -count=1`. 특히 부트스트랩·outbox 통합 테스트 그린(도미노·write-ahead 불변의 증거).
-- [ ] **Step 5**: Commit (author→reviewer 절차) — 초안: `feat(matching): 서버 파이프라인을 ShardedEngine으로 전환 (B-3)`
+- [x] **Step 3**: `cmd/main.go` 전환 — `matching.NewShardedEngine(config.EngineShardsFromEnv())`, MatchLatencyObserver 주입, 게이지 등록(합산+샤드별), OutboxWriter `Source`·스냅샷 소비 루프·`Stop()/Done()`은 머지 채널/라우터 메서드로 그대로 연결. 기동 로그에 샤드 수 출력.
+- [x] **Step 4: 전체 검증** — `go build ./...` + `go vet` 클린; `go test ./... -count=1 -v`(통합 포함) → 12개 패키지 전부 ok, SKIP 0, FAIL 0; `go test ./internal/matching/... ./internal/service/... ./cmd/... -race -count=1` PASS. 부트스트랩·outbox 통합 테스트 그린(도미노·write-ahead 불변의 증거).
+- [x] **Step 5**: Commit (author→reviewer 절차) — `feat(matching): 서버 파이프라인을 ShardedEngine으로 전환 (B-3)`
 
 ---
 

@@ -112,3 +112,17 @@ func RegisterMatchingEngineChannelLenGauges(orderLen, cancelLen, executionLen, s
 		}, func() float64 { return float64(g.lenFn()) })
 	}
 }
+
+// RegisterMatchingEngineShardOrderChannelLenGauges는 샤딩된 매칭 엔진(B-3)의
+// 샤드별 order 채널 적체를 노출합니다. 20번 벤치마크가 단일 엔진의 채널 게이지로
+// 병목을 잡아낸 선례를 따라, 샤딩 후에도 샤드별 불균형을 관측할 수 있게 합니다.
+func RegisterMatchingEngineShardOrderChannelLenGauges(orderLenFns []func() int) {
+	for i, lenFn := range orderLenFns {
+		lenFn := lenFn
+		promauto.NewGaugeFunc(prometheus.GaugeOpts{
+			Name:        "matching_engine_shard_order_channel_length",
+			Help:        "Current number of buffered items in a single shard's order channel (B-3).",
+			ConstLabels: prometheus.Labels{"shard": strconv.Itoa(i)},
+		}, func() float64 { return float64(lenFn()) })
+	}
+}
