@@ -203,6 +203,7 @@ func main() {
 			forwardToSettlementQueue(settlementQueues, outboxEvent)
 		},
 	}
+	log.Printf("outbox writer batch size=%d", outboxWriter.BatchSize)
 	outboxWriterDone := make(chan struct{})
 	go func() {
 		outboxWriter.Run()
