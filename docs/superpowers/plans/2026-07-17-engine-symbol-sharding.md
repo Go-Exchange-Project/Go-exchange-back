@@ -108,8 +108,8 @@ func TestShardedEngineStopDrainsAllShardsThenClosesMergedChannels(t *testing.T)
 
 ### Task 4: 문서 + 푸시
 
-- [ ] **Step 1**: `docs/refactor/8_B-3_매칭_엔진_심볼_샤딩_완료.md` (왜: 20번 판정 / 어떻게: 스펙 요지 / 결과: 테스트 요약 + "성능 실증은 다음 측정 사이클" 병기 — 처리량 수치를 주장하지 않는다). README 8번 ✅.
-- [ ] **Step 2**: Commit (author→reviewer 절차) + 푸시 + `gh run watch` CI 그린.
+- [x] **Step 1**: `docs/refactor/8_B-3_매칭_엔진_심볼_샤딩_완료.md` (왜: 20번 판정 / 어떻게: 스펙 요지 / 결과: 테스트 요약 + "성능 실증은 다음 측정 사이클" 병기 — 처리량 수치를 주장하지 않는다). README 8번 ✅.
+- [x] **Step 2**: Commit (author→reviewer 절차) + 푸시 + CI 그린 확인. 커밋: `632455a`(코어), `f3d2818`(파이프라인 전환), 문서 커밋은 이 커밋.
 
 ---
 
