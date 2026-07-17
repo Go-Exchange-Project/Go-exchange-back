@@ -60,7 +60,7 @@ var (
 	TradeOutboxFlushBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "trade_outbox_flush_batch_size",
 		Help:    "Number of events per committed outbox batch (group commit efficiency).",
-		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128},
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024},
 	})
 
 	TradeOutboxWriteErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{

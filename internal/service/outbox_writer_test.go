@@ -185,6 +185,36 @@ func TestOutboxWriterFlushesByBatchSizeAndForwardsInOrder(t *testing.T) {
 	}
 }
 
+// 21번 벤치마크 후속: 상한 512(기본값)에서도 배치가 상한까지 가득 채워져 한
+// 번에 커밋되는지 — 대배치 경로의 수집·순서 계약이 소배치와 동일함을 검증한다.
+func TestOutboxWriterFillsLargeBatchToCap(t *testing.T) {
+	repo := &fakeOutboxInserter{}
+	collector := &forwardCollector{}
+	source := make(chan matching.ExecutionEvent, 600)
+	writer := &OutboxWriter{
+		Repo:          repo,
+		Source:        source,
+		Forward:       collector.forward,
+		BatchSize:     512,
+		FlushInterval: time.Hour, // 배치 크기만으로 flush되게
+		Logger:        discardServiceLogger(),
+	}
+
+	for seq := int64(1); seq <= 600; seq++ {
+		source <- outboxTestTrade("BTC", seq)
+	}
+	close(source)
+	done := runOutboxWriter(t, writer)
+	waitOutboxWriterDone(t, done)
+
+	assert.Equal(t, []int{512, 88}, repo.batchSizes(), "상한 512 배치 + 잔여 88 배치로 커밋돼야 한다")
+	forwarded := collector.snapshot()
+	require.Len(t, forwarded, 600)
+	for i, event := range forwarded {
+		assert.Equal(t, int64(i+1), event.Event.Trade.EngineSequence, "대배치에서도 순서가 보존돼야 한다")
+	}
+}
+
 func TestOutboxWriterFlushesOnIntervalWithoutFullBatch(t *testing.T) {
 	repo := &fakeOutboxInserter{}
 	collector := &forwardCollector{}

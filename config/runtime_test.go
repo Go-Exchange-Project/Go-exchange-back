@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"runtime"
 	"testing"
 	"time"
 
@@ -150,9 +149,24 @@ func TestReconciliationIntervalFromEnvFallsBackOnInvalidValue(t *testing.T) {
 	assert.Equal(t, 3600*time.Second, ReconciliationIntervalFromEnv())
 }
 
-func TestEngineShardsFromEnvDefaultsToNumCPU(t *testing.T) {
+func TestOutboxBatchSizeFromEnvDefaultsTo512(t *testing.T) {
+	requireUnsetEnv(t, EnvGOExchangeOutboxBatchSize)
+	assert.Equal(t, 512, OutboxBatchSizeFromEnv())
+}
+
+func TestOutboxBatchSizeFromEnvUsesOverride(t *testing.T) {
+	t.Setenv(EnvGOExchangeOutboxBatchSize, "64")
+	assert.Equal(t, 64, OutboxBatchSizeFromEnv())
+}
+
+func TestOutboxBatchSizeFromEnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv(EnvGOExchangeOutboxBatchSize, "not-a-number")
+	assert.Equal(t, 512, OutboxBatchSizeFromEnv())
+}
+
+func TestEngineShardsFromEnvDefaultsToSingleShard(t *testing.T) {
 	requireUnsetEnv(t, EnvGOExchangeEngineShards)
-	assert.Equal(t, runtime.NumCPU(), EngineShardsFromEnv())
+	assert.Equal(t, 1, EngineShardsFromEnv())
 }
 
 func TestEngineShardsFromEnvUsesOverride(t *testing.T) {
@@ -162,5 +176,5 @@ func TestEngineShardsFromEnvUsesOverride(t *testing.T) {
 
 func TestEngineShardsFromEnvFallsBackOnInvalidValue(t *testing.T) {
 	t.Setenv(EnvGOExchangeEngineShards, "not-a-number")
-	assert.Equal(t, runtime.NumCPU(), EngineShardsFromEnv())
+	assert.Equal(t, 1, EngineShardsFromEnv())
 }

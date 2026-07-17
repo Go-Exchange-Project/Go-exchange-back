@@ -196,8 +196,9 @@ func main() {
 	// 심볼 파티셔닝 큐로 전달한다. 엔진이 ExecutionCh를 닫으면(graceful shutdown)
 	// 잔여 배치를 flush하고 큐를 닫아 워커 종료를 전파한다.
 	outboxWriter := &service.OutboxWriter{
-		Repo:   outboxRepo,
-		Source: me.ExecutionCh,
+		Repo:      outboxRepo,
+		Source:    me.ExecutionCh,
+		BatchSize: config.OutboxBatchSizeFromEnv(),
 		Forward: func(outboxEvent service.OutboxEvent) {
 			forwardToSettlementQueue(settlementQueues, outboxEvent)
 		},

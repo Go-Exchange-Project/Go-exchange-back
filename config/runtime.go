@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -16,10 +15,12 @@ const (
 	EnvGOExchangeSettlementWorkers      = "GOEXCHANGE_SETTLEMENT_WORKERS"
 	EnvGOExchangeReconciliationInterval = "GOEXCHANGE_RECONCILIATION_INTERVAL"
 	EnvGOExchangeEngineShards           = "GOEXCHANGE_ENGINE_SHARDS"
+	EnvGOExchangeOutboxBatchSize        = "GOEXCHANGE_OUTBOX_BATCH_SIZE"
 )
 
 const defaultSettlementWorkers = 10
 const defaultReconciliationIntervalSeconds = 3600
+const defaultOutboxBatchSize = 512
 
 var defaultCORSAllowedOrigins = []string{
 	"http://localhost:3000",
@@ -84,8 +85,17 @@ func ReconciliationIntervalFromEnv() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// EngineShardsFromEnv은 매칭 엔진 샤드 수를 반환한다. 매칭은 CPU가 아니라
-// 직렬화가 병목이므로(20번 벤치마크) 기본값은 코어 수다.
+// EngineShardsFromEnv은 매칭 엔진 샤드 수를 반환한다. 기본값 1 — 21번
+// 벤치마크에서 병목이 다운스트림(outbox→DB)일 때 샤드 N개는 주문 버퍼
+// N×1024로 깊어져 p95만 악화(+57%)됨을 실측했다. 매칭이 실제 병목이 되면
+// 이 환경변수로 확대한다.
 func EngineShardsFromEnv() int {
-	return parsePositiveIntEnv(EnvGOExchangeEngineShards, runtime.NumCPU())
+	return parsePositiveIntEnv(EnvGOExchangeEngineShards, 1)
+}
+
+// OutboxBatchSizeFromEnv는 outbox writer의 그룹커밋 배치 상한을 반환한다.
+// 21번 벤치마크에서 상한 64가 포화(평균 54.4건/flush, ≈66ms/flush)돼 write-ahead
+// 관문이 파이프라인 전체를 캡했다 — 기본 512로 왕복·fsync 횟수를 1/8로 줄인다.
+func OutboxBatchSizeFromEnv() int {
+	return parsePositiveIntEnv(EnvGOExchangeOutboxBatchSize, defaultOutboxBatchSize)
 }

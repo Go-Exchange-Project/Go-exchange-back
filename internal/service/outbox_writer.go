@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	defaultOutboxBatchSize      = 64
+	// 21번 벤치마크: 상한 64가 포화(평균 54.4건/flush)돼 write-ahead 관문이
+	// 파이프라인을 캡했다. 512는 왕복·fsync 횟수를 1/8로 줄인다(파라미터
+	// ~3.6k « Postgres 한도 65,535). 운영 조정은 GOEXCHANGE_OUTBOX_BATCH_SIZE.
+	defaultOutboxBatchSize      = 512
 	defaultOutboxFlushInterval  = 5 * time.Millisecond
 	defaultOutboxRetryBaseDelay = 50 * time.Millisecond
 	maxOutboxRetryDelay         = time.Second
