@@ -74,6 +74,15 @@ func outboxTestDone() matching.ExecutionEvent {
 	}}
 }
 
+func outboxTestCancelled() matching.ExecutionEvent {
+	return matching.ExecutionEvent{OrderCancelled: &matching.OrderCancelled{
+		OrderID:       42,
+		CoinSymbol:    "BTC",
+		Side:          model.OrderSideBuy,
+		EngineEventID: "engine-test-outbox-cancel",
+	}}
+}
+
 // 직렬화 왕복
 
 func TestTradeOutboxEventRoundTripTrade(t *testing.T) {
@@ -104,6 +113,23 @@ func TestTradeOutboxEventRoundTripMarketOrderDone(t *testing.T) {
 	require.NotNil(t, restored.MarketOrderDone)
 	assert.Equal(t, uint(42), restored.MarketOrderDone.OrderID)
 	assert.True(t, restored.MarketOrderDone.RemainingQuoteAmount.Equal(decimal.NewFromInt(3)))
+}
+
+func TestTradeOutboxEventRoundTripOrderCancelled(t *testing.T) {
+	original := outboxTestCancelled()
+	row, err := NewTradeOutboxEvent(original)
+	require.NoError(t, err)
+	assert.Equal(t, model.TradeOutboxEventTypeOrderCancelled, row.EventType)
+	assert.Equal(t, "BTC", row.CoinSymbol)
+	assert.Equal(t, "engine-test-outbox-cancel", row.EngineEventID)
+
+	restored, err := ExecutionEventFromOutbox(*row)
+	require.NoError(t, err)
+	require.NotNil(t, restored.OrderCancelled)
+	assert.Equal(t, uint(42), restored.OrderCancelled.OrderID)
+	assert.Equal(t, "BTC", restored.OrderCancelled.CoinSymbol)
+	assert.Equal(t, model.OrderSideBuy, restored.OrderCancelled.Side)
+	assert.Equal(t, "engine-test-outbox-cancel", restored.OrderCancelled.EngineEventID)
 }
 
 func TestNewTradeOutboxEventRejectsEmptyEvent(t *testing.T) {

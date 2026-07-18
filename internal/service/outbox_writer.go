@@ -152,6 +152,18 @@ func NewTradeOutboxEvent(event matching.ExecutionEvent) (*model.TradeOutboxEvent
 			Payload:    payload,
 			Status:     model.TradeOutboxStatusPending,
 		}, nil
+	case event.OrderCancelled != nil:
+		payload, err := json.Marshal(event.OrderCancelled)
+		if err != nil {
+			return nil, fmt.Errorf("marshal order cancelled outbox payload: %w", err)
+		}
+		return &model.TradeOutboxEvent{
+			EventType:     model.TradeOutboxEventTypeOrderCancelled,
+			CoinSymbol:    event.OrderCancelled.CoinSymbol,
+			EngineEventID: event.OrderCancelled.EngineEventID,
+			Payload:       payload,
+			Status:        model.TradeOutboxStatusPending,
+		}, nil
 	default:
 		return nil, errors.New("execution event has neither trade nor market order done")
 	}
@@ -172,6 +184,12 @@ func ExecutionEventFromOutbox(row model.TradeOutboxEvent) (matching.ExecutionEve
 			return matching.ExecutionEvent{}, fmt.Errorf("unmarshal market order done outbox payload %d: %w", row.ID, err)
 		}
 		return matching.ExecutionEvent{MarketOrderDone: &done}, nil
+	case model.TradeOutboxEventTypeOrderCancelled:
+		var cancelled matching.OrderCancelled
+		if err := json.Unmarshal(row.Payload, &cancelled); err != nil {
+			return matching.ExecutionEvent{}, fmt.Errorf("unmarshal order cancelled outbox payload %d: %w", row.ID, err)
+		}
+		return matching.ExecutionEvent{OrderCancelled: &cancelled}, nil
 	default:
 		return matching.ExecutionEvent{}, fmt.Errorf("unknown trade outbox event type %q (id %d)", row.EventType, row.ID)
 	}
