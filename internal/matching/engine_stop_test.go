@@ -68,6 +68,55 @@ func TestEngineStopDrainsQueuedOrdersThenClosesChannels(t *testing.T) {
 	}
 }
 
+// TestEngineStopDrainsQueuedCancelThenClosesChannels는 Task 1F Step 3(셧다운 도미노)의
+// 검증이다: drainPendingWork는 OrderCh와 완전히 동일한 구조로 CancelCh도 드레인한다
+// (engine.go의 select case cmd := <-me.CancelCh는 OrderCh 케이스와 나란히 있고
+// OrderCancelled에 대한 타입 분기가 없다). 이 테스트는 취소 대상 주문을 Start() 전에
+// 오더북에 직접 심어(동시성 걱정 없는 시점) "체결 대기 중" 상태를 레이스 없이 만든
+// 뒤, CancelCh에 커맨드를 큐잉하자마자 Stop()을 호출해 — 위 TestEngineStopDrains
+// QueuedOrdersThenClosesChannels가 Trade로 증명한 것과 대칭으로 — OrderCancelled가
+// 유실 없이 ExecutionCh를 통해 방출된 뒤에야 채널이 닫힘을 증명한다.
+func TestEngineStopDrainsQueuedCancelThenClosesChannels(t *testing.T) {
+	me := newTestEngine()
+
+	snapshotsDone := make(chan struct{})
+	go func() {
+		for range me.SnapshotCh {
+		}
+		close(snapshotsDone)
+	}()
+
+	// Start() 전이라 엔진 goroutine이 아직 없다 — 오더북 직접 시딩이 안전하다.
+	resting := stopTestLimitOrder(1, model.OrderSideBuy, 100, 5)
+	me.GetOrderBook(resting.CoinSymbol).AddOrder(resting)
+
+	me.Start()
+	me.CancelCh <- CancelOrderCommand{
+		CoinSymbol: resting.CoinSymbol,
+		OrderID:    resting.ID,
+		Side:       resting.Side,
+		Price:      resting.Price,
+	}
+	me.Stop()
+	waitEngineDone(t, me)
+
+	var cancels int
+	for event := range me.ExecutionCh { // close까지 소비
+		if event.OrderCancelled != nil {
+			cancels++
+			assert.Equal(t, resting.ID, event.OrderCancelled.OrderID)
+			assert.Equal(t, "BTC", event.OrderCancelled.CoinSymbol)
+		}
+	}
+	require.Equal(t, 1, cancels, "Stop 전에 큐잉된 취소 커맨드의 OrderCancelled가 유실되면 안 된다")
+
+	select {
+	case <-snapshotsDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot channel was not closed")
+	}
+}
+
 func TestEngineStopIsIdempotent(t *testing.T) {
 	me := newTestEngine()
 	me.Start()
