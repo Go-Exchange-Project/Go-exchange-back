@@ -85,6 +85,16 @@ func assertNoTrade(t *testing.T, me *MatchingEngine) {
 	}
 }
 
+func assertNoExecutionEvent(t *testing.T, me *MatchingEngine) {
+	t.Helper()
+
+	select {
+	case event := <-me.ExecutionCh:
+		t.Fatalf("unexpected execution event: %+v", event)
+	default:
+	}
+}
+
 func requireCancelSnapshot(t *testing.T, me *MatchingEngine) OrderBookSnapshot {
 	t.Helper()
 
@@ -673,4 +683,71 @@ func TestCancelOrder_DoesNotRemoveDifferentSymbolOrder(t *testing.T) {
 	require.Error(t, result.Err)
 	assert.True(t, errors.Is(result.Err, ErrCancelOrderNotFound))
 	assert.Equal(t, 1, me.GetOrderBook("BTC").SellOrders.Len())
+}
+
+func TestCancelOrder_EmitsOrderCancelledEvent(t *testing.T) {
+	me := newTestEngine()
+	me.Start()
+
+	order := testOrder(30, "BTC", model.OrderSideBuy, 50000, 2)
+	submitAndWaitSnapshot(t, me, order)
+
+	result := me.CancelOrder(CancelOrderCommand{
+		CoinSymbol: "BTC",
+		OrderID:    order.ID,
+		Side:       order.Side,
+		Price:      order.Price,
+	})
+	require.NoError(t, result.Err)
+	require.True(t, result.Removed)
+
+	event := requireNextExecutionEvent(t, me)
+	require.NotNil(t, event.OrderCancelled)
+	assert.Equal(t, order.ID, event.OrderCancelled.OrderID)
+	assert.Equal(t, "BTC", event.OrderCancelled.CoinSymbol)
+	assert.Equal(t, model.OrderSideBuy, event.OrderCancelled.Side)
+	assert.NotEmpty(t, event.OrderCancelled.EngineEventID)
+}
+
+func TestCancelOrder_NotRemoved_NoOrderCancelledEvent(t *testing.T) {
+	me := newTestEngine()
+	me.Start()
+
+	result := me.CancelOrder(CancelOrderCommand{
+		CoinSymbol: "BTC",
+		OrderID:    999,
+		Side:       model.OrderSideBuy,
+		Price:      decimal.NewFromInt(50000),
+	})
+	require.Error(t, result.Err)
+	assert.False(t, result.Removed)
+
+	assertNoExecutionEvent(t, me)
+}
+
+func TestCancelOrder_PartialFillThenCancel_TradeBeforeOrderCancelled(t *testing.T) {
+	me := newTestEngine()
+	me.Start()
+
+	sellOrder := testOrder(40, "BTC", model.OrderSideSell, 50000, 5)
+	submitAndWaitSnapshot(t, me, sellOrder)
+
+	buyOrder := testOrder(41, "BTC", model.OrderSideBuy, 50000, 2)
+	submitAndWaitSnapshot(t, me, buyOrder)
+
+	tradeEvent := requireNextExecutionEvent(t, me)
+	require.NotNil(t, tradeEvent.Trade)
+
+	result := me.CancelOrder(CancelOrderCommand{
+		CoinSymbol: "BTC",
+		OrderID:    sellOrder.ID,
+		Side:       sellOrder.Side,
+		Price:      sellOrder.Price,
+	})
+	require.NoError(t, result.Err)
+	require.True(t, result.Removed)
+
+	cancelEvent := requireNextExecutionEvent(t, me)
+	require.NotNil(t, cancelEvent.OrderCancelled)
+	assert.Equal(t, sellOrder.ID, cancelEvent.OrderCancelled.OrderID)
 }

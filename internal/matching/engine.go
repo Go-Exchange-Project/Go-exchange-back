@@ -75,6 +75,7 @@ type CancelOrderResult struct {
 type ExecutionEvent struct {
 	Trade           *model.Trade
 	MarketOrderDone *MarketOrderDone
+	OrderCancelled  *OrderCancelled
 }
 
 type MarketOrderDone struct {
@@ -85,6 +86,15 @@ type MarketOrderDone struct {
 	FilledQuoteAmount    decimal.Decimal
 	RemainingAmount      decimal.Decimal
 	RemainingQuoteAmount decimal.Decimal
+}
+
+// OrderCancelled는 취소로 오더북에서 실제 제거된 주문의 실행 이벤트 페이로드다.
+// ProcessOrderCancellation이 OrderID로 DB에서 주문을 재조회하므로 식별자만 담는다.
+type OrderCancelled struct {
+	OrderID       uint
+	CoinSymbol    string
+	Side          model.OrderSide
+	EngineEventID string
 }
 
 type OrderBookSnapshot struct {
@@ -167,6 +177,7 @@ func (me *MatchingEngine) processCancel(cmd CancelOrderCommand) {
 	}
 	if result.Removed {
 		me.markDirty(cmd.CoinSymbol)
+		me.emitOrderCancelled(cmd)
 	}
 }
 
@@ -534,6 +545,21 @@ func (me *MatchingEngine) emitMarketOrderDone(order *Order) {
 			FilledQuoteAmount:    order.FilledQuoteAmount,
 			RemainingAmount:      order.Amount,
 			RemainingQuoteAmount: order.QuoteAmount,
+		},
+	}
+}
+
+func (me *MatchingEngine) emitOrderCancelled(cmd CancelOrderCommand) {
+	if me.ExecutionCh == nil {
+		return
+	}
+	_, eventID := me.nextTradeEvent()
+	me.ExecutionCh <- ExecutionEvent{
+		OrderCancelled: &OrderCancelled{
+			OrderID:       cmd.OrderID,
+			CoinSymbol:    cmd.CoinSymbol,
+			Side:          cmd.Side,
+			EngineEventID: eventID,
 		},
 	}
 }
