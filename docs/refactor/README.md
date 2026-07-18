@@ -25,15 +25,16 @@
 | 6 | **B-4** | 정산 그룹커밋(여러 체결을 한 트랜잭션으로). 심볼 파티셔닝(A-1)이 전제 | ✅ 완료 (GCP 측정 완료 — [19번](../benchmarks/19-2026-07-16-b1-b4-batch-remeasurement.md): 배치 97%가 상한 32건 도달, fallback 0) | [6_B-4_정산_그룹커밋_완료.md](6_B-4_정산_그룹커밋_완료.md) |
 | 7 | **B-1c** | 체결 WS 브로드캐스트를 정산 배치(B-4) 단위로 묶어 발행(`{"type":"trades","data":[...]}`). [19번 벤치마크](../benchmarks/19-2026-07-16-b1-b4-batch-remeasurement.md) 해석 2가 드러낸 fanout 병목의 후속 | ✅ 완료 (GCP 측정 완료 — [20번](../benchmarks/20-2026-07-16-multi-symbol-remeasurement.md): 다중 심볼 부하에서 WS 결박 해소 기준(4/3 > 2/1) 충족, 강제 연결 종료도 A 1,389회 → B 0건) | [7_B-1c_체결_브로드캐스트_배치화_완료.md](7_B-1c_체결_브로드캐스트_배치화_완료.md) |
 | 8 | **B-3** | 매칭 엔진 심볼 샤딩(first-seen 라운드로빈 → N개 엔진 goroutine, 기본 NumCPU) | ✅ 완료 — **단, [21번 측정](../benchmarks/21-2026-07-17-b3-sharding-remeasurement.md) 결과 성능 효과 없음**(처리량 −2%, 샤드8은 p95 +57%). 20번의 "엔진 직렬화 캡" 판정은 오진 — 채널 적체는 outbox writer→DB 백프레셔의 역전파였다. 코드는 무해(샤드1≈샤드8)라 유지, 매칭이 실제 병목이 되는 날의 기반 | [8_B-3_매칭_엔진_심볼_샤딩_완료.md](8_B-3_매칭_엔진_심볼_샤딩_완료.md) |
-| 9 | **OutboxWriter 처리율** | write-ahead 관문의 그룹커밋 배치 상한 64 → 512(`GOEXCHANGE_OUTBOX_BATCH_SIZE`). 21번이 실측한 flush 포화 캡(≈827 events/s)의 해소. 라이더: 기본 엔진 샤드 수 1로 하향(p95 방어) | ✅ 완료 (측정은 22번 사이클 — env 스위프 same-binary A/B) | [9_OutboxWriter_처리율_완료.md](9_OutboxWriter_처리율_완료.md) |
+| 9 | **OutboxWriter 처리율** | write-ahead 관문의 그룹커밋 배치 상한 64 → 512(`GOEXCHANGE_OUTBOX_BATCH_SIZE`). 21번이 실측한 flush 포화 캡(≈827 events/s)의 해소. 라이더: 기본 엔진 샤드 수 1로 하향(p95 방어) | ✅ 완료 — **[22번 측정](../benchmarks/22-2026-07-18-outbox-ab-and-spike.md)**: flush 포화 해소 실증(85%→36.7%, batch 64→512), 단 execution 채널은 여전히 만석·처리량 상승 없음(다음 병목 = DB CPU 확정, idle 4.5%). 병렬 writer는 기각 | [9_OutboxWriter_처리율_완료.md](9_OutboxWriter_처리율_완료.md) |
 | 10 | **A-4 + 시장가 매수 반올림 오차** | 22번 사전 작업 로컬 스모크가 실증한 정합성 버그 2건: 취소-체결 레이스(취소 시퀀서화로 근본 해결), 시장가 매수 초과 소진(엔진 클램프 quantity floor + 실패 기록 CHECK clamp 안전망) | ✅ 완료 (재현→해소 통합 테스트, 실제 엔진+outbox+정산 파이프라인 `-race` 검증, 리컨실리에이션 위반 0) | [10_A-4_취소체결레이스와_시장가매수반올림오차_완료.md](10_A-4_취소체결레이스와_시장가매수반올림오차_완료.md) |
 
 ## 백로그 (순서 미정, 조건 충족 시 승격)
 
 | 항목 | 내용 | 승격 조건 |
 |---|---|---|
-| ~~OutboxWriter 처리율~~ | ~~배치 상한 상향~~ ✅ 9번으로 승격·완료(상한 512). **병렬 writer(2단계)는 잔여 후보** — 22번 측정에서 새 상한에도 flush 포화 + execution 채널 만석이면 진행 | 22번 측정 결과 |
-| **주문 생성 경로 DB 왕복** | pprof 최대 지분(CreateOrder 47%, 지갑 홀드 23.5%), DB CPU 258%의 주요 소비자 — B-4식 왕복 병합이 후보 | 승격 권고 — [21번](../benchmarks/21-2026-07-17-b3-sharding-remeasurement.md) 실측 |
+| ~~OutboxWriter 처리율~~ | ~~배치 상한 상향~~ ✅ 9번으로 승격·완료(상한 512). ~~병렬 writer(2단계)~~ | **기각** — [22번 측정](../benchmarks/22-2026-07-18-outbox-ab-and-spike.md): batch 512·1024 모두 flush 포화 아님(36.7%/22.3%)인데 채널은 여전히 만석 — 병목이 DB 자체 용량으로 넘어가 병렬 writer로 풀리지 않음 |
+| **주문 생성 경로 DB 왕복** | pprof 최대 지분(CreateOrder 47~50%, 지갑 홀드 23.5~26.7%), DB CPU의 주요 소비자 — B-4식 왕복 병합이 후보 | 승격 권고 — [21번](../benchmarks/21-2026-07-17-b3-sharding-remeasurement.md)·[22번](../benchmarks/22-2026-07-18-outbox-ab-and-spike.md) 재확인(DB CPU idle 4.5%까지 근접) |
+| **CancelCh 용량/취소 우선순위** | 극단 스파이크(VU 300→3000 급등)에서 취소 커맨드가 `CancelCh`(1024) 포화로 1초 타임아웃 → 500, 취소 시도의 43.9% 실패(A-4 레이스 재발 아님 — 정합성 검사 5항목 전부 0으로 확인된 별개의 가용성 이슈) | 신규 — [22번 측정](../benchmarks/22-2026-07-18-outbox-ab-and-spike.md) 실측. 승격 검토 권고 |
 | ~~기본 엔진 샤드 수 1로 하향~~ | ~~기본 1, env로 필요 시 확대~~ ✅ 9번의 라이더로 완료 | — |
 | ~~정산 워커 불균형~~ | ~~해시 파티션 불균형(20번 관찰)~~ — 21번에서 워커 큐 상시 근공(近空) 확인, 병목 아님 | 승격하지 않음 |
 | 이중 필드 마이그레이션 | `krw`/`quantity` ↔ `available`/`locked` 통합 | 리컨실리에이션이 `legacy_mismatch`를 실제 보고하기 시작하면 |

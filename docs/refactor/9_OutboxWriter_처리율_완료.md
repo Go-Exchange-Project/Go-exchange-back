@@ -42,4 +42,10 @@ shutdown 전부 그대로 두고:
 
 ## 남은 것
 
-- **22번 GCP 재측정** — 위 판정 4개.
+없음 — [22번 벤치마크](../benchmarks/22-2026-07-18-outbox-ab-and-spike.md)에서
+판정 4개 전부 답했다: ① flush 포화 해제 실증(85%→36.7%→22.3%, batch
+64→512→1024) ② execution 채널 만석은 풀리지 않음(다음 병목이 DB CPU로
+넘어감) ③ 처리량 상승 없음(오히려 −2.6%/−1.6%, p95는 악화) ④ 다음 병목 =
+DB CPU 확정(idle 4.5%, pprof가 21번과 동일하게 `CreateOrder`/`holdOrderAssets`
+지목). **병렬 writer(2단계)는 기각** — flush가 더 이상 포화가 아니라
+승격 조건 미충족.
