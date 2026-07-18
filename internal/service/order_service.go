@@ -197,6 +197,50 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 	return result, nil
 }
 
+// ProcessOrderCancellation은 엔진이 방출한 OrderCancelled 실행 이벤트를 정산
+// 파이프라인에서 확정한다. 심볼 FIFO 순서상 이 이벤트는 같은 주문의 선행 체결들
+// 뒤에 처리되므로, 이 시점의 order.FilledAmount는 이미 모든 선행 체결이 정산된
+// 최신값이다 — "잔여 = Amount - FilledAmount"가 항상 정확하다(A-4 레이스 수정의 핵심).
+// 멱등: 이미 CANCELLED/FILLED면 no-op. releaseOrderHold·CANCELLED 커밋은 CancelOrder가
+// 하던 것과 동일한 로직이지만, 여기서는 엔진이 실제로 오더북에서 제거한 뒤에만
+// 호출되므로 CancelOrder 자신은(1E에서) 더 이상 hold 해제를 직접 하지 않게 된다.
+func (s *OrderService) ProcessOrderCancellation(event matching.OrderCancelled) error {
+	if event.OrderID == 0 {
+		return NewValidationErrorf("order_id is required")
+	}
+
+	return s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
+
+		order, err := orderRepo.FindByIDForUpdate(event.OrderID)
+		if err != nil {
+			return err
+		}
+		if !isCancellableOrderStatus(order.Status) {
+			return nil
+		}
+
+		// remainingOrderQuantity를 재사용하지 않는다: 그 헬퍼는 잔여 <= 0을 에러로
+		// 취급하지만(CancelOrder API의 즉시 검증용), 여기서는 Removed=true를 방출한
+		// 시점엔 오더북에 잔여분이 있었으므로 정상 경로에서 이 분기는 발생하지 않는다
+		// (설계 문서 결정 5). 그래도 도달하면 이미 사실상 체결 완료된 상태이므로
+		// 에러 없이 스킵한다 — 상태는 뒤따르는(또는 이미 끝난) 체결 정산이 FILLED로
+		// 정리한다.
+		remaining := order.Amount.Sub(order.FilledAmount)
+		if !remaining.GreaterThan(decimal.Zero) {
+			return nil
+		}
+
+		if _, _, err := releaseOrderHold(walletRepo, ledgerRepo, order, remaining); err != nil {
+			return err
+		}
+
+		return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusCancelled)
+	})
+}
+
 func (s *OrderService) CompleteMarketOrder(input CompleteMarketOrderInput) error {
 	if input.OrderID == 0 {
 		return NewValidationErrorf("order_id is required")

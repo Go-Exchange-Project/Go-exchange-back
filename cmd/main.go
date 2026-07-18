@@ -125,7 +125,7 @@ func main() {
 		// 리플레이는 outboxEventID=0으로 호출해 트랜잭션 흡수 마킹을 끄고, 리플레이어가
 		// 직접 MarkProcessed한다(부팅 경로라 성능 무관, 순차 처리 로직을 단순하게 유지).
 		Process: func(event matching.ExecutionEvent) bool {
-			handled, _ := processExecutionEvent(event, 0, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, log.Default())
+			handled, _ := processExecutionEvent(event, 0, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, log.Default())
 			return handled
 		},
 	}
@@ -178,12 +178,12 @@ func main() {
 					event = received
 				}
 				if event.Event.Trade == nil {
-					processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, outboxRepo, log.Default())
+					processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, outboxRepo, log.Default())
 					continue
 				}
 				batch, next, open := collectTradeBatch(event, queue, settlementBatchMaxSize)
 				pending = next
-				settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService, orderService, failedMarketCompletionService, broadcast, outboxRepo, log.Default())
+				settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, outboxRepo, log.Default())
 				if !open {
 					// 채널 닫힘 — 잔여 배치는 방금 처리했고 pending은 nil.
 					return
@@ -387,6 +387,10 @@ type marketOrderCompleter interface {
 	CompleteMarketOrder(input service.CompleteMarketOrderInput) error
 }
 
+type orderCancellationProcessor interface {
+	ProcessOrderCancellation(event matching.OrderCancelled) error
+}
+
 type marketCompletionFailureRecorder interface {
 	RecordFailure(input service.CompleteMarketOrderInput, coinSymbol string, completionErr error) (*model.FailedMarketCompletion, error)
 }
@@ -416,6 +420,9 @@ func executionEventCoinSymbol(event matching.ExecutionEvent) string {
 	}
 	if event.MarketOrderDone != nil {
 		return event.MarketOrderDone.CoinSymbol
+	}
+	if event.OrderCancelled != nil {
+		return event.OrderCancelled.CoinSymbol
 	}
 	return ""
 }
@@ -454,6 +461,7 @@ func processExecutionEvent(
 	failureRecorder settlementFailureRecorder,
 	marketCompleter marketOrderCompleter,
 	completionFailureRecorder marketCompletionFailureRecorder,
+	cancelProcessor orderCancellationProcessor,
 	broadcast func(coinSymbol string, payload []byte),
 	logger *log.Logger,
 ) (handled bool, markedInTx bool) {
@@ -462,6 +470,9 @@ func processExecutionEvent(
 	}
 	if event.MarketOrderDone != nil {
 		return processMarketOrderDone(event.MarketOrderDone, marketCompleter, completionFailureRecorder, logger), false
+	}
+	if event.OrderCancelled != nil {
+		return processOrderCancellationEvent(event.OrderCancelled, cancelProcessor, logger), false
 	}
 	return true, false
 }
@@ -474,11 +485,12 @@ func processSingleOutboxEvent(
 	failureRecorder settlementFailureRecorder,
 	marketCompleter marketOrderCompleter,
 	completionFailureRecorder marketCompletionFailureRecorder,
+	cancelProcessor orderCancellationProcessor,
 	broadcast func(coinSymbol string, payload []byte),
 	outboxRepo outboxMarker,
 	logger *log.Logger,
 ) {
-	handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, settler, failureRecorder, marketCompleter, completionFailureRecorder, broadcast, logger)
+	handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, logger)
 	if !handled {
 		// 내구 확정 실패(정산 실패의 기록조차 실패) — PENDING으로 남겨
 		// 다음 부팅 리플레이가 재시도한다.
@@ -530,6 +542,7 @@ func settleTradeBatchWithFallback(
 	failureRecorder settlementFailureRecorder,
 	marketCompleter marketOrderCompleter,
 	completionFailureRecorder marketCompletionFailureRecorder,
+	cancelProcessor orderCancellationProcessor,
 	broadcast func(coinSymbol string, payload []byte),
 	outboxRepo outboxMarker,
 	logger *log.Logger,
@@ -543,7 +556,7 @@ func settleTradeBatchWithFallback(
 		metrics.SettlementBatchFallbacksTotal.Inc()
 		logger.Printf("settle trade batch of %d failed, falling back to per-trade settlement: %v", len(batch), err)
 		for _, event := range batch {
-			processSingleOutboxEvent(event, settler, failureRecorder, marketCompleter, completionFailureRecorder, broadcast, outboxRepo, logger)
+			processSingleOutboxEvent(event, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, outboxRepo, logger)
 		}
 		return
 	}
@@ -596,6 +609,36 @@ func processMarketOrderDone(
 		return false
 	}
 	return true
+}
+
+// processOrderCancellationEvent는 OrderCancelled 실행 이벤트를 ProcessOrderCancellation으로
+// 확정한다. 실패 시 전용 실패 테이블은 두지 않는다 — 멱등이라(이미 CANCELLED/FILLED면
+// no-op) outbox 행을 PENDING으로 남겨 다음 부팅 리플레이가 재시도하는 것으로 충분하고,
+// processMarketOrderDone과 달리 재시도가 늦어져도 주문이 영구 동결되지 않는다(hold는
+// 여전히 유지된 상태라 안전).
+func processOrderCancellationEvent(
+	cancelled *matching.OrderCancelled,
+	processor orderCancellationProcessor,
+	logger *log.Logger,
+) bool {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if processor == nil || cancelled == nil {
+		return true
+	}
+
+	err := processor.ProcessOrderCancellation(*cancelled)
+	for attempt := 0; err != nil && service.IsTransientSettlementError(err) && attempt < len(transientRetryDelays); attempt++ {
+		time.Sleep(transientRetryDelays[attempt])
+		err = processor.ProcessOrderCancellation(*cancelled)
+	}
+	if err == nil {
+		return true
+	}
+
+	logger.Printf("process order cancellation failed: %v", err)
+	return false
 }
 
 // isRetryableCompletionError: conflict는 같은 심볼의 trade 정산이 아직 안 끝났다는

@@ -347,7 +347,7 @@ func TestSettleTradeBatchWithFallbackFallsBackToPerTradeOnBatchError(t *testing.
 	before := counterValue(t, metrics.SettlementBatchFallbacksTotal)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, func(string, []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, nil, func(string, []byte) {
 		broadcasts++
 	}, marker, discardLogger())
 
@@ -370,7 +370,7 @@ func TestSettleTradeBatchWithFallbackBroadcastsOnlyAppliedOnSuccess(t *testing.T
 	before := histogramSampleCount(t, metrics.SettlementBatchSize)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, func(_ string, msg []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil, func(_ string, msg []byte) {
 		broadcasts++
 		lastPayload = msg
 	}, marker, discardLogger())
