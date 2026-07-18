@@ -682,6 +682,31 @@ func TestIntegrationFailedSettlementRecordedForCancelledOrderTrade(t *testing.T)
 	assert.Equal(t, int64(1), count)
 }
 
+func TestIntegrationFailedMarketCompletionRecordFailureClampsNegativeRemainingQuoteAmount(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	orderID := uint(time.Now().UnixNano() % 1_000_000_000)
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("order_id = ?", orderID).Delete(&model.FailedMarketCompletion{}).Error)
+	})
+
+	failedMarketCompletionService := NewFailedMarketCompletionService(repository.NewFailedMarketCompletionRepository(db))
+
+	input := CompleteMarketOrderInput{
+		OrderID:              orderID,
+		FilledAmount:         decimal.NewFromInt(1),
+		FilledQuoteAmount:    decimal.NewFromInt(50000),
+		RemainingQuoteAmount: decimal.RequireFromString("-0.0000000018775"),
+	}
+
+	failure, err := failedMarketCompletionService.RecordFailure(input, "BTC", fmt.Errorf("market buy order %d spent quote amount exceeds quote budget", orderID))
+	require.NoError(t, err)
+	assert.True(t, failure.RemainingQuoteAmount.Equal(decimal.Zero), "remaining_quote_amount=%s", failure.RemainingQuoteAmount.String())
+
+	var count int64
+	require.NoError(t, db.Model(&model.FailedMarketCompletion{}).Where("order_id = ?", orderID).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
 func TestIntegrationSettleTradeRejectsCancelledSellOrder(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	buyerID := serviceTestUserID(22)

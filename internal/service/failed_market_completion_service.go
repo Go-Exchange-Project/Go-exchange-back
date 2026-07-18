@@ -6,6 +6,7 @@ import (
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/shopspring/decimal"
 )
 
 type failedMarketCompletionRepository interface {
@@ -33,12 +34,17 @@ func (s *FailedMarketCompletionService) RecordFailure(input CompleteMarketOrderI
 		return nil, fmt.Errorf("order_id is required")
 	}
 
+	// RemainingQuoteAmount는 반올림 오차 등으로 아주 작은 음수가 될 수 있다(설계 문서
+	// 참고). CHECK 제약(remaining_quote_amount >= 0) 위반으로 이 실패 기록 자체가
+	// 실패하는 이중 실패를 막기 위해 저장 전 0으로 clamp한다.
+	remainingQuoteAmount := decimal.Max(decimal.Zero, input.RemainingQuoteAmount)
+
 	return s.Repository.RecordFailure(&model.FailedMarketCompletion{
 		OrderID:              input.OrderID,
 		CoinSymbol:           normalizeTradeCoinSymbol(coinSymbol),
 		FilledAmount:         input.FilledAmount,
 		FilledQuoteAmount:    input.FilledQuoteAmount,
-		RemainingQuoteAmount: input.RemainingQuoteAmount,
+		RemainingQuoteAmount: remainingQuoteAmount,
 		ErrorMessage:         settlementErrorMessage(completionErr),
 		Status:               model.FailedSettlementStatusOpen,
 		RetryCount:           1,
