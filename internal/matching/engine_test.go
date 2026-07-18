@@ -403,6 +403,69 @@ func TestMarketBuySkipsOwnAskOnlyAndDoesNotRest(t *testing.T) {
 	assert.Equal(t, decimal.NewFromInt(1), sellLevel.Orders.Front().Amount)
 }
 
+// TestMarketBuyClampFillNeverExceedsQuoteBudget는 발견 문서
+// (docs/refactor/bug-findings-2026-07-17-cancel-fill-race-and-market-buy-overspend.md
+// 버그 2)의 실측 조합을 재현한다: 1~2틱 분산 오더북(기준가 50,000,000, 틱 1,000)에
+// MARKET BUY 예산(50,000)을 소진시키면, 첫 레벨은 온전히 소진되고 두 번째 레벨에서
+// 클램프 체결(maxQtyByQuote < sellOrder.Amount)이 발생한다. 이때 quote 나눗셈(Div,
+// 16자리 반올림)의 올림 잔차로 executionQuote가 잔여 예산을 초과해
+// order.QuoteAmount가 음수가 된다 — 불변식(항상 0 이상) 위반.
+func TestMarketBuyClampFillNeverExceedsQuoteBudget(t *testing.T) {
+	me := newTestEngine()
+
+	basePrice := int64(50000000)
+	tick := int64(1000)
+	budget := decimal.NewFromInt(50000)
+
+	firstLevelPrice := decimal.NewFromInt(basePrice + 1*tick)
+	secondLevelPrice := decimal.NewFromInt(basePrice + 2*tick)
+	firstLevelAmount := decimal.RequireFromString("0.0005")
+	secondLevelAmount := decimal.RequireFromString("0.001")
+
+	me.Match(&Order{
+		ID:         1,
+		UserID:     20,
+		CoinSymbol: "BTC",
+		Side:       model.OrderSideSell,
+		Price:      firstLevelPrice,
+		Amount:     firstLevelAmount,
+	})
+	me.Match(&Order{
+		ID:         2,
+		UserID:     30,
+		CoinSymbol: "BTC",
+		Side:       model.OrderSideSell,
+		Price:      secondLevelPrice,
+		Amount:     secondLevelAmount,
+	})
+
+	buyOrder := &Order{
+		ID:          3,
+		UserID:      10,
+		CoinSymbol:  "BTC",
+		Side:        model.OrderSideBuy,
+		OrderType:   model.OrderTypeMarket,
+		QuoteAmount: budget,
+	}
+	me.Match(buyOrder)
+
+	firstTrade := requireNextTrade(t, me)
+	secondTrade := requireNextTrade(t, me)
+	requireNextExecutionEvent(t, me) // firstTrade event
+	requireNextExecutionEvent(t, me) // secondTrade event
+	doneEvent := requireNextExecutionEvent(t, me)
+
+	require.NotNil(t, doneEvent.MarketOrderDone)
+
+	spentQuote := firstTrade.Price.Mul(firstTrade.Quantity).Add(secondTrade.Price.Mul(secondTrade.Quantity))
+	assert.Falsef(t, buyOrder.QuoteAmount.IsNegative(),
+		"order.QuoteAmount must never go negative after a clamp fill, got %s", buyOrder.QuoteAmount)
+	assert.Falsef(t, spentQuote.GreaterThan(budget),
+		"filled quote amount must never exceed budget, spent %s > budget %s", spentQuote, budget)
+	assert.Falsef(t, doneEvent.MarketOrderDone.RemainingQuoteAmount.IsNegative(),
+		"RemainingQuoteAmount must never go negative, got %s", doneEvent.MarketOrderDone.RemainingQuoteAmount)
+}
+
 func TestMarketSellConsumesHighestBidsAndDoesNotRest(t *testing.T) {
 	me := newTestEngine()
 

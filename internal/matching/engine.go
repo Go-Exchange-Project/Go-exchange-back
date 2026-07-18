@@ -452,7 +452,11 @@ func (me *MatchingEngine) matchMarketBuy(book *OrderBook, order *Order) {
 		}
 
 		sellOrder := sellLevel.Orders.At(orderIndex)
-		maxQtyByQuote := order.QuoteAmount.Div(sellLevel.Price)
+		// Div는 DivisionPrecision(16자리)에서 반올림하므로 클램프 체결 시
+		// price * maxQtyByQuote가 잔여 예산을 초과할 수 있다(관측: +1.8775e-9류
+		// 잔차). QuoRem은 같은 정밀도에서 몫을 내림(0 방향 절삭)하므로
+		// price * maxQtyByQuote <= order.QuoteAmount가 항상 보장된다.
+		maxQtyByQuote, _ := order.QuoteAmount.QuoRem(sellLevel.Price, int32(decimal.DivisionPrecision))
 		tradeQty := decimal.Min(maxQtyByQuote, sellOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
 			return
