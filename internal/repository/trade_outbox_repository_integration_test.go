@@ -94,3 +94,22 @@ func TestIntegrationTradeOutboxMarkProcessedUnknownIDFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "affected no rows")
 }
+
+// migrations/004_order_cancelled_event.sql이 ck_trade_outbox_event_type CHECK를
+// 넓혀야 이 삽입이 성공한다 — AutoMigrate만으로는 기존 CHECK가 갱신되지 않는다.
+func TestIntegrationTradeOutboxAllowsOrderCancelledEventType(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewTradeOutboxRepository(db)
+	symbol := fmt.Sprintf("OBX%d", time.Now().UnixNano())
+
+	event := &model.TradeOutboxEvent{
+		EventType:  model.TradeOutboxEventTypeOrderCancelled,
+		CoinSymbol: symbol,
+		Payload:    []byte(`{"CoinSymbol":"` + symbol + `"}`),
+		Status:     model.TradeOutboxStatusPending,
+	}
+	require.NoError(t, repo.InsertBatch([]*model.TradeOutboxEvent{event}))
+	defer cleanupOutboxEvents(t, db, []uint64{event.ID})
+
+	require.NotZero(t, event.ID)
+}

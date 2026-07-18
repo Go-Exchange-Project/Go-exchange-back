@@ -7,6 +7,7 @@ type TradeOutboxEventType string
 const (
 	TradeOutboxEventTypeTrade           TradeOutboxEventType = "TRADE"
 	TradeOutboxEventTypeMarketOrderDone TradeOutboxEventType = "MARKET_ORDER_DONE"
+	TradeOutboxEventTypeOrderCancelled  TradeOutboxEventType = "ORDER_CANCELLED"
 )
 
 type TradeOutboxStatus string
@@ -22,7 +23,7 @@ const (
 // 단일 writer가 순서대로 삽입하므로 ID 순서 = 엔진 방출 순서입니다.
 type TradeOutboxEvent struct {
 	ID            uint64               `gorm:"primaryKey"`
-	EventType     TradeOutboxEventType `gorm:"size:32;not null;check:ck_trade_outbox_event_type,event_type IN ('TRADE','MARKET_ORDER_DONE')"`
+	EventType     TradeOutboxEventType `gorm:"size:32;not null;check:ck_trade_outbox_event_type,event_type IN ('TRADE','MARKET_ORDER_DONE','ORDER_CANCELLED')"`
 	CoinSymbol    string               `gorm:"size:32;not null"`
 	EngineEventID string               `gorm:"size:128;not null;default:''"`
 	Payload       []byte               `gorm:"type:jsonb;not null"`
