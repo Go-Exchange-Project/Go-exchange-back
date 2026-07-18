@@ -126,6 +126,13 @@ func (s *OrderService) BuildOrder(input CreateOrderInput) (*model.Order, error) 
 	return BuildOrderWithRegistry(input, s.marketRulesRegistry())
 }
 
+// CancelOrder는 DB 상태를 직접 확정하지 않는다(A-4 취소-체결 레이스 수정). 이
+// 함수는 소유권·취소가능 상태·시장가 여부만 검증하고, 실제 취소는 매칭 엔진에
+// 커맨드로 접수한다. 엔진이 Removed=true를 반환하면(=오더북에서 실제 제거)
+// ExecutionCh에 OrderCancelled 이벤트가 방출되고, 같은 주문의 선행 체결들
+// 뒤에 FIFO로 정렬된 그 이벤트를 정산 파이프라인이 ProcessOrderCancellation으로
+// 소비할 때 비로소 hold 해제·CANCELLED 커밋이 일어난다. 즉 이 함수가 반환하는
+// 시점에는 DB가 아직 PENDING/PARTIAL일 수 있다 — 응답은 "확정"이 아니라 "접수"다.
 func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, error) {
 	if input.UserID == 0 {
 		return nil, NewValidationErrorf("user_id is required")
@@ -134,12 +141,11 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 		return nil, NewValidationErrorf("order_id is required")
 	}
 
-	var result *CancelOrderResult
 	var cancelCommand matching.CancelOrderCommand
+	var estimatedAsset string
+	var estimatedAmount decimal.Decimal
 	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := s.OrderRepository.WithTx(tx)
-		walletRepo := s.WalletRepository.WithTx(tx)
-		ledgerRepo := s.LedgerRepository.WithTx(tx)
 
 		order, err := orderRepo.FindByIDForUpdate(input.OrderID)
 		if err != nil {
@@ -160,21 +166,9 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 			return err
 		}
 
-		releasedAsset, releasedAmount, err := releaseOrderHold(walletRepo, ledgerRepo, order, remaining)
-		if err != nil {
-			return err
-		}
-
-		if err := orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusCancelled); err != nil {
-			return err
-		}
-
-		result = &CancelOrderResult{
-			OrderID:        order.ID,
-			Status:         model.OrderStatusCancelled,
-			ReleasedAsset:  releasedAsset,
-			ReleasedAmount: releasedAmount,
-		}
+		// 검증 시점 스냅샷 기준 추정치다(판단 근거는 estimateCancelRelease 참고) —
+		// 실제 해제량은 ProcessOrderCancellation이 비동기로 확정한다.
+		estimatedAsset, estimatedAmount = estimateCancelRelease(order, remaining)
 		cancelCommand = matching.CancelOrderCommand{
 			CoinSymbol: order.CoinSymbol,
 			OrderID:    order.ID,
@@ -186,15 +180,52 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 		return nil, err
 	}
 
-	if s.MatchingEngine != nil {
-		cancelResult := s.MatchingEngine.CancelOrder(cancelCommand)
-		if cancelResult.Err != nil {
-			return result, fmt.Errorf("order cancelled in DB but matching engine cancel failed: %w", cancelResult.Err)
-		}
-		result.EngineRemoved = cancelResult.Removed
+	if s.MatchingEngine == nil {
+		return nil, matching.ErrCancelOrderEngineUnavailable
 	}
 
-	return result, nil
+	cancelResult := s.MatchingEngine.CancelOrder(cancelCommand)
+	if cancelResult.Err != nil {
+		// 오더북에 없음(이미 체결/소진)은 정상적인 "이미 늦음" 케이스다 — 409로
+		// 응답한다. 그 외(커맨드 오류·엔진 다운·타임아웃)는 드물어야 하는
+		// 인프라/버그성 실패라 그대로 감싸 상위(핸들러)가 500으로 매핑한다.
+		if errors.Is(cancelResult.Err, matching.ErrCancelOrderNotFound) {
+			return nil, NewConflictErrorf("order %d already filled or not found in matching engine", cancelCommand.OrderID)
+		}
+		return nil, fmt.Errorf("matching engine cancel failed: %w", cancelResult.Err)
+	}
+
+	return &CancelOrderResult{
+		OrderID: cancelCommand.OrderID,
+		// Status는 더 이상 "이 호출이 DB에 커밋한 최종 상태"가 아니라 "취소가
+		// 엔진에 접수됐다"는 의미로 재정의된다(설계 결정 4). 실제 CANCELLED 커밋은
+		// ProcessOrderCancellation이 비동기로 수행한다.
+		Status:         model.OrderStatusCancelled,
+		ReleasedAsset:  estimatedAsset,
+		ReleasedAmount: estimatedAmount,
+		EngineRemoved:  cancelResult.Removed,
+	}, nil
+}
+
+// estimateCancelRelease는 CancelOrderResult.ReleasedAsset/ReleasedAmount를 검증
+// 시점(트랜잭션 내 FOR UPDATE 스냅샷) 기준으로 추정한다. releaseOrderHold와 같은
+// 계산식을 쓰지만 지갑을 실제로 건드리지 않는다 — 실제 hold 해제는 이제
+// ProcessOrderCancellation이 엔진의 OrderCancelled 이벤트를 소비할 때 비동기로
+// 수행하기 때문이다.
+//
+// 판단: 빈 값(zero-value)으로 남기는 대신 추정치를 채워 넣기로 했다 — 응답 시점과
+// 실제 해제 시점 사이에 선행 체결이 끼어들면(레이스가 닫혔으므로 파이프라인은
+// 정확하지만) 이 추정치가 실제보다 클 수 있다는 점을 명확히 문서화하는 편이,
+// API 소비자에게 아무 정보도 안 주는 것보다 유용하다고 판단했다.
+func estimateCancelRelease(order *model.Order, remaining decimal.Decimal) (string, decimal.Decimal) {
+	switch order.Side {
+	case model.OrderSideBuy:
+		return model.KRWAssetSymbol, quoteAmountWithTradingFee(order.Price.Mul(remaining))
+	case model.OrderSideSell:
+		return order.CoinSymbol, remaining
+	default:
+		return "", decimal.Zero
+	}
 }
 
 // ProcessOrderCancellation은 엔진이 방출한 OrderCancelled 실행 이벤트를 정산

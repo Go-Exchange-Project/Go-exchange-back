@@ -734,68 +734,12 @@ func TestIntegrationSettleTradeRejectsCancelledSellOrder(t *testing.T) {
 	assertNoTradePersistedForOrders(t, db, buyOrder.ID, sellOrder.ID)
 }
 
-func TestIntegrationCancelEngineMissThenLateTradeIsRejected(t *testing.T) {
-	db := openServiceIntegrationDB(t)
-	buyerID := serviceTestUserID(24)
-	sellerID := serviceTestUserID(25)
-	defer cleanupServiceUsers(t, db, buyerID, sellerID)
-
-	buyOrder := seedCancelOrderRows(t, db, cancelOrderSeed{
-		UserID:        buyerID,
-		CoinSymbol:    "BTC",
-		Side:          model.OrderSideBuy,
-		Status:        model.OrderStatusPending,
-		Price:         decimal.NewFromInt(100),
-		Amount:        decimal.NewFromInt(5),
-		FilledAmount:  decimal.Zero,
-		LockedBalance: decimal.RequireFromString("500.25"),
-	})
-	sellOrder := seedCancelOrderRows(t, db, cancelOrderSeed{
-		UserID:        sellerID,
-		CoinSymbol:    "BTC",
-		Side:          model.OrderSideSell,
-		Status:        model.OrderStatusPending,
-		Price:         decimal.NewFromInt(90),
-		Amount:        decimal.NewFromInt(5),
-		FilledAmount:  decimal.Zero,
-		LockedBalance: decimal.NewFromInt(5),
-	})
-	me := matching.NewMatchingEngine()
-	me.Start()
-	orderService := newIntegrationOrderService(db, me)
-
-	cancelResult, err := orderService.CancelOrder(CancelOrderInput{UserID: buyerID, OrderID: buyOrder.ID})
-	require.Error(t, err)
-	require.NotNil(t, cancelResult)
-	assert.Equal(t, model.OrderStatusCancelled, cancelResult.Status)
-	assert.False(t, cancelResult.EngineRemoved)
-
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
-	lateTrade := &model.Trade{
-		CoinSymbol:  "BTC",
-		Price:       decimal.NewFromInt(90),
-		Quantity:    decimal.NewFromInt(5),
-		TradedAt:    time.Now(),
-		BuyOrderID:  buyOrder.ID,
-		SellOrderID: sellOrder.ID,
-	}
-
-	settleResult, err := settlementService.SettleTrade(lateTrade, 0)
-
-	require.Error(t, err)
-	assert.False(t, settleResult.Applied)
-	assert.Contains(t, err.Error(), "CANCELLED")
-	assertNoTradePersistedForOrders(t, db, buyOrder.ID, sellOrder.ID)
-	assertCancelledOrderAndWallet(t, db, buyOrder.ID, buyerID, model.KRWAssetSymbol, decimal.RequireFromString("500.25"), decimal.Zero)
-
-	var persistedSell model.Order
-	require.NoError(t, db.First(&persistedSell, sellOrder.ID).Error)
-	assert.Equal(t, model.OrderStatusPending, persistedSell.Status)
-	sellerWallet, err := repository.NewWalletRepository(db).FindByUserIDAndCoinSymbol(sellerID, "BTC")
-	require.NoError(t, err)
-	assert.True(t, sellerWallet.AvailableBalance.Equal(decimal.Zero))
-	assert.True(t, sellerWallet.LockedBalance.Equal(decimal.NewFromInt(5)))
-}
+// (A-4 수정으로 이 테스트가 검증하던 "DB 우선 CANCELLED 커밋 → 뒤늦은 체결
+// 거부"는 더 이상 CancelOrder의 동작이 아니다 — CancelOrder는 DB를 건드리지
+// 않으므로 이 테스트가 재현하던 시나리오 자체가 성립하지 않는다. 대체 증명은
+// TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements(레이스
+// 해소 자체를 증명)와 TestIntegrationCancelReturnsConflictWhenOrderMissingFromEngineBook
+// (엔진 미스가 409로 매핑됨을 증명)로 옮겨졌다.
 
 func TestIntegrationCancelPendingBuyOrderReleasesKRWAndRemovesFromEngine(t *testing.T) {
 	db := openServiceIntegrationDB(t)
@@ -820,12 +764,24 @@ func TestIntegrationCancelPendingBuyOrderReleasesKRWAndRemovesFromEngine(t *test
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
 	require.NoError(t, err)
+	// Status는 "접수됨" 의미로 재정의됐다(A-4) — DB가 실제로 CANCELLED인지는
+	// 아래에서 별도로 확인한다.
 	assert.Equal(t, model.OrderStatusCancelled, result.Status)
 	assert.Equal(t, model.KRWAssetSymbol, result.ReleasedAsset)
-	assert.True(t, result.ReleasedAmount.Equal(decimal.RequireFromString("500.25")))
+	assert.True(t, result.ReleasedAmount.Equal(decimal.RequireFromString("500.25")), "추정 해제량(예상)")
 	assert.True(t, result.EngineRemoved)
 	requireIntegrationSnapshot(t, me)
 	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+
+	// Step 1 계약: CancelOrder 단독 호출은 DB를 건드리지 않는다.
+	var afterAccept model.Order
+	require.NoError(t, db.First(&afterAccept, order.ID).Error)
+	assert.Equal(t, model.OrderStatusPending, afterAccept.Status, "CancelOrder만으로는 DB가 아직 CANCELLED가 되면 안 된다")
+
+	// 정산 파이프라인이 엔진의 OrderCancelled 이벤트를 소비하는 것을 시뮬레이션한다.
+	cancelled := requireIntegrationOrderCancelledEvent(t, me)
+	assert.Equal(t, order.ID, cancelled.OrderID)
+	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
 
 	assertCancelledOrderAndWallet(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("500.25"), decimal.Zero)
 	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID)
@@ -856,9 +812,17 @@ func TestIntegrationCancelPartialBuyOrderReleasesRemainingKRW(t *testing.T) {
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
 	require.NoError(t, err)
-	assert.True(t, result.ReleasedAmount.Equal(decimal.RequireFromString("600.3")))
+	assert.True(t, result.ReleasedAmount.Equal(decimal.RequireFromString("600.3")), "추정 해제량(예상)")
 	assert.True(t, result.EngineRemoved)
 	requireIntegrationSnapshot(t, me)
+
+	var afterAccept model.Order
+	require.NoError(t, db.First(&afterAccept, order.ID).Error)
+	assert.Equal(t, model.OrderStatusPartial, afterAccept.Status, "CancelOrder만으로는 DB가 아직 CANCELLED가 되면 안 된다")
+
+	cancelled := requireIntegrationOrderCancelledEvent(t, me)
+	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
+
 	assertCancelledOrderAndWallet(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("600.3"), decimal.Zero)
 }
 
@@ -886,10 +850,18 @@ func TestIntegrationCancelPendingSellOrderReleasesCoin(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "BTC", result.ReleasedAsset)
-	assert.True(t, result.ReleasedAmount.Equal(decimal.NewFromInt(5)))
+	assert.True(t, result.ReleasedAmount.Equal(decimal.NewFromInt(5)), "추정 해제량(예상)")
 	assert.True(t, result.EngineRemoved)
 	requireIntegrationSnapshot(t, me)
 	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
+
+	var afterAccept model.Order
+	require.NoError(t, db.First(&afterAccept, order.ID).Error)
+	assert.Equal(t, model.OrderStatusPending, afterAccept.Status, "CancelOrder만으로는 DB가 아직 CANCELLED가 되면 안 된다")
+
+	cancelled := requireIntegrationOrderCancelledEvent(t, me)
+	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
+
 	assertCancelledOrderAndWallet(t, db, order.ID, userID, "BTC", decimal.NewFromInt(5), decimal.Zero)
 	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID)
 	require.Len(t, entries, 1)
@@ -953,7 +925,11 @@ func TestIntegrationCancelOtherUserOrderIsRejected(t *testing.T) {
 	assert.True(t, wallet.LockedBalance.Equal(decimal.RequireFromString("500.25")))
 }
 
-func TestIntegrationCancelRollbackWhenWalletLockedBalanceIsInsufficient(t *testing.T) {
+// hold 해제(releaseOrderHold)의 소유권이 CancelOrder에서 ProcessOrderCancellation으로
+// 옮겨갔으므로(A-4), "지갑 잔고 부족 시 롤백" 시나리오도 이제
+// ProcessOrderCancellation에서 검증한다 — CancelOrder는 더 이상 지갑을 건드리지
+// 않아 이 실패 모드 자체가 발생할 수 없다.
+func TestIntegrationProcessOrderCancellationRollsBackWhenWalletLockedBalanceIsInsufficient(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	userID := serviceTestUserID(18)
 	defer cleanupServiceUsers(t, db, userID)
@@ -966,17 +942,20 @@ func TestIntegrationCancelRollbackWhenWalletLockedBalanceIsInsufficient(t *testi
 		Price:         decimal.NewFromInt(100),
 		Amount:        decimal.NewFromInt(5),
 		FilledAmount:  decimal.Zero,
-		LockedBalance: decimal.NewFromInt(100),
+		LockedBalance: decimal.NewFromInt(100), // 해제에 필요한 500.25보다 부족
 	})
 	orderService := newIntegrationOrderService(db, nil)
 
-	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
+	err := orderService.ProcessOrderCancellation(matching.OrderCancelled{
+		OrderID:    order.ID,
+		CoinSymbol: order.CoinSymbol,
+		Side:       order.Side,
+	})
 
 	require.Error(t, err)
-	assert.Nil(t, result)
 	var persisted model.Order
 	require.NoError(t, db.First(&persisted, order.ID).Error)
-	assert.Equal(t, model.OrderStatusPending, persisted.Status)
+	assert.Equal(t, model.OrderStatusPending, persisted.Status, "실패 시 상태 커밋이 롤백돼야 한다")
 	walletRepo := repository.NewWalletRepository(db)
 	wallet, err := walletRepo.FindKRWWalletByUserID(userID)
 	require.NoError(t, err)
@@ -984,7 +963,10 @@ func TestIntegrationCancelRollbackWhenWalletLockedBalanceIsInsufficient(t *testi
 	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(100)))
 }
 
-func TestIntegrationCancelReturnsEngineErrorAfterDBCommitWhenOrderMissingFromBook(t *testing.T) {
+// 엔진에 주문이 없는 경우(이미 체결/소진 또는 애초에 미제출)는 "이미 늦음"이지
+// 인프라 실패가 아니다 — 409(conflict)로 매핑되고, DB·지갑은 CancelOrder가
+// 전혀 건드리지 않으므로 그대로 남아야 한다(A-4의 핵심 계약).
+func TestIntegrationCancelReturnsConflictWhenOrderMissingFromEngineBook(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	userID := serviceTestUserID(19)
 	defer cleanupServiceUsers(t, db, userID)
@@ -1003,14 +985,23 @@ func TestIntegrationCancelReturnsEngineErrorAfterDBCommitWhenOrderMissingFromBoo
 	me.Start()
 	orderService := newIntegrationOrderService(db, me)
 
+	// 주문을 엔진에 제출하지 않았다 — 엔진 오더북 관점에서는 "없음"(이미
+	// 체결/소진된 것과 동일한 신호).
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
 	require.Error(t, err)
-	require.NotNil(t, result)
-	assert.Contains(t, err.Error(), "matching engine cancel failed")
-	assert.Equal(t, model.OrderStatusCancelled, result.Status)
-	assert.False(t, result.EngineRemoved)
-	assertCancelledOrderAndWallet(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("500.25"), decimal.Zero)
+	assert.Nil(t, result)
+	kind, ok := DomainErrorKind(err)
+	require.True(t, ok, "엔진 미스는 도메인 conflict 에러여야 한다(핸들러가 409로 매핑)")
+	assert.Equal(t, ErrorKindConflict, kind)
+
+	var persisted model.Order
+	require.NoError(t, db.First(&persisted, order.ID).Error)
+	assert.Equal(t, model.OrderStatusPending, persisted.Status, "CancelOrder는 DB를 건드리지 않는다")
+	walletRepo := repository.NewWalletRepository(db)
+	wallet, err := walletRepo.FindKRWWalletByUserID(userID)
+	require.NoError(t, err)
+	assert.True(t, wallet.LockedBalance.Equal(decimal.RequireFromString("500.25")), "CancelOrder는 지갑을 건드리지 않는다")
 }
 
 func seedSettlementRows(t *testing.T, db *gorm.DB, buyerID uint, sellerID uint, buyerLockedKRW decimal.Decimal, sellerLockedBTC decimal.Decimal) (model.Order, model.Order) {
@@ -1137,6 +1128,23 @@ func requireIntegrationSnapshot(t *testing.T, me *matching.MatchingEngine) match
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for matching engine snapshot")
 		return matching.OrderBookSnapshot{}
+	}
+}
+
+// requireIntegrationOrderCancelledEvent는 CancelOrder 접수 후 엔진이
+// ExecutionCh에 방출한 OrderCancelled 이벤트를 기다린다. 정산 파이프라인이
+// ProcessOrderCancellation으로 이 이벤트를 소비하는 것을 테스트에서 흉내내기
+// 위한 헬퍼다(A-4: CancelOrder 자신은 더 이상 DB를 확정하지 않는다).
+func requireIntegrationOrderCancelledEvent(t *testing.T, me *matching.MatchingEngine) matching.OrderCancelled {
+	t.Helper()
+
+	select {
+	case event := <-me.ExecutionCh:
+		require.NotNil(t, event.OrderCancelled, "OrderCancelled 이벤트가 방출돼야 한다")
+		return *event.OrderCancelled
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for matching engine OrderCancelled event")
+		return matching.OrderCancelled{}
 	}
 }
 

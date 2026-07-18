@@ -9,6 +9,7 @@ import (
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
@@ -175,11 +176,12 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		OrderID: uint(orderID),
 	})
 	if err != nil {
-		status := http.StatusBadRequest
-		if result != nil && result.Status == "CANCELLED" {
+		// CancelOrder는 "이미 체결/소진"(엔진이 오더북에서 못 찾음)을 409로
+		// 반환한다(order_service.go). 그 외 엔진 커맨드 오류·엔진 다운·타임아웃은
+		// 드물어야 하는 인프라성 실패라 500으로 매핑한다.
+		status := serviceErrorStatus(err)
+		if isCancelOrderEngineInfraError(err) {
 			status = http.StatusInternalServerError
-		} else {
-			status = serviceErrorStatus(err)
 		}
 		httpapi.WriteError(c, status, errorCodeForStatus(status), err.Error())
 		return
@@ -358,6 +360,15 @@ func serviceErrorStatus(err error) int {
 	default:
 		return http.StatusBadRequest
 	}
+}
+
+// isCancelOrderEngineInfraError는 CancelOrder가 매칭 엔진 커맨드 자체의 실패
+// (잘못된 커맨드·엔진 다운·타임아웃)를 감싼 에러인지 판별한다. "이미 체결됨"
+// (matching.ErrCancelOrderNotFound)은 여기 해당하지 않는다 — 그건 409다.
+func isCancelOrderEngineInfraError(err error) bool {
+	return errors.Is(err, matching.ErrCancelOrderInvalidCommand) ||
+		errors.Is(err, matching.ErrCancelOrderEngineUnavailable) ||
+		errors.Is(err, matching.ErrCancelOrderTimedOut)
 }
 
 func errorCodeForStatus(status int) string {
