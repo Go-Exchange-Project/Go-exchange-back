@@ -14,13 +14,16 @@ import (
 )
 
 type OrderService struct {
-	OrderRepository  *repository.OrderRepository
-	WalletRepository *repository.WalletRepository
-	MatchingEngine   matching.Engine
-	TradeRepository  *repository.TradeRepository
-	LedgerRepository *repository.LedgerRepository
-	MarketRules      *MarketRulesRegistry
+	OrderRepository   *repository.OrderRepository
+	WalletRepository  *repository.WalletRepository
+	MatchingEngine    matching.Engine
+	TradeRepository   *repository.TradeRepository
+	LedgerRepository  *repository.LedgerRepository
+	MarketRules       *MarketRulesRegistry
+	AcceptanceTimeout time.Duration // 0이면 defaultAcceptanceTimeout
 }
+
+const defaultAcceptanceTimeout = 100 * time.Millisecond
 
 const (
 	DefaultQueryLimit = 50
@@ -90,6 +93,11 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 		return nil, err
 	}
 
+	// 입장 게이트: 엔진 유입이 포화면 DB 작업 전에 빠른 거절(503).
+	if s.MatchingEngine != nil && !s.MatchingEngine.IsIntakeAdmissible(order.CoinSymbol) {
+		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
+	}
+
 	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := s.OrderRepository.WithTx(tx)
 		walletRepo := s.WalletRepository.WithTx(tx)
@@ -102,8 +110,11 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 		return nil, err
 	}
 
+	// 바운디드 핸드오프: 매칭 처리량에 응답이 매달리지 않게. 주문은 이미
+	// 영속화+홀드로 내구·정합 확정 상태다. 바운드 내 접수 못 하면(레이스로 포화)
+	// 보상으로 홀드를 풀고 REJECTED로 종결한 뒤 503.
 	if s.MatchingEngine != nil {
-		s.MatchingEngine.SubmitOrder(&matching.Order{
+		submitted := s.MatchingEngine.TrySubmitOrder(&matching.Order{
 			ID:                order.ID,
 			UserID:            order.UserID,
 			CoinSymbol:        order.CoinSymbol,
@@ -116,10 +127,78 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 			OrderType:         order.OrderType,
 			FilledAmount:      order.FilledAmount,
 			FilledQuoteAmount: order.FilledQuoteAmount,
-		})
+		}, s.acceptanceTimeout())
+		if !submitted {
+			if rerr := s.rejectAcceptedOrder(order); rerr != nil {
+				return nil, fmt.Errorf("order intake saturated and hold release failed for order %d: %w", order.ID, rerr)
+			}
+			return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
+		}
 	}
 
 	return order, nil
+}
+
+func (s *OrderService) acceptanceTimeout() time.Duration {
+	if s.AcceptanceTimeout > 0 {
+		return s.AcceptanceTimeout
+	}
+	return defaultAcceptanceTimeout
+}
+
+// rejectAcceptedOrder는 영속화·홀드됐으나 엔진 접수에 실패한 주문을 원상복구한다:
+// 초기 홀드를 전액 해제하고 상태를 REJECTED로 종결한다(한 트랜잭션, 원장 기록 포함).
+func (s *OrderService) rejectAcceptedOrder(order *model.Order) error {
+	return s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
+		if err := releaseInitialHold(walletRepo, ledgerRepo, order); err != nil {
+			return err
+		}
+		return orderRepo.UpdateOrderExecution(order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusRejected)
+	})
+}
+
+// releaseInitialHold는 holdOrderAssets가 건 초기 홀드의 정확한 역이다(미체결 주문
+// 이므로 홀드 전액). 매수=예약 KRW, 매도=예약 코인 수량.
+func releaseInitialHold(walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
+	switch order.Side {
+	case model.OrderSideBuy:
+		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
+		if err != nil {
+			return err
+		}
+		releaseAmount := quoteAmountWithTradingFee(order.Price.Mul(order.Amount))
+		if order.OrderType == model.OrderTypeMarket {
+			releaseAmount = order.QuoteAmount
+		}
+		update, err := releaseBuyOrderHold(wallet, releaseAmount)
+		if err != nil {
+			return err
+		}
+		if err := walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID, "")
+		return ledgerRepo.Create(&entry)
+	case model.OrderSideSell:
+		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
+		if err != nil {
+			return err
+		}
+		update, err := releaseSellOrderHold(wallet, order.Amount)
+		if err != nil {
+			return err
+		}
+		if err := walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
+			return err
+		}
+		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID, "")
+		return ledgerRepo.Create(&entry)
+	default:
+		return NewValidationErrorf("invalid order side")
+	}
 }
 
 func (s *OrderService) BuildOrder(input CreateOrderInput) (*model.Order, error) {

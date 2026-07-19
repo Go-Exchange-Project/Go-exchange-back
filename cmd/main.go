@@ -100,6 +100,7 @@ func main() {
 	authService := service.NewAuthService(userRepo, tokenManager)
 	orderService := service.NewOrderService(orderRepo, walletRepo, me)
 	orderService.MarketRules = marketRulesRegistry
+	orderService.AcceptanceTimeout = config.OrderAcceptanceTimeoutFromEnv()
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
 	failedMarketCompletionService := service.NewFailedMarketCompletionService(repository.NewFailedMarketCompletionRepository(config.DB))
