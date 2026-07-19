@@ -340,6 +340,8 @@ func serviceErrorStatus(err error) int {
 			return http.StatusConflict
 		case service.ErrorKindForbidden:
 			return http.StatusForbidden
+		case service.ErrorKindUnavailable:
+			return http.StatusServiceUnavailable
 		}
 	}
 

@@ -29,6 +29,7 @@ const (
 	OrderStatusPartial   OrderStatus = "PARTIAL"
 	OrderStatusFilled    OrderStatus = "FILLED"
 	OrderStatusCancelled OrderStatus = "CANCELLED"
+	OrderStatusRejected  OrderStatus = "REJECTED" // 시스템 부하로 접수 거절(유저 취소와 구분). 터미널.
 )
 
 type Order struct {

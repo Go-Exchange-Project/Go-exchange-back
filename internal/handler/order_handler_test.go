@@ -127,3 +127,7 @@ func TestServiceErrorStatusMapsDomainErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestServiceErrorStatusMapsUnavailableTo503(t *testing.T) {
+	assert.Equal(t, http.StatusServiceUnavailable, serviceErrorStatus(service.NewUnavailableErrorf("saturated")))
+}

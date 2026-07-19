@@ -21,6 +21,7 @@ const (
 	CodeNotFound           = "NOT_FOUND"
 	CodeValidation         = "VALIDATION_ERROR"
 	CodeInvalidCredentials = "INVALID_CREDENTIALS"
+	CodeUnavailable        = "SERVICE_UNAVAILABLE"
 )
 
 type Error struct {
@@ -68,6 +69,8 @@ func CodeForStatus(status int) string {
 		return CodeValidation
 	case http.StatusInternalServerError:
 		return CodeInternal
+	case http.StatusServiceUnavailable:
+		return CodeUnavailable
 	default:
 		return CodeBadRequest
 	}
