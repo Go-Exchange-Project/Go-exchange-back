@@ -114,6 +114,16 @@ func (se *ShardedEngine) SubmitOrder(order *Order) {
 	se.shardFor(order.CoinSymbol).SubmitOrder(order)
 }
 
+// TrySubmitOrder는 주문의 심볼이 소유한 샤드로 라우팅한다(바운디드).
+func (se *ShardedEngine) TrySubmitOrder(order *Order, within time.Duration) bool {
+	return se.shardFor(order.CoinSymbol).TrySubmitOrder(order, within)
+}
+
+// IsIntakeAdmissible는 심볼이 소유한 샤드의 유입 게이트를 확인한다.
+func (se *ShardedEngine) IsIntakeAdmissible(coinSymbol string) bool {
+	return se.shardFor(coinSymbol).IsIntakeAdmissible(coinSymbol)
+}
+
 // CancelOrder는 취소 대상 심볼이 소유한 샤드로 라우팅한다 — 제출과 반드시 같은
 // 샤드이므로 오더북 조회·제거가 일관된다.
 func (se *ShardedEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {

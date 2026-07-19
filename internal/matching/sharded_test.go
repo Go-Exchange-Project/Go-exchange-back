@@ -217,3 +217,11 @@ func TestShardedEngineConcurrentMultiSymbolSubmission_NoRace(t *testing.T) {
 		assert.Equal(t, ordersPerSymbol, total, "symbol %s order count mismatch", symbol)
 	}
 }
+
+func TestShardedEngineTrySubmitRoutesToOwningShard(t *testing.T) {
+	se := NewShardedEngine(4)
+	ok := se.TrySubmitOrder(&Order{CoinSymbol: "BTC", Side: model.OrderSideBuy, Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)}, 50*time.Millisecond)
+	assert.True(t, ok)
+	// 같은 심볼의 게이트/제출이 같은 샤드를 본다 — 라우팅 안정성
+	assert.True(t, se.IsIntakeAdmissible("BTC"))
+}

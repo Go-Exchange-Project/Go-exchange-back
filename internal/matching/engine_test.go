@@ -751,3 +751,33 @@ func TestCancelOrder_PartialFillThenCancel_TradeBeforeOrderCancelled(t *testing.
 	require.NotNil(t, cancelEvent.OrderCancelled)
 	assert.Equal(t, sellOrder.ID, cancelEvent.OrderCancelled.OrderID)
 }
+
+func TestTrySubmitOrderReturnsTrueWhenRoom(t *testing.T) {
+	me := NewMatchingEngine() // OrderCh cap 1024, 아직 Start 안 함(소비 없음)
+	ok := me.TrySubmitOrder(&Order{CoinSymbol: "BTC", Side: model.OrderSideBuy, Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)}, 50*time.Millisecond)
+	assert.True(t, ok)
+	assert.Equal(t, 1, len(me.OrderCh))
+}
+
+func TestTrySubmitOrderReturnsFalseWhenFullWithinBound(t *testing.T) {
+	me := NewMatchingEngine()
+	for i := 0; i < cap(me.OrderCh); i++ { // 소비자 없이 가득 채움
+		me.OrderCh <- &Order{CoinSymbol: "BTC"}
+	}
+	start := time.Now()
+	ok := me.TrySubmitOrder(&Order{CoinSymbol: "BTC"}, 30*time.Millisecond)
+	elapsed := time.Since(start)
+	assert.False(t, ok)
+	assert.GreaterOrEqual(t, elapsed, 30*time.Millisecond) // 바운드까지 기다렸다 실패
+	assert.Less(t, elapsed, 500*time.Millisecond)          // 무한 블로킹 아님
+}
+
+func TestIsIntakeAdmissibleFalseAtHighWatermark(t *testing.T) {
+	me := NewMatchingEngine()
+	assert.True(t, me.IsIntakeAdmissible("BTC")) // 비었을 때 허용
+	threshold := int(float64(cap(me.OrderCh)) * orderIntakeHighWatermarkRatio)
+	for i := 0; i < threshold; i++ {
+		me.OrderCh <- &Order{CoinSymbol: "BTC"}
+	}
+	assert.False(t, me.IsIntakeAdmissible("BTC")) // high-watermark 도달 시 거절
+}

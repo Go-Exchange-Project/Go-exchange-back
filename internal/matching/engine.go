@@ -20,9 +20,15 @@ var (
 	ErrSnapshotTimedOut             = errors.New("matching snapshot request timed out")
 )
 
+// orderIntakeHighWatermarkRatio: OrderCh가 이 비율 이상 차면 입장 게이트가 거절한다.
+// (④가 히스테리시스·env로 정교화)
+const orderIntakeHighWatermarkRatio = 0.9
+
 // Engine은 매칭 엔진의 소비자 표면이다. 구현: MatchingEngine(단일), ShardedEngine(B-3).
 type Engine interface {
-	SubmitOrder(*Order)
+	SubmitOrder(*Order)                                     // 블로킹 — 부트스트랩/리플레이 전용
+	TrySubmitOrder(order *Order, within time.Duration) bool // 바운디드 — 라이브 HTTP 경로
+	IsIntakeAdmissible(coinSymbol string) bool              // 유입 게이트(DB 작업 전)
 	CancelOrder(CancelOrderCommand) CancelOrderResult
 	RequestOrderBookSnapshot(coinSymbol string, depth int) (OrderBookSnapshot, error)
 }
@@ -289,6 +295,25 @@ func truncateSnapshot(snapshot OrderBookSnapshot, depth int) OrderBookSnapshot {
 
 // SubmitOrder는 주문을 엔진 루프에 넘긴다(기존 OrderCh 직접 송신과 동일 의미).
 func (me *MatchingEngine) SubmitOrder(order *Order) { me.OrderCh <- order }
+
+// TrySubmitOrder는 within 시간 안에 OrderCh에 넣지 못하면 false를 반환한다(무한
+// 블로킹 없음). false일 때 주문은 채널에 들어가지 않았음이 select로 보장된다.
+func (me *MatchingEngine) TrySubmitOrder(order *Order, within time.Duration) bool {
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case me.OrderCh <- order:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// IsIntakeAdmissible는 OrderCh 점유가 high-watermark 미만이면 true. 단일 엔진이라
+// coinSymbol은 무시한다(인터페이스 통일을 위해 받음 — ShardedEngine이 사용).
+func (me *MatchingEngine) IsIntakeAdmissible(coinSymbol string) bool {
+	return len(me.OrderCh) < int(float64(cap(me.OrderCh))*orderIntakeHighWatermarkRatio)
+}
 
 func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {
 	if me == nil || me.CancelCh == nil {
