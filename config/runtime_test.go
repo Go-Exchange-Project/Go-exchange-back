@@ -178,3 +178,18 @@ func TestEngineShardsFromEnvFallsBackOnInvalidValue(t *testing.T) {
 	t.Setenv(EnvGOExchangeEngineShards, "not-a-number")
 	assert.Equal(t, 1, EngineShardsFromEnv())
 }
+
+func TestOrderAcceptanceTimeoutFromEnvDefaultsTo100ms(t *testing.T) {
+	requireUnsetEnv(t, EnvGOExchangeAcceptanceTimeoutMs)
+	assert.Equal(t, 100*time.Millisecond, OrderAcceptanceTimeoutFromEnv())
+}
+
+func TestOrderAcceptanceTimeoutFromEnvUsesOverride(t *testing.T) {
+	t.Setenv(EnvGOExchangeAcceptanceTimeoutMs, "250")
+	assert.Equal(t, 250*time.Millisecond, OrderAcceptanceTimeoutFromEnv())
+}
+
+func TestOrderAcceptanceTimeoutFromEnvFallsBackOnInvalid(t *testing.T) {
+	t.Setenv(EnvGOExchangeAcceptanceTimeoutMs, "nope")
+	assert.Equal(t, 100*time.Millisecond, OrderAcceptanceTimeoutFromEnv())
+}

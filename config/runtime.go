@@ -16,11 +16,13 @@ const (
 	EnvGOExchangeReconciliationInterval = "GOEXCHANGE_RECONCILIATION_INTERVAL"
 	EnvGOExchangeEngineShards           = "GOEXCHANGE_ENGINE_SHARDS"
 	EnvGOExchangeOutboxBatchSize        = "GOEXCHANGE_OUTBOX_BATCH_SIZE"
+	EnvGOExchangeAcceptanceTimeoutMs    = "GOEXCHANGE_ACCEPTANCE_TIMEOUT_MS"
 )
 
 const defaultSettlementWorkers = 10
 const defaultReconciliationIntervalSeconds = 3600
 const defaultOutboxBatchSize = 512
+const defaultAcceptanceTimeoutMs = 100
 
 var defaultCORSAllowedOrigins = []string{
 	"http://localhost:3000",
@@ -98,4 +100,11 @@ func EngineShardsFromEnv() int {
 // 관문이 파이프라인 전체를 캡했다 — 기본 512로 왕복·fsync 횟수를 1/8로 줄인다.
 func OutboxBatchSizeFromEnv() int {
 	return parsePositiveIntEnv(EnvGOExchangeOutboxBatchSize, defaultOutboxBatchSize)
+}
+
+// OrderAcceptanceTimeoutFromEnv는 주문 접수 시 엔진 핸드오프의 바운디드 대기
+// 상한이다. 일시 버스트는 흡수하되 지속 포화는 이 시간 후 503으로 거절한다.
+func OrderAcceptanceTimeoutFromEnv() time.Duration {
+	ms := parsePositiveIntEnv(EnvGOExchangeAcceptanceTimeoutMs, defaultAcceptanceTimeoutMs)
+	return time.Duration(ms) * time.Millisecond
 }
