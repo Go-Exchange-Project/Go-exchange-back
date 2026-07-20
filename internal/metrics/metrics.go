@@ -78,6 +78,17 @@ var (
 		Name: "settlement_batch_fallbacks_total",
 		Help: "Total number of times batch settlement failed and fell back to per-trade settlement.",
 	})
+
+	HoldBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "hold_batch_size",
+		Help:    "Number of orders per committed hold batch (group commit efficiency).",
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128},
+	})
+
+	HoldBatchFallbacksTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "hold_batch_fallbacks_total",
+		Help: "Total number of times batch hold failed and fell back to per-order persist+hold.",
+	})
 )
 
 // RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를
@@ -125,4 +136,12 @@ func RegisterMatchingEngineShardOrderChannelLenGauges(orderLenFns []func() int) 
 			ConstLabels: prometheus.Labels{"shard": strconv.Itoa(i)},
 		}, func() float64 { return float64(lenFn()) })
 	}
+}
+
+// RegisterHoldCoordinatorInputGauge는 홀드 코디네이터 입력 채널의 적체를 노출합니다.
+func RegisterHoldCoordinatorInputGauge(lenFn func() int) {
+	promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "hold_coordinator_input_length",
+		Help: "Current number of buffered requests in the hold coordinator's input channel.",
+	}, func() float64 { return float64(lenFn()) })
 }

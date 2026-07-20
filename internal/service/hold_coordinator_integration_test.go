@@ -1,10 +1,13 @@
 package service
 
 import (
+	"sync"
 	"testing"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -210,4 +213,138 @@ func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T) {
 	assert.Equal(t, int64(1), seqOrderCount)
 
 	assertLedgerSequencesMatch(t, db, batchUser, seqUser)
+}
+
+// Submit→Run 왕복: 코디네이터를 기동한 뒤 동시에 여러 주문을 제출하면 각자 홀드된
+// 주문(ID 채워짐)이 돌아온다.
+func TestIntegrationHoldCoordinatorSubmitHolds(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+
+	buyerID := serviceTestUserID(709)
+	sellerID := serviceTestUserID(710)
+	defer cleanupServiceUsers(t, db, buyerID, sellerID)
+	seedHoldWallets(t, db, buyerID, sellerID)
+
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 0)
+	go coordinator.Run()
+	defer coordinator.Shutdown()
+
+	orders := holdEquivalenceOrders(buyerID, sellerID)
+	results := make([]*model.Order, len(orders))
+	errs := make([]error, len(orders))
+	var wg sync.WaitGroup
+	for i, o := range orders {
+		wg.Add(1)
+		go func(i int, o *model.Order) {
+			defer wg.Done()
+			results[i], errs[i] = coordinator.Submit(o)
+		}(i, o)
+	}
+	wg.Wait()
+
+	for i := range orders {
+		require.NoError(t, errs[i], "order %d should hold successfully", i)
+		require.NotZero(t, results[i].ID)
+	}
+}
+
+// 입력 만석: 코디네이터를 기동하지 않은(input을 아무도 비우지 않는) 채로 작은
+// 용량의 input을 직접 채운 뒤 Submit하면 즉시 503(Unavailable)이 반환돼야 한다.
+func TestHoldCoordinatorSubmitReturnsUnavailableWhenInputFull(t *testing.T) {
+	c := &HoldCoordinator{input: make(chan holdRequest, 2), done: make(chan struct{})}
+	c.input <- holdRequest{order: &model.Order{}, resultCh: make(chan holdResult, 1)}
+	c.input <- holdRequest{order: &model.Order{}, resultCh: make(chan holdResult, 1)}
+
+	_, err := c.Submit(&model.Order{})
+
+	require.Error(t, err)
+	kind, ok := DomainErrorKind(err)
+	require.True(t, ok)
+	assert.Equal(t, ErrorKindUnavailable, kind)
+}
+
+// 폴백: DB 커넥션을 닫아 HoldBatch(트랜잭션)를 강제로 실패시키면, 코디네이터는
+// 배치 전체를 에러로 돌려주는 대신 각 요청을 persistAndHold 폴백으로 넘긴다(같은
+// 커넥션이 죽어있으므로 폴백도 실패하지만, 폴백 경로 자체가 호출됐음은 fallbacks_total
+// 증가로 확인한다). 요청마다 정확히 하나의 배치이므로 카운터는 제출 수만큼 증가한다.
+func TestIntegrationHoldCoordinatorFallsBackOnBatchError(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+
+	buyerID := serviceTestUserID(711)
+	// cleanup 없음 — DB 커넥션을 아래에서 닫으므로 아무 것도 실제로 persist되지
+	// 않는다(정리할 행이 없고, 닫힌 커넥션으로 정리 쿼리를 시도하면 그 자체가 실패한다).
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 2)
+	require.NoError(t, sqlDB.Close(), "DB 커넥션을 닫아 배치·폴백 모두 실패하게 만든다")
+
+	before := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
+	go coordinator.Run()
+	defer coordinator.Shutdown()
+
+	mkOrder := func() *model.Order {
+		return &model.Order{
+			UserID: buyerID, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit,
+			Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1), Status: model.OrderStatusPending,
+		}
+	}
+
+	// 순차 제출 — Submit은 결과가 시그널될 때까지 블로킹하므로, 두 번째 제출은
+	// 첫 번째가 이미 자신만의 배치로 처리된 뒤에 일어난다(배치 2개 = fallback 2회).
+	_, err1 := coordinator.Submit(mkOrder())
+	_, err2 := coordinator.Submit(mkOrder())
+
+	require.Error(t, err1, "닫힌 DB에서는 폴백도 실패해야 한다")
+	require.Error(t, err2)
+
+	after := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
+	assert.Equal(t, before+2, after, "배치 실패마다 fallbacks_total이 증가해야 한다")
+}
+
+// 종료 drain: input에 다수 요청이 이미 쌓인 상태에서 Shutdown(input 닫기)을
+// 호출해도, Run은 잔여분을 전부 처리(persist+hold)한 뒤에 반환해야 한다 — 유실 0.
+func TestIntegrationHoldCoordinatorShutdownDrains(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+
+	buyerID := serviceTestUserID(712)
+	defer cleanupServiceUsers(t, db, buyerID)
+
+	require.NoError(t, db.Create(&model.Wallet{
+		UserID: buyerID, CoinSymbol: model.KRWAssetSymbol,
+		KRW: decimal.NewFromInt(1_000_000), AvailableBalance: decimal.NewFromInt(1_000_000), LockedBalance: decimal.Zero,
+	}).Error)
+	require.NoError(t, db.Create(&model.Wallet{
+		UserID: buyerID, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero,
+	}).Error)
+
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 4)
+
+	const n = 20
+	reqs := make([]holdRequest, n)
+	for i := 0; i < n; i++ {
+		order := &model.Order{
+			UserID: buyerID, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit,
+			Price: decimal.NewFromInt(1), Amount: decimal.NewFromInt(1), Status: model.OrderStatusPending,
+		}
+		reqs[i] = holdRequest{order: order, resultCh: make(chan holdResult, 1)}
+		coordinator.input <- reqs[i] // Run 기동 전에 input을 직접 채워 "다수 제출 후 Shutdown" 상태를 재현한다.
+	}
+
+	go coordinator.Run()
+	coordinator.Shutdown() // Run이 남은 20건을 전부 drain하고 반환할 때까지 블로킹.
+
+	for i, r := range reqs {
+		select {
+		case res := <-r.resultCh:
+			assert.NoError(t, res.Err, "request %d should hold successfully", i)
+			assert.NotZero(t, res.Order.ID, "request %d should be persisted", i)
+		default:
+			t.Fatalf("request %d result not signaled — drain lost a request", i)
+		}
+	}
 }

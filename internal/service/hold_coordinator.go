@@ -5,11 +5,16 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
+
+const defaultHoldBatchSize = 64
+const defaultHoldFlushInterval = 5 * time.Millisecond
+const holdCoordinatorInputCap = 1024
 
 type holdRequest struct {
 	order    *model.Order
@@ -179,4 +184,96 @@ func (c *HoldCoordinator) HoldBatch(orders []*model.Order) ([]holdResult, error)
 		return nil, err
 	}
 	return results, nil
+}
+
+func NewHoldCoordinator(db *gorm.DB, orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, batchSize int) *HoldCoordinator {
+	if batchSize <= 0 {
+		batchSize = defaultHoldBatchSize
+	}
+	return &HoldCoordinator{
+		DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo,
+		BatchSize: batchSize, FlushInterval: defaultHoldFlushInterval,
+		input: make(chan holdRequest, holdCoordinatorInputCap), done: make(chan struct{}),
+	}
+}
+
+// Submit은 요청을 입력에 바운디드(논블로킹) 제출한다. 입력이 만석이면 즉시 503.
+// 제출 성공 후 결과 대기엔 타임아웃이 없다(고아 방지 — 제출된 요청은 항상 유한 시간에 시그널).
+func (c *HoldCoordinator) Submit(order *model.Order) (*model.Order, error) {
+	req := holdRequest{order: order, resultCh: make(chan holdResult, 1)}
+	select {
+	case c.input <- req:
+	default:
+		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
+	}
+	res := <-req.resultCh
+	return res.Order, res.Err
+}
+
+// Run은 input이 닫힐 때까지 배치를 수집·처리하고, 닫힌 뒤 잔여를 처리하고 done을 닫는다.
+func (c *HoldCoordinator) Run() {
+	defer close(c.done)
+	for {
+		first, ok := <-c.input
+		if !ok {
+			return
+		}
+		batch, open := c.collectBatch([]holdRequest{first})
+		c.processBatch(batch)
+		if !open {
+			return
+		}
+	}
+}
+
+func (c *HoldCoordinator) collectBatch(batch []holdRequest) ([]holdRequest, bool) {
+	timer := time.NewTimer(c.FlushInterval)
+	defer timer.Stop()
+	for len(batch) < c.BatchSize {
+		select {
+		case req, ok := <-c.input:
+			if !ok {
+				return batch, false
+			}
+			batch = append(batch, req)
+		case <-timer.C:
+			return batch, true
+		}
+	}
+	return batch, true
+}
+
+func (c *HoldCoordinator) processBatch(reqs []holdRequest) {
+	orders := make([]*model.Order, len(reqs))
+	for i := range reqs {
+		orders[i] = reqs[i].order
+	}
+	results, err := c.HoldBatch(orders)
+	if err != nil {
+		metrics.HoldBatchFallbacksTotal.Inc()
+		c.logf("hold batch of %d failed, falling back to per-order: %v", len(reqs), err)
+		for i := range reqs {
+			ferr := persistAndHold(c.DB, c.OrderRepo, c.WalletRepo, c.LedgerRepo, reqs[i].order)
+			reqs[i].resultCh <- holdResult{Order: reqs[i].order, Err: ferr}
+		}
+		return
+	}
+	metrics.HoldBatchSize.Observe(float64(len(reqs)))
+	for i := range reqs {
+		reqs[i].resultCh <- results[i]
+	}
+}
+
+// Shutdown은 입력을 닫아 drain을 트리거하고 Run 종료를 기다린다.
+func (c *HoldCoordinator) Shutdown() {
+	close(c.input)
+	<-c.done
+}
+
+func (c *HoldCoordinator) logf(format string, args ...interface{}) {
+	logger := c.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf(format, args...)
 }

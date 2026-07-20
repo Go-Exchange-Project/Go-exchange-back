@@ -164,6 +164,21 @@ func TestOutboxBatchSizeFromEnvFallsBackOnInvalidValue(t *testing.T) {
 	assert.Equal(t, 512, OutboxBatchSizeFromEnv())
 }
 
+func TestHoldBatchSizeFromEnvDefaultsTo64(t *testing.T) {
+	requireUnsetEnv(t, EnvGOExchangeHoldBatchSize)
+	assert.Equal(t, 64, HoldBatchSizeFromEnv())
+}
+
+func TestHoldBatchSizeFromEnvUsesOverride(t *testing.T) {
+	t.Setenv(EnvGOExchangeHoldBatchSize, "128")
+	assert.Equal(t, 128, HoldBatchSizeFromEnv())
+}
+
+func TestHoldBatchSizeFromEnvFallsBackOnInvalidValue(t *testing.T) {
+	t.Setenv(EnvGOExchangeHoldBatchSize, "not-a-number")
+	assert.Equal(t, 64, HoldBatchSizeFromEnv())
+}
+
 func TestEngineShardsFromEnvDefaultsToSingleShard(t *testing.T) {
 	requireUnsetEnv(t, EnvGOExchangeEngineShards)
 	assert.Equal(t, 1, EngineShardsFromEnv())

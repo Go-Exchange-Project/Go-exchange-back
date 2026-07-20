@@ -38,3 +38,17 @@ matching_engine_shard_order_channel_length{shard="1"} 7
 		t.Fatal(err)
 	}
 }
+
+func TestRegisterHoldCoordinatorInputGaugeExposesInputLength(t *testing.T) {
+	RegisterHoldCoordinatorInputGauge(func() int { return 9 })
+
+	expected := `
+# HELP hold_coordinator_input_length Current number of buffered requests in the hold coordinator's input channel.
+# TYPE hold_coordinator_input_length gauge
+hold_coordinator_input_length 9
+`
+	err := testutil.GatherAndCompare(prometheus.DefaultGatherer, strings.NewReader(expected), "hold_coordinator_input_length")
+	if err != nil {
+		t.Fatal(err)
+	}
+}

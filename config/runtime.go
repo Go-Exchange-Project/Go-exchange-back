@@ -17,12 +17,14 @@ const (
 	EnvGOExchangeEngineShards           = "GOEXCHANGE_ENGINE_SHARDS"
 	EnvGOExchangeOutboxBatchSize        = "GOEXCHANGE_OUTBOX_BATCH_SIZE"
 	EnvGOExchangeAcceptanceTimeoutMs    = "GOEXCHANGE_ACCEPTANCE_TIMEOUT_MS"
+	EnvGOExchangeHoldBatchSize          = "GOEXCHANGE_HOLD_BATCH_SIZE"
 )
 
 const defaultSettlementWorkers = 10
 const defaultReconciliationIntervalSeconds = 3600
 const defaultOutboxBatchSize = 512
 const defaultAcceptanceTimeoutMs = 100
+const defaultHoldBatchSize = 64
 
 var defaultCORSAllowedOrigins = []string{
 	"http://localhost:3000",
@@ -107,4 +109,9 @@ func OutboxBatchSizeFromEnv() int {
 func OrderAcceptanceTimeoutFromEnv() time.Duration {
 	ms := parsePositiveIntEnv(EnvGOExchangeAcceptanceTimeoutMs, defaultAcceptanceTimeoutMs)
 	return time.Duration(ms) * time.Millisecond
+}
+
+// HoldBatchSizeFromEnv는 홀드 코디네이터의 그룹커밋 배치 상한을 반환한다.
+func HoldBatchSizeFromEnv() int {
+	return parsePositiveIntEnv(EnvGOExchangeHoldBatchSize, defaultHoldBatchSize)
 }
