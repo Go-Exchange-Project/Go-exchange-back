@@ -39,6 +39,13 @@ func (r *OrderRepository) CreateOrder(order *model.Order) error {
 	return r.DB.Create(order).Error
 }
 
+func (r *OrderRepository) CreateOrders(orders []*model.Order) error {
+	if len(orders) == 0 {
+		return nil
+	}
+	return r.DB.Create(&orders).Error
+}
+
 func (r *OrderRepository) UpdateOrderStatus(orderID uint, status model.OrderStatus, filledAmount decimal.Decimal) error {
 	return r.UpdateOrderFill(orderID, filledAmount, status)
 }

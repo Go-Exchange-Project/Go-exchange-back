@@ -221,6 +221,21 @@ func TestIntegrationBatchUpdateExecutionsFailsOnRowCountMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "expected 2")
 }
 
+func TestIntegrationCreateOrdersAssignsIDsInOrder(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	userID := repositoryTestUserID(830)
+	defer cleanupRepositoryUsers(t, db, userID)
+	repo := NewOrderRepository(db)
+	orders := []*model.Order{
+		{UserID: userID, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit, Status: model.OrderStatusPending, Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)},
+		{UserID: userID, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit, Status: model.OrderStatusPending, Price: decimal.NewFromInt(200), Amount: decimal.NewFromInt(2)},
+	}
+	require.NoError(t, repo.CreateOrders(orders))
+	require.NotZero(t, orders[0].ID)
+	require.NotZero(t, orders[1].ID)
+	assert.Less(t, orders[0].ID, orders[1].ID, "삽입 순서대로 ID가 오름차순 배정돼야 한다")
+}
+
 func cleanupBootstrapRepositoryOrders(t *testing.T, db *gorm.DB, userID uint) {
 	t.Helper()
 
