@@ -87,6 +87,20 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 	return service
 }
 
+// persistAndHold는 주문 1건을 한 트랜잭션에 영속화하고 자금을 홀드한다.
+// no-coordinator 경로와 배치 실패 폴백이 공유하는 단건 경로 — 정합성의 진실.
+func persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		or := orderRepo.WithTx(tx)
+		wr := walletRepo.WithTx(tx)
+		lr := ledgerRepo.WithTx(tx)
+		if err := or.CreateOrder(order); err != nil {
+			return err
+		}
+		return holdOrderAssets(wr, lr, order)
+	})
+}
+
 func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error) {
 	order, err := s.BuildOrder(input)
 	if err != nil {
@@ -98,15 +112,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
 	}
 
-	if err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
-		orderRepo := s.OrderRepository.WithTx(tx)
-		walletRepo := s.WalletRepository.WithTx(tx)
-		ledgerRepo := s.LedgerRepository.WithTx(tx)
-		if err := orderRepo.CreateOrder(order); err != nil {
-			return err
-		}
-		return holdOrderAssets(walletRepo, ledgerRepo, order)
-	}); err != nil {
+	if err := persistAndHold(s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository, order); err != nil {
 		return nil, err
 	}
 
