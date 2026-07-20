@@ -270,6 +270,11 @@ func (c *HoldCoordinator) Shutdown() {
 	<-c.done
 }
 
+// InputLen은 입력 채널의 현재 적체를 반환한다 — 게이지 등록용.
+func (c *HoldCoordinator) InputLen() int {
+	return len(c.input)
+}
+
 func (c *HoldCoordinator) logf(format string, args ...interface{}) {
 	logger := c.Logger
 	if logger == nil {

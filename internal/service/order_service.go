@@ -20,7 +20,8 @@ type OrderService struct {
 	TradeRepository   *repository.TradeRepository
 	LedgerRepository  *repository.LedgerRepository
 	MarketRules       *MarketRulesRegistry
-	AcceptanceTimeout time.Duration // 0이면 defaultAcceptanceTimeout
+	AcceptanceTimeout time.Duration    // 0이면 defaultAcceptanceTimeout
+	HoldCoordinator   *HoldCoordinator // nil이면 persistAndHold 직접 호출(기존 테스트 경로)
 }
 
 const defaultAcceptanceTimeout = 100 * time.Millisecond
@@ -112,8 +113,17 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
 	}
 
-	if err := persistAndHold(s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository, order); err != nil {
-		return nil, err
+	// [②] 코디네이터 있으면 배치 경유, 없으면(테스트·미배선) 단건 직접.
+	if s.HoldCoordinator != nil {
+		held, err := s.HoldCoordinator.Submit(order)
+		if err != nil {
+			return nil, err
+		}
+		order = held
+	} else {
+		if err := persistAndHold(s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository, order); err != nil {
+			return nil, err
+		}
 	}
 
 	// 바운디드 핸드오프: 매칭 처리량에 응답이 매달리지 않게. 주문은 이미

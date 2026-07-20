@@ -189,3 +189,94 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 		assert.NotEqual(t, "ledger_wallet", v.CheckName, "보상 후 실제 원장-지갑 불일치가 없어야 한다: %+v", v)
 	}
 }
+
+// 코디네이터 경유: OrderService.HoldCoordinator를 실제로 기동한 코디네이터로 주입하면
+// persistAndHold 폴백이 아니라 Submit→HoldBatch 경로로 처리된다. 정상 홀드(ID 채워짐,
+// PENDING, 잔고 홀드)와 잔고 부족(ConflictError, 주문 미생성, 잔고 무변화)을 모두
+// 이 경로로 검증하고, 마지막에 리컨실리에이션에서 실제 ledger_wallet 위반이 없음을 확인한다.
+func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	orderRepo := repository.NewOrderRepository(db)
+	walletRepo := repository.NewWalletRepository(db)
+	ledgerRepo := repository.NewLedgerRepository(db)
+
+	buyerID := serviceTestUserID(205)
+	poorBuyerID := serviceTestUserID(206)
+	defer cleanupServiceUsers(t, db, buyerID, poorBuyerID)
+
+	require.NoError(t, db.Create(&model.Wallet{
+		UserID: buyerID, CoinSymbol: model.KRWAssetSymbol,
+		KRW: decimal.NewFromInt(10000), AvailableBalance: decimal.NewFromInt(10000), LockedBalance: decimal.Zero,
+	}).Error)
+	require.NoError(t, db.Create(&model.Wallet{
+		UserID: poorBuyerID, CoinSymbol: model.KRWAssetSymbol,
+		KRW: decimal.NewFromInt(10), AvailableBalance: decimal.NewFromInt(10), LockedBalance: decimal.Zero,
+	}).Error)
+	// 리컨실리에이션이 원장 이력 없는 시드 잔고를 실제 위반(ledger_wallet)으로 오분류하지
+	// 않도록(classifyLedgerWalletRow: 원장 항목이 하나도 없으면 legacy_mismatch로 봐줄
+	// 근거가 없어 안전하게 ledger_wallet 처리) 초기 자금 원장 항목을 남겨둔다.
+	seedReconciliationLedgerEntry(t, db, buyerID, model.KRWAssetSymbol, decimal.NewFromInt(10000), decimal.Zero, decimal.NewFromInt(10000), decimal.Zero)
+	seedReconciliationLedgerEntry(t, db, poorBuyerID, model.KRWAssetSymbol, decimal.NewFromInt(10), decimal.Zero, decimal.NewFromInt(10), decimal.Zero)
+
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 0)
+	go coordinator.Run()
+	defer coordinator.Shutdown()
+
+	fakeEngine := &fakeAcceptanceEngine{admissible: true, submitSucceeds: true}
+	orderService := NewOrderService(orderRepo, walletRepo, fakeEngine)
+	orderService.HoldCoordinator = coordinator
+
+	// 정상: 코디네이터 경유 홀드 성공.
+	order, err := orderService.CreateOrder(CreateOrderInput{
+		UserID: buyerID, CoinSymbol: "BTC", Side: "BUY", Price: "5000", Amount: "1",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, order)
+	require.NotZero(t, order.ID)
+
+	var persisted model.Order
+	require.NoError(t, db.First(&persisted, order.ID).Error)
+	assert.Equal(t, model.OrderStatusPending, persisted.Status)
+
+	krwWallet, err := walletRepo.FindKRWWalletByUserID(buyerID)
+	require.NoError(t, err)
+	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.RequireFromString("4997.5")))
+	assert.True(t, krwWallet.LockedBalance.Equal(decimal.RequireFromString("5002.5")))
+
+	// 잔고 부족: 코디네이터 경유라도 홀드 실패는 ConflictError(409)로 전파, 주문 미생성.
+	poorOrder, err := orderService.CreateOrder(CreateOrderInput{
+		UserID: poorBuyerID, CoinSymbol: "BTC", Side: "BUY", Price: "5000", Amount: "1",
+	})
+	require.Error(t, err)
+	assert.Nil(t, poorOrder)
+	kind, ok := DomainErrorKind(err)
+	require.True(t, ok)
+	assert.Equal(t, ErrorKindConflict, kind)
+
+	var poorOrderCount int64
+	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", poorBuyerID).Count(&poorOrderCount).Error)
+	assert.Equal(t, int64(0), poorOrderCount)
+
+	poorWallet, err := walletRepo.FindKRWWalletByUserID(poorBuyerID)
+	require.NoError(t, err)
+	assert.True(t, poorWallet.AvailableBalance.Equal(decimal.NewFromInt(10)))
+	assert.True(t, poorWallet.LockedBalance.Equal(decimal.Zero))
+
+	subjects := []string{
+		fmt.Sprintf("wallet:%d", krwWallet.ID),
+		fmt.Sprintf("wallet:%d", poorWallet.ID),
+	}
+	worker := &ReconciliationWorker{Repository: repository.NewReconciliationRepository(db)}
+	worker.RunOnce()
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("subject_key IN ?", subjects).Delete(&model.ReconciliationViolation{}).Error)
+	})
+	violations := findViolationsBySubject(t, db, subjects)
+	for _, subjectViolations := range violations {
+		for _, v := range subjectViolations {
+			// legacy_mismatch는 지갑을 원장 기록 없이 직접 시드해서 나오는 알려진 잡음
+			// (버그 아님) — 여기서 증명하려는 것은 실제 ledger_wallet 불일치가 없다는 것.
+			assert.NotEqual(t, "ledger_wallet", v.CheckName, "코디네이터 경유 홀드가 실제 원장-지갑 불일치를 만들면 안 된다: %+v", v)
+		}
+	}
+}

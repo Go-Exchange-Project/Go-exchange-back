@@ -101,6 +101,13 @@ func main() {
 	orderService := service.NewOrderService(orderRepo, walletRepo, me)
 	orderService.MarketRules = marketRulesRegistry
 	orderService.AcceptanceTimeout = config.OrderAcceptanceTimeoutFromEnv()
+
+	// [②] 자금 홀드 그룹커밋: CreateOrder의 persist+hold를 배치로 묶어 처리한다.
+	// 종료 순서는 아래 graceful shutdown 체인 참고 — HTTP drain 이후에만 Shutdown().
+	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, walletRepo, repository.NewLedgerRepository(config.DB), config.HoldBatchSizeFromEnv())
+	go holdCoordinator.Run()
+	orderService.HoldCoordinator = holdCoordinator
+	metrics.RegisterHoldCoordinatorInputGauge(func() int { return holdCoordinator.InputLen() })
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
 	failedMarketCompletionService := service.NewFailedMarketCompletionService(repository.NewFailedMarketCompletionRepository(config.DB))
@@ -344,6 +351,11 @@ func main() {
 		log.Printf("shutdown: http server shutdown failed: %v", err)
 	}
 	cancelHTTP()
+
+	// HTTP가 in-flight CreateOrder 핸들러를 전부 드레인한 뒤에만 안전하다 — 그래야
+	// 진행 중인 Submit()이 없어 input close와의 send-on-closed 경쟁이 없다. 반드시
+	// 엔진 Stop() 앞: 엔진이 멈추면 이후 접수된 홀드가 매칭될 수 없다.
+	holdCoordinator.Shutdown()
 
 	drainDeadline := time.After(30 * time.Second)
 	me.Stop()
