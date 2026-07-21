@@ -138,11 +138,19 @@ func (me *MatchingEngine) Start() {
 		ticker := time.NewTicker(me.interval())
 		defer ticker.Stop()
 		for {
+			// 취소 우선: 대기 중 취소를 먼저 논블로킹으로 전부 드레인.
 			select {
-			case order := <-me.OrderCh:
-				me.processOrder(order)
 			case cmd := <-me.CancelCh:
 				me.processCancel(cmd)
+				continue
+			default:
+			}
+			// 취소가 없을 때만 주문/ticker/stop.
+			select {
+			case cmd := <-me.CancelCh:
+				me.processCancel(cmd)
+			case order := <-me.OrderCh:
+				me.processOrder(order)
 			case <-ticker.C:
 				// 코얼레싱: dirty 심볼의 스냅샷만 생성해 캐시 저장 + 논블로킹 브로드캐스트.
 				me.flushSnapshots()

@@ -781,3 +781,55 @@ func TestIsIntakeAdmissibleFalseAtHighWatermark(t *testing.T) {
 	}
 	assert.False(t, me.IsIntakeAdmissible("BTC")) // high-watermark 도달 시 거절
 }
+
+func TestEngineProcessesCancelsBeforeNewOrders(t *testing.T) {
+	me := NewMatchingEngine() // 아직 Start 안 함 — 채널 선주입 가능(버퍼 1024)
+	book := me.GetOrderBook("BTC")
+	const M, N = 5, 5
+
+	// 취소 대상: price 200 매도 M건(ID 1..M).
+	for i := 1; i <= M; i++ {
+		book.AddOrder(&Order{ID: uint(i), UserID: 100, CoinSymbol: "BTC",
+			Side: model.OrderSideSell, OrderType: model.OrderTypeLimit,
+			Price: decimal.NewFromInt(200), Amount: decimal.NewFromInt(1)})
+	}
+	// 매칭 대상: price 100 매도 N건(ID 1001..). 들어올 매수와 체결돼 Trade 방출.
+	for i := 1; i <= N; i++ {
+		book.AddOrder(&Order{ID: uint(1000 + i), UserID: 101, CoinSymbol: "BTC",
+			Side: model.OrderSideSell, OrderType: model.OrderTypeLimit,
+			Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)})
+	}
+	// CancelCh 선주입: price 200 매도 취소 M건(Removed=true → OrderCancelled 방출).
+	for i := 1; i <= M; i++ {
+		me.CancelCh <- CancelOrderCommand{CoinSymbol: "BTC", OrderID: uint(i),
+			Side: model.OrderSideSell, Price: decimal.NewFromInt(200)}
+	}
+	// OrderCh 선주입: price 100 매수 N건 → price 100 매도와 체결 → Trade N건.
+	for i := 1; i <= N; i++ {
+		me.OrderCh <- &Order{ID: uint(2000 + i), UserID: uint(200 + i), CoinSymbol: "BTC",
+			Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit,
+			Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)}
+	}
+
+	me.Start()
+	defer func() { me.Stop(); <-me.Done() }()
+
+	kinds := make([]string, 0, M+N)
+	for len(kinds) < M+N {
+		select {
+		case ev := <-me.ExecutionCh:
+			switch {
+			case ev.OrderCancelled != nil:
+				kinds = append(kinds, "cancel")
+			case ev.Trade != nil:
+				kinds = append(kinds, "trade")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out after %d events: %v", len(kinds), kinds)
+		}
+	}
+	// 우선순위 실증: 첫 M개가 전부 cancel(동등 select였다면 섞였을 것).
+	for i := 0; i < M; i++ {
+		assert.Equalf(t, "cancel", kinds[i], "first %d events must be cancels (priority), got %v", M, kinds)
+	}
+}
