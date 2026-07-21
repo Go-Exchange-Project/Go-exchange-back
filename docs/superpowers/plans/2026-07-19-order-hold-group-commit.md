@@ -43,7 +43,7 @@
 **Interfaces:**
 - Produces: `(*OrderRepository).CreateOrders(orders []*model.Order) error` — Task 3이 통과 주문 일괄 삽입에 사용. GORM이 각 원소의 `ID`를 채운다.
 
-- [ ] **Step 1: 실패 통합 테스트** — 2건 배치 삽입 후 각 `ID`가 채워지고 순서가 보존되는지:
+- [x] **Step 1: 실패 통합 테스트** — 2건 배치 삽입 후 각 `ID`가 채워지고 순서가 보존되는지:
 
 ```go
 func TestIntegrationCreateOrdersAssignsIDsInOrder(t *testing.T) {
@@ -64,7 +64,7 @@ func TestIntegrationCreateOrdersAssignsIDsInOrder(t *testing.T) {
 
 Run: `go test ./internal/repository/... -run TestIntegrationCreateOrders -v` → FAIL(undefined).
 
-- [ ] **Step 2: 구현** — GORM 배치 create(슬라이스 create가 각 원소 ID를 채움):
+- [x] **Step 2: 구현** — GORM 배치 create(슬라이스 create가 각 원소 ID를 채움):
 
 ```go
 func (r *OrderRepository) CreateOrders(orders []*model.Order) error {
@@ -75,8 +75,8 @@ func (r *OrderRepository) CreateOrders(orders []*model.Order) error {
 }
 ```
 
-- [ ] **Step 3: 통과 + 회귀** — Run: `go test ./internal/repository/... -count=1` → PASS.
-- [ ] **Step 4: Commit** — 초안: `feat(repository): 주문 배치 INSERT CreateOrders 추가 (2차 ②)`
+- [x] **Step 3: 통과 + 회귀** — Run: `go test ./internal/repository/... -count=1` → PASS.
+- [x] **Step 4: Commit** — 초안: `feat(repository): 주문 배치 INSERT CreateOrders 추가 (2차 ②)`
 
 ---
 
@@ -89,7 +89,7 @@ func (r *OrderRepository) CreateOrders(orders []*model.Order) error {
 **Interfaces:**
 - Produces: `persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error` — `CreateOrder`(no-coordinator)·Task 4(폴백) 공유.
 
-- [ ] **Step 1: 추출** — 현재 `CreateOrder`의 DB 트랜잭션 블록을 패키지 함수로 추출(로직 그대로):
+- [x] **Step 1: 추출** — 현재 `CreateOrder`의 DB 트랜잭션 블록을 패키지 함수로 추출(로직 그대로):
 
 ```go
 // persistAndHold는 주문 1건을 한 트랜잭션에 영속화하고 자금을 홀드한다.
@@ -109,8 +109,8 @@ func persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, walletRe
 
 `CreateOrder`의 해당 트랜잭션 호출을 `persistAndHold(s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository, order)`로 교체(이 태스크에선 아직 코디네이터 미도입 — 동작 완전 동일).
 
-- [ ] **Step 2: 회귀** — Run: `go test ./internal/service/... -count=1` → 기존 CreateOrder·접수 분리(①)·정산 테스트 **무수정 그린**(동작 불변의 증거).
-- [ ] **Step 3: Commit** — 초안: `refactor(order): 단건 persist+hold 경로를 persistAndHold로 추출 (2차 ②)`
+- [x] **Step 2: 회귀** — Run: `go test ./internal/service/... -count=1` → 기존 CreateOrder·접수 분리(①)·정산 테스트 **무수정 그린**(동작 불변의 증거).
+- [x] **Step 3: Commit** — 초안: `refactor(order): 단건 persist+hold 경로를 persistAndHold로 추출 (2차 ②)`
 
 ---
 
@@ -123,7 +123,7 @@ func persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, walletRe
 **Interfaces:**
 - Produces: `holdResult{Order *model.Order, Err error}`, `HoldCoordinator{DB, OrderRepo, WalletRepo, LedgerRepo, ...}`, `(*HoldCoordinator).HoldBatch(orders []*model.Order) ([]holdResult, error)` — Task 4가 사용. 반환 `([]holdResult, nil)`이면 커밋 성공(`holdResult.Err`가 개별 잔고부족 ConflictError일 수 있음); `(nil, err)`이면 txn-레벨 실패(폴백 대상, 이때 모든 orders의 `.ID`는 0으로 리셋됨).
 
-- [ ] **Step 1: 실패 통합 테스트** — 등가성 + 개별 격리:
+- [x] **Step 1: 실패 통합 테스트** — 등가성 + 개별 격리:
 
 ```go
 // 등가성: 같은 주문 시퀀스를 HoldBatch(userA) vs persistAndHold 순차(userB)로 처리 →
@@ -143,7 +143,7 @@ func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T)
 
 Run: `go test ./internal/service/... -run TestIntegrationHoldBatch -v` → FAIL(undefined).
 
-- [ ] **Step 2: 타입 + HoldBatch 구현** (`hold_coordinator.go`) — B-4 `SettleTradeBatch` 구조 계승:
+- [x] **Step 2: 타입 + HoldBatch 구현** (`hold_coordinator.go`) — B-4 `SettleTradeBatch` 구조 계승:
 
 ```go
 type holdRequest struct {
@@ -317,8 +317,8 @@ func (c *HoldCoordinator) HoldBatch(orders []*model.Order) ([]holdResult, error)
 }
 ```
 
-- [ ] **Step 3: 통과** — Run: `go test ./internal/service/... -run TestIntegrationHoldBatch -v` → PASS(3건). `import "sort"` 확인.
-- [ ] **Step 4: Commit** — 초안: `feat(order): 자금 홀드 배치 트랜잭션 HoldBatch 추가 (2차 ②)`
+- [x] **Step 3: 통과** — Run: `go test ./internal/service/... -run TestIntegrationHoldBatch -v` → PASS(3건). `import "sort"` 확인.
+- [x] **Step 4: Commit** — 초안: `feat(order): 자금 홀드 배치 트랜잭션 HoldBatch 추가 (2차 ②)`
 
 ---
 
@@ -334,11 +334,11 @@ func (c *HoldCoordinator) HoldBatch(orders []*model.Order) ([]holdResult, error)
 - Produces: `NewHoldCoordinator(...)`, `(*HoldCoordinator).Run()`, `(*HoldCoordinator).Submit(order) (*model.Order, error)`, `(*HoldCoordinator).Shutdown()` — Task 5(main·CreateOrder)가 사용.
 - Produces: `config.HoldBatchSizeFromEnv() int`(기본 64), `metrics.HoldBatchSize`/`HoldBatchFallbacksTotal`.
 
-- [ ] **Step 1: 설정 (TDD)** — `EnvGOExchangeHoldBatchSize`+`HoldBatchSizeFromEnv`(기본 64, `OutboxBatchSizeFromEnv` 패턴, 3케이스). Run: `go test ./config/... -run TestHoldBatchSize -v` → PASS.
+- [x] **Step 1: 설정 (TDD)** — `EnvGOExchangeHoldBatchSize`+`HoldBatchSizeFromEnv`(기본 64, `OutboxBatchSizeFromEnv` 패턴, 3케이스). Run: `go test ./config/... -run TestHoldBatchSize -v` → PASS.
 
-- [ ] **Step 2: 메트릭 (TDD)** — `hold_batch_size`(버킷 1,2,4,8,16,32,64,128), `hold_batch_fallbacks_total`, 그리고 입력 채널 게이지 등록 함수 `RegisterHoldCoordinatorInputGauge(lenFn func() int)`(기존 `RegisterMatchingEngineShardOrderChannelLenGauges` 패턴 — 게이지 정의 + main이 넘기는 len 클로저를 `promauto.NewGaugeFunc`로 등록). `reconciliation_test.go` 스타일 검증.
+- [x] **Step 2: 메트릭 (TDD)** — `hold_batch_size`(버킷 1,2,4,8,16,32,64,128), `hold_batch_fallbacks_total`, 그리고 입력 채널 게이지 등록 함수 `RegisterHoldCoordinatorInputGauge(lenFn func() int)`(기존 `RegisterMatchingEngineShardOrderChannelLenGauges` 패턴 — 게이지 정의 + main이 넘기는 len 클로저를 `promauto.NewGaugeFunc`로 등록). `reconciliation_test.go` 스타일 검증.
 
-- [ ] **Step 3: 실패 테스트 (코디네이터 동작)**:
+- [x] **Step 3: 실패 테스트 (코디네이터 동작)**:
 
 ```go
 // Submit→Run 왕복: 여유 시 성공 order+id 반환.
@@ -351,7 +351,7 @@ func TestIntegrationHoldCoordinatorFallsBackOnBatchError(t *testing.T)
 func TestIntegrationHoldCoordinatorShutdownDrains(t *testing.T)
 ```
 
-- [ ] **Step 4: 구현** — `Run`/`collectBatch`(OutboxWriter 미러링)/`processBatch`(폴백)/`Submit`(바운디드)/`Shutdown`:
+- [x] **Step 4: 구현** — `Run`/`collectBatch`(OutboxWriter 미러링)/`processBatch`(폴백)/`Submit`(바운디드)/`Shutdown`:
 
 ```go
 const defaultHoldBatchSize = 64
@@ -451,8 +451,8 @@ func (c *HoldCoordinator) logf(format string, args ...interface{}) {
 }
 ```
 
-- [ ] **Step 5: 통과 + -race** — Run: `go test ./internal/service/... ./config/... ./internal/metrics/... -count=1` → PASS. `go test ./internal/service/... -race -count=1` → PASS.
-- [ ] **Step 6: Commit** — 초안: `feat(order): 홀드 코디네이터 goroutine·폴백·바운디드 제출 추가 (2차 ②)`
+- [x] **Step 5: 통과 + -race** — Run: `go test ./internal/service/... ./config/... ./internal/metrics/... -count=1` → PASS. `go test ./internal/service/... -race -count=1` → PASS.
+- [x] **Step 6: Commit** — 초안: `feat(order): 홀드 코디네이터 goroutine·폴백·바운디드 제출 추가 (2차 ②)`
 
 ---
 
@@ -466,7 +466,7 @@ func (c *HoldCoordinator) logf(format string, args ...interface{}) {
 **Interfaces:**
 - Consumes: 전 태스크 전부.
 
-- [ ] **Step 1: CreateOrder 분기** — `OrderService`에 `HoldCoordinator *HoldCoordinator` 필드 추가. `CreateOrder`의 `persistAndHold(...)` 직접 호출을 분기로:
+- [x] **Step 1: CreateOrder 분기** — `OrderService`에 `HoldCoordinator *HoldCoordinator` 필드 추가. `CreateOrder`의 `persistAndHold(...)` 직접 호출을 분기로:
 
 ```go
 	// [②] 코디네이터 있으면 배치 경유, 없으면(테스트·미배선) 단건 직접.
@@ -485,7 +485,7 @@ func (c *HoldCoordinator) logf(format string, args ...interface{}) {
 
 (① 입장 게이트는 이 앞에, 바운디드 엔진 핸드오프는 이 뒤에 — 무변경.)
 
-- [ ] **Step 2: main.go 배선** — 코디네이터 생성·기동·주입·종료·게이지:
+- [x] **Step 2: main.go 배선** — 코디네이터 생성·기동·주입·종료·게이지:
 
 ```go
 	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, walletRepo, repository.NewLedgerRepository(config.DB), config.HoldBatchSizeFromEnv())
@@ -496,11 +496,11 @@ func (c *HoldCoordinator) logf(format string, args ...interface{}) {
 
 종료 순서(HTTP Shutdown 뒤, 엔진 Stop 앞)에 `holdCoordinator.Shutdown()` 삽입 — HTTP가 in-flight CreateOrder를 먼저 드레인하므로 `input` close 시 제출 경쟁 없음(send-on-closed 없음). `InputLen() int { return len(c.input) }` 접근자 추가.
 
-- [ ] **Step 3: 통합 테스트** — 코디네이터를 주입한 `OrderService.CreateOrder`가 정상 홀드·200, 잔고 부족 시 409, 리컨실리에이션 위반 0.
+- [x] **Step 3: 통합 테스트** — 코디네이터를 주입한 `OrderService.CreateOrder`가 정상 홀드·200, 잔고 부족 시 409, 리컨실리에이션 위반 0.
 
-- [ ] **Step 4: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0) + `go test ./internal/service/... ./cmd/... -race -count=1` → PASS. 기존 정산·부트스트랩·outbox 통합 무수정 그린.
+- [x] **Step 4: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0) + `go test ./internal/service/... ./cmd/... -race -count=1` → PASS. 기존 정산·부트스트랩·outbox 통합 무수정 그린.
 
-- [ ] **Step 5: Commit** — 초안: `feat(order): CreateOrder를 홀드 코디네이터에 배선 (2차 ②)`
+- [x] **Step 5: Commit** — 초안: `feat(order): CreateOrder를 홀드 코디네이터에 배선 (2차 ②)`
 
 ---
 
@@ -510,10 +510,10 @@ func (c *HoldCoordinator) logf(format string, args ...interface{}) {
 - Create: `docs/refactor/12_2차②_자금홀드_그룹커밋_완료.md`
 - Modify: `docs/refactor/README.md`(2차 ② ✅)
 
-- [ ] **Step 1: 전체 검증** — build + vet + 전체 스위트(통합 SKIP 0) + `-race`(matching·service·cmd) 전부 PASS.
-- [ ] **Step 2: 완료 문서** — 왜(21·22번 DB CPU 병목, holdOrderAssets 26%) / 어떻게(코디네이터 그룹커밋 + fold-검증 + 개별 격리 + 단건 폴백, 스펙 링크) / 결과(등가성·격리·폴백·shutdown 테스트 요약, **처리량 수치 주장 금지 — 실증은 ⑤/23번 병기**).
-- [ ] **Step 3: README** — 2차 표 ② 🔨→✅ + 완료 문서 링크.
-- [ ] **Step 4: Commit + 푸시 + CI** — author→reviewer, `gh run watch` 그린.
+- [x] **Step 1: 전체 검증** — build + vet + 전체 스위트(통합 SKIP 0) + `-race`(matching·service·cmd) 전부 PASS.
+- [x] **Step 2: 완료 문서** — 왜(21·22번 DB CPU 병목, holdOrderAssets 26%) / 어떻게(코디네이터 그룹커밋 + fold-검증 + 개별 격리 + 단건 폴백, 스펙 링크) / 결과(등가성·격리·폴백·shutdown 테스트 요약, **처리량 수치 주장 금지 — 실증은 ⑤/23번 병기**).
+- [x] **Step 3: README** — 2차 표 ② 🔨→✅ + 완료 문서 링크.
+- [x] **Step 4: Commit + 푸시 + CI** — author→reviewer, `gh run watch` 그린.
 
 ---
 
