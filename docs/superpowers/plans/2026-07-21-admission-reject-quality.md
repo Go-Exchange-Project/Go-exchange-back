@@ -29,7 +29,7 @@
 **Interfaces:**
 - 변경 없음(내부). `WriteError`/`AbortWithError` 시그니처 그대로 — 503일 때만 헤더 부가.
 
-- [ ] **Step 1: 실패 테스트** — `internal/httpapi/response_test.go`:
+- [x] **Step 1: 실패 테스트** — `internal/httpapi/response_test.go`:
 
 ```go
 package httpapi
@@ -62,7 +62,7 @@ func TestWriteErrorNoRetryAfterOnNon503(t *testing.T) {
 
 Run: `go test ./internal/httpapi/... -run TestWriteError -v` → FAIL(Retry-After 헤더 없음).
 
-- [ ] **Step 2: 구현** — `response.go`에 헬퍼 + `WriteError`/`AbortWithError`에 적용:
+- [x] **Step 2: 구현** — `response.go`에 헬퍼 + `WriteError`/`AbortWithError`에 적용:
 
 ```go
 // retryAfterSeconds: 503(과부하) 응답의 Retry-After 헤더 값(초). 클라이언트 백오프
@@ -78,8 +78,8 @@ func setRetryAfterForOverload(c *gin.Context, status int) {
 
 `WriteError`·`AbortWithError`의 `c.JSON`/`c.AbortWithStatusJSON` **앞에** `setRetryAfterForOverload(c, status)` 호출 추가(헤더는 바디 쓰기 전에 세팅해야 함).
 
-- [ ] **Step 3: 통과 + 회귀** — Run: `go test ./internal/httpapi/... -count=1` → PASS. 기존 httpapi 테스트(있으면) 무영향.
-- [ ] **Step 4: Commit** — 초안: `feat(httpapi): 503 응답에 Retry-After 헤더 추가 (2차 ④)`
+- [x] **Step 3: 통과 + 회귀** — Run: `go test ./internal/httpapi/... -count=1` → PASS. 기존 httpapi 테스트(있으면) 무영향.
+- [x] **Step 4: Commit** — 초안: `feat(httpapi): 503 응답에 Retry-After 헤더 추가 (2차 ④)`
 
 ---
 
@@ -94,7 +94,7 @@ func setRetryAfterForOverload(c *gin.Context, status int) {
 **Interfaces:**
 - Produces: `metrics.OrdersAdmissionRejectedTotal *prometheus.CounterVec`(라벨 `stage`). stage ∈ {`engine_gate`, `engine_handoff`, `coordinator`}.
 
-- [ ] **Step 1: 메트릭 실패 테스트** — `internal/metrics/admission_test.go`:
+- [x] **Step 1: 메트릭 실패 테스트** — `internal/metrics/admission_test.go`:
 
 ```go
 package metrics_test
@@ -117,7 +117,7 @@ func TestOrdersAdmissionRejectedTotalIncrementsPerStage(t *testing.T) {
 
 Run: `go test ./internal/metrics/... -run TestOrdersAdmissionRejected -v` → FAIL(undefined).
 
-- [ ] **Step 2: 메트릭 추가** — `metrics.go`의 `var (...)` 블록에:
+- [x] **Step 2: 메트릭 추가** — `metrics.go`의 `var (...)` 블록에:
 
 ```go
 	OrdersAdmissionRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -128,7 +128,7 @@ Run: `go test ./internal/metrics/... -run TestOrdersAdmissionRejected -v` → FA
 
 Run: `go test ./internal/metrics/... -count=1` → PASS.
 
-- [ ] **Step 3: 세 거절 지점 증분** — 각 지점이 자기 stage를 `Inc()`:
+- [x] **Step 3: 세 거절 지점 증분** — 각 지점이 자기 stage를 `Inc()`:
 
 `order_service.go` — import에 `"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"` 추가. `CreateOrder`의 두 거절 지점:
 
@@ -161,7 +161,7 @@ Run: `go test ./internal/metrics/... -count=1` → PASS.
 	}
 ```
 
-- [ ] **Step 4: 거절 테스트에 델타 단언 추가** — 기존 통합 테스트를 확장(카운터는 전역이라 before/after 델타로):
+- [x] **Step 4: 거절 테스트에 델타 단언 추가** — 기존 통합 테스트를 확장(카운터는 전역이라 before/after 델타로):
   - `TestIntegrationCreateOrderFastRejectsWhenIntakeSaturated`(①게이트)에 `engine_gate` +1 단언.
   - `TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut`(①핸드오프)에 `engine_handoff` +1 단언.
   - `TestHoldCoordinatorSubmitReturnsUnavailableWhenInputFull`(②코디네이터)에 `coordinator` +1 단언.
@@ -174,8 +174,8 @@ Run: `go test ./internal/metrics/... -count=1` → PASS.
 	assert.Equal(t, before+1, after)
 ```
 
-- [ ] **Step 5: 통과 + 회귀** — `go build ./...`; Run: `go test ./internal/service/... ./internal/metrics/... -count=1` → PASS. 기존 ①②③ 테스트 무수정 그린(거절 동작 불변). `go test ./internal/service/... -race -count=1` PASS.
-- [ ] **Step 6: Commit** — 초안: `feat(order): 입장 거절 셰딩 메트릭 orders_admission_rejected_total 추가 (2차 ④)`
+- [x] **Step 5: 통과 + 회귀** — `go build ./...`; Run: `go test ./internal/service/... ./internal/metrics/... -count=1` → PASS. 기존 ①②③ 테스트 무수정 그린(거절 동작 불변). `go test ./internal/service/... -race -count=1` PASS.
+- [x] **Step 6: Commit** — 초안: `feat(order): 입장 거절 셰딩 메트릭 orders_admission_rejected_total 추가 (2차 ④)`
 
 ---
 
@@ -185,10 +185,10 @@ Run: `go test ./internal/metrics/... -count=1` → PASS.
 - Create: `docs/refactor/14_2차④_입장_거절_품질_완료.md`
 - Modify: `docs/refactor/README.md`(2차 ④ ✅)
 
-- [ ] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0) + `go test ./internal/service/... ./cmd/... -race -count=1` → 전부 PASS. 기존 ①②③·정산·부트스트랩 통합 무수정 그린.
-- [ ] **Step 2: 완료 문서** — `14_2차④_입장_거절_품질_완료.md`: 왜(하드 보장은 ①②가 delivered, ④는 거절 품질 — Retry-After 부재로 retry storm, 셰딩 관측 부재) / 어떻게(WriteError 503 헤더 중앙화, stage 3종 카운터, 통합·히스테리시스 의도적 제외) / 결과(헤더·메트릭 테스트, 회귀 그린, **셰딩률 실증은 ⑤/23번 병기 — 수치 주장 금지**).
-- [ ] **Step 3: README** — 2차 표 ④ 🔨→✅ + 완료 문서 링크.
-- [ ] **Step 4: Commit + 푸시 + CI** — author→reviewer, `gh run watch` 그린.
+- [x] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0) + `go test ./internal/service/... ./cmd/... -race -count=1` → 전부 PASS. 기존 ①②③·정산·부트스트랩 통합 무수정 그린.
+- [x] **Step 2: 완료 문서** — `14_2차④_입장_거절_품질_완료.md`: 왜(하드 보장은 ①②가 delivered, ④는 거절 품질 — Retry-After 부재로 retry storm, 셰딩 관측 부재) / 어떻게(WriteError 503 헤더 중앙화, stage 3종 카운터, 통합·히스테리시스 의도적 제외) / 결과(헤더·메트릭 테스트, 회귀 그린, **셰딩률 실증은 ⑤/23번 병기 — 수치 주장 금지**).
+- [x] **Step 3: README** — 2차 표 ④ 🔨→✅ + 완료 문서 링크.
+- [x] **Step 4: Commit + 푸시 + CI** — author→reviewer, `gh run watch` 그린.
 
 ---
 
