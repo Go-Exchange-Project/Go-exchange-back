@@ -256,12 +256,17 @@ func TestHoldCoordinatorSubmitReturnsUnavailableWhenInputFull(t *testing.T) {
 	c.input <- holdRequest{order: &model.Order{}, resultCh: make(chan holdResult, 1)}
 	c.input <- holdRequest{order: &model.Order{}, resultCh: make(chan holdResult, 1)}
 
+	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("coordinator"))
+
 	_, err := c.Submit(&model.Order{})
 
 	require.Error(t, err)
 	kind, ok := DomainErrorKind(err)
 	require.True(t, ok)
 	assert.Equal(t, ErrorKindUnavailable, kind)
+
+	after := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("coordinator"))
+	assert.Equal(t, before+1, after)
 }
 
 // 폴백: DB 커넥션을 닫아 HoldBatch(트랜잭션)를 강제로 실패시키면, 코디네이터는

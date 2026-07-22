@@ -89,6 +89,11 @@ var (
 		Name: "hold_batch_fallbacks_total",
 		Help: "Total number of times batch hold failed and fell back to per-order persist+hold.",
 	})
+
+	OrdersAdmissionRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "orders_admission_rejected_total",
+		Help: "Total orders fast-rejected by admission control (503), labeled by shedding stage.",
+	}, []string{"stage"})
 )
 
 // RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를

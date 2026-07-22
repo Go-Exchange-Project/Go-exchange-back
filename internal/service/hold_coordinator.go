@@ -204,6 +204,7 @@ func (c *HoldCoordinator) Submit(order *model.Order) (*model.Order, error) {
 	select {
 	case c.input <- req:
 	default:
+		metrics.OrdersAdmissionRejectedTotal.WithLabelValues("coordinator").Inc()
 		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
 	}
 	res := <-req.resultCh

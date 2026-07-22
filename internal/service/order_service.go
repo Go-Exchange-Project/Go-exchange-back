@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/shopspring/decimal"
@@ -110,6 +111,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 
 	// 입장 게이트: 엔진 유입이 포화면 DB 작업 전에 빠른 거절(503).
 	if s.MatchingEngine != nil && !s.MatchingEngine.IsIntakeAdmissible(order.CoinSymbol) {
+		metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_gate").Inc()
 		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
 	}
 
@@ -145,6 +147,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 			FilledQuoteAmount: order.FilledQuoteAmount,
 		}, s.acceptanceTimeout())
 		if !submitted {
+			metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff").Inc()
 			if rerr := s.rejectAcceptedOrder(order); rerr != nil {
 				return nil, fmt.Errorf("order intake saturated and hold release failed for order %d: %w", order.ID, rerr)
 			}

@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -97,6 +99,8 @@ func TestIntegrationCreateOrderFastRejectsWhenIntakeSaturated(t *testing.T) {
 	fakeEngine := &fakeAcceptanceEngine{admissible: false, submitSucceeds: true}
 	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), fakeEngine)
 
+	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_gate"))
+
 	order, err := orderService.CreateOrder(CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
@@ -110,6 +114,9 @@ func TestIntegrationCreateOrderFastRejectsWhenIntakeSaturated(t *testing.T) {
 	kind, ok := DomainErrorKind(err)
 	require.True(t, ok)
 	assert.Equal(t, ErrorKindUnavailable, kind)
+
+	after := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_gate"))
+	assert.Equal(t, before+1, after)
 
 	var orderCount int64
 	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", userID).Count(&orderCount).Error)
@@ -142,6 +149,8 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 	fakeEngine := &fakeAcceptanceEngine{admissible: true, submitSucceeds: false}
 	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), fakeEngine)
 
+	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff"))
+
 	order, err := orderService.CreateOrder(CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
@@ -155,6 +164,9 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 	kind, ok := DomainErrorKind(err)
 	require.True(t, ok)
 	assert.Equal(t, ErrorKindUnavailable, kind)
+
+	after := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff"))
+	assert.Equal(t, before+1, after)
 
 	var orderCount int64
 	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", userID).Count(&orderCount).Error)
