@@ -69,3 +69,11 @@ func TestWriteErrorNoRetryAfterOnNon503(t *testing.T) {
 	WriteError(c, http.StatusConflict, CodeConflict, "conflict")
 	assert.Empty(t, w.Header().Get("Retry-After"))
 }
+
+func TestAbortWithErrorSetsRetryAfterOn503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	AbortWithError(c, http.StatusServiceUnavailable, CodeUnavailable, "saturated")
+	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+}
