@@ -22,6 +22,7 @@ const (
 	CodeValidation         = "VALIDATION_ERROR"
 	CodeInvalidCredentials = "INVALID_CREDENTIALS"
 	CodeUnavailable        = "SERVICE_UNAVAILABLE"
+	retryAfterSeconds      = "1"
 )
 
 type Error struct {
@@ -37,11 +38,18 @@ type DataResponse struct {
 	Data interface{} `json:"data"`
 }
 
+func setRetryAfterForOverload(c *gin.Context, status int) {
+	if status == http.StatusServiceUnavailable {
+		c.Header("Retry-After", retryAfterSeconds)
+	}
+}
+
 func WriteData(c *gin.Context, status int, data interface{}) {
 	c.JSON(status, DataResponse{Data: data})
 }
 
 func WriteError(c *gin.Context, status int, code string, message string) {
+	setRetryAfterForOverload(c, status)
 	c.JSON(status, ErrorResponse{Error: Error{
 		Code:    normalizeCode(code),
 		Message: normalizeMessage(message),
@@ -49,6 +57,7 @@ func WriteError(c *gin.Context, status int, code string, message string) {
 }
 
 func AbortWithError(c *gin.Context, status int, code string, message string) {
+	setRetryAfterForOverload(c, status)
 	c.AbortWithStatusJSON(status, ErrorResponse{Error: Error{
 		Code:    normalizeCode(code),
 		Message: normalizeMessage(message),

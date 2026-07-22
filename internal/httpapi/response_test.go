@@ -53,3 +53,19 @@ func TestCodeForStatus(t *testing.T) {
 	assert.Equal(t, CodeInternal, CodeForStatus(http.StatusInternalServerError))
 	assert.Equal(t, CodeBadRequest, CodeForStatus(http.StatusTeapot))
 }
+
+func TestWriteErrorSetsRetryAfterOn503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	WriteError(c, http.StatusServiceUnavailable, CodeUnavailable, "saturated")
+	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+}
+
+func TestWriteErrorNoRetryAfterOnNon503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	WriteError(c, http.StatusConflict, CodeConflict, "conflict")
+	assert.Empty(t, w.Header().Get("Retry-After"))
+}
