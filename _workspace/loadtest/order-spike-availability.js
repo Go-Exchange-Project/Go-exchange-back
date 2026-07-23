@@ -178,9 +178,15 @@ function submitOrder(user, body) {
   });
   if (res.status === 503) {
     fastReject503.add(1);
-    if (!res.headers['Retry-After']) {
+    const retryAfterHeader = res.headers['Retry-After'];
+    if (!retryAfterHeader) {
       rejectMissingRetryAfter.add(1);
     }
+    // Retry-After를 실제로 존중해 백오프한다 — 헤더 존재 여부만 세고 무시하면
+    // 클라이언트가 즉시 재시도하는 retry storm을 만들어 ④가 막으려는 문제를
+    // 스스로 재현하게 된다. 헤더 값(초) + 지터로 다음 제출을 늦춘다.
+    const retryAfterSeconds = parseFloat(retryAfterHeader) || 1;
+    sleep(retryAfterSeconds + Math.random() * 0.5);
   }
   return res;
 }
