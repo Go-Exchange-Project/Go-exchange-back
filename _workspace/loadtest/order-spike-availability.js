@@ -1,7 +1,8 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import exec from 'k6/execution';
-import { Counter } from 'k6/metrics';
+import { Counter, Rate } from 'k6/metrics';
+import { classifyOrderResponse, classifyCancelResponse } from './sli-classify.js';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const DEV_TOOLS_TOKEN = __ENV.DEV_TOOLS_TOKEN;
@@ -31,6 +32,14 @@ const cancelResponseCallback = http.expectedStatuses(200, 404, 409);
 // 주문 생성의 503(입장 거절)은 ④의 의도된 "우아한 셰딩" — http_req_failed로 안 셈,
 // custom_fast_reject_503로 별도 집계.
 const orderResponseCallback = http.expectedStatuses(200, 201, 503);
+
+// 3차③: 뭉뚱그린 가용성을 세 독립 SLI로 분리(정의는 sli-classify.js). threshold는
+// 안 건다 — 이 단계는 정의+기준선 수집.
+const RESPONSE_SLO_MS = parseInt(__ENV.RESPONSE_SLO_MS || '1000', 10);
+
+const orderResponseAvailability = new Rate('sli_order_response_availability');
+const orderBusinessSuccess = new Rate('sli_order_business_success');
+const cancelSuccessSli = new Rate('sli_cancel_success');
 
 const orderSuccess = new Counter('custom_order_success');
 const orderFail = new Counter('custom_order_fail');
@@ -173,6 +182,11 @@ function submitOrder(user, body) {
     responseCallback: orderResponseCallback,
     timeout: '90s',
   });
+  // Retry-After sleep 전에 분류·add — sleep은 클라 백오프이지 서버 지연이
+  // 아니므로 응답 가용성 시간에 섞이면 안 된다.
+  const cls = classifyOrderResponse(res.status, res.timings.duration, RESPONSE_SLO_MS);
+  orderResponseAvailability.add(cls.available);
+  orderBusinessSuccess.add(cls.businessSuccess);
   check(res, {
     'order accepted or gracefully rejected': (r) => r.status === 200 || r.status === 201 || r.status === 503,
   });
@@ -227,6 +241,11 @@ function makerFlow(user) {
   } else {
     cancelFail.add(1);
   }
+
+  // 404/409는 정상 경쟁 결과라 분모에서 자연 제외(add 호출 안 함).
+  const cancelClass = classifyCancelResponse(cancelRes.status);
+  if (cancelClass === 'success') cancelSuccessSli.add(true);
+  else if (cancelClass === 'infra_fail') cancelSuccessSli.add(false);
 }
 
 function takerMarketFlow(user) {
