@@ -28,7 +28,7 @@
 - `classifyOrderResponse(status, durationMs, sloMs) → { available: bool, businessSuccess: bool }`
 - `classifyCancelResponse(status) → 'success' | 'excluded' | 'infra_fail'`
 
-- [ ] **Step 1: 셀프체크 먼저(판정표 각 행)** — `sli-classify.selftest.js`:
+- [x] **Step 1: 셀프체크 먼저(판정표 각 행)** — `sli-classify.selftest.js`:
 
 ```js
 import { classifyOrderResponse, classifyCancelResponse } from './sli-classify.js';
@@ -67,7 +67,7 @@ export default function () {
 
 Run: `k6 run _workspace/loadtest/sli-classify.selftest.js` → FAIL(모듈 없음).
 
-- [ ] **Step 2: 순수 함수 구현** — `sli-classify.js`:
+- [x] **Step 2: 순수 함수 구현** — `sli-classify.js`:
 
 ```js
 // 응답 상태·지연을 두 SLI 판정으로 분류(순수 — k6 의존 없음, 셀프체크가 검증).
@@ -89,7 +89,7 @@ export function classifyCancelResponse(status) {
 
 Run: `k6 run _workspace/loadtest/sli-classify.selftest.js` → PASS(`SLI selftest PASSED`, exit 0).
 
-- [ ] **Step 3: Commit** — 초안: `test(loadtest): SLI 분류 순수 함수 + k6 셀프체크 추가 (3차 ③)`
+- [x] **Step 3: Commit** — 초안: `test(loadtest): SLI 분류 순수 함수 + k6 셀프체크 추가 (3차 ③)`
 
 ---
 
@@ -98,7 +98,7 @@ Run: `k6 run _workspace/loadtest/sli-classify.selftest.js` → PASS(`SLI selftes
 **Files:**
 - Modify: `_workspace/loadtest/order-spike-availability.js`
 
-- [ ] **Step 1: import·상수·Rate 선언** — 상단에:
+- [x] **Step 1: import·상수·Rate 선언** — 상단에:
 
 ```js
 import { Rate } from 'k6/metrics';
@@ -113,7 +113,7 @@ const cancelSuccessSli = new Rate('sli_cancel_success');
 
 (기존 `Counter` import·카운터·`http.expectedStatuses`는 그대로 유지.)
 
-- [ ] **Step 2: 주문 SLI 배선** — `submitOrder`에서 `res` 수신 직후, **503 sleep 전에** 분류·add
+- [x] **Step 2: 주문 SLI 배선** — `submitOrder`에서 `res` 수신 직후, **503 sleep 전에** 분류·add
   (모든 주문 흐름이 `submitOrder`를 거치므로 한 곳에서 계측):
 
 ```js
@@ -127,7 +127,7 @@ const cancelSuccessSli = new Rate('sli_cancel_success');
   }
 ```
 
-- [ ] **Step 3: 취소 SLI 배선** — `makerFlow`의 `cancelRes` 처리 분기에 add(404/409는 add 안 함):
+- [x] **Step 3: 취소 SLI 배선** — `makerFlow`의 `cancelRes` 처리 분기에 add(404/409는 add 안 함):
 
 ```js
   const cancelClass = classifyCancelResponse(cancelRes.status);
@@ -137,7 +137,7 @@ const cancelSuccessSli = new Rate('sli_cancel_success');
   // 기존 cancelSuccess/cancelAlreadyFilled/cancelFail Counter는 그대로 유지
 ```
 
-- [ ] **Step 4: 로컬 스모크** — 로컬 backend 기동 후 소규모 오버라이드로 짧게:
+- [x] **Step 4: 로컬 스모크** — 로컬 backend 기동 후 소규모 오버라이드로 짧게:
   `k6 run -e BASE_URL=... -e DEV_TOOLS_TOKEN=... -e STAGE1_VUS=5 -e STAGE1_DURATION=5s
   -e STAGE2_VUS=5 -e STAGE3_VUS=5 -e STAGE3_DURATION=5s -e STAGE4_VUS=5 -e STAGE4_DURATION=5s
   -e STAGE5_VUS=5 -e STAGE6_VUS=5 -e STAGE6_DURATION=5s -e TOTAL_USERS=20 order-spike-availability.js`
@@ -145,7 +145,7 @@ const cancelSuccessSli = new Rate('sli_cancel_success');
   세 Rate가 출력되고 값이 sane(전부 성공 저부하 → 가용성·업무 ~100%). **파싱·집계가 도는지**가
   스모크의 목적(과부하 셰딩 재현은 GCP 몫). backend 없으면 스모크는 GCP 세션으로 미루고 셀프체크(Task 1)로 대체.
 
-- [ ] **Step 5: Commit** — 초안: `feat(loadtest): 스파이크 스크립트에 SLI 3분할 Rate 추가 (3차 ③)`
+- [x] **Step 5: Commit** — 초안: `feat(loadtest): 스파이크 스크립트에 SLI 3분할 Rate 추가 (3차 ③)`
 
 ---
 
@@ -155,13 +155,13 @@ const cancelSuccessSli = new Rate('sli_cancel_success');
 - Create: `docs/refactor/16_3차③_SLI_3분할_완료.md`
 - Modify: `docs/refactor/README.md`(3차 ③ ✅)
 
-- [ ] **Step 1: 완료 문서** — `16_3차③_SLI_3분할_완료.md`: 왜(23번 "가용성 vs 업무 vs 취소"
+- [x] **Step 1: 완료 문서** — `16_3차③_SLI_3분할_완료.md`: 왜(23번 "가용성 vs 업무 vs 취소"
   혼선) / 어떻게(3 Rate·판정표·RESPONSE_SLO_MS 1s·순수함수+셀프체크·whole-run·threshold 없음) /
   결과(셀프체크 PASS·스모크). **PromQL 유도 예시**(업무·취소 성공률을 기존
   `HTTPRequestsTotal{path,method,status}`에서 유도) 병기. **RESPONSE_SLO_MS는 벤치 경계 기본값이지
   프로덕션 SLO 선언 아님**을 명기.
-- [ ] **Step 2: README** — 3차 표 ③ 🔨→✅ + 완료 문서 링크.
-- [ ] **Step 3: Commit + 푸시 + CI** — author→reviewer. Go 무변경이라 CI는 회귀 없음 확인(`gh run watch`).
+- [x] **Step 2: README** — 3차 표 ③ 🔨→✅ + 완료 문서 링크.
+- [x] **Step 3: Commit + 푸시 + CI** — author→reviewer. Go 무변경이라 CI는 회귀 없음 확인(`gh run watch`).
 
 ---
 
