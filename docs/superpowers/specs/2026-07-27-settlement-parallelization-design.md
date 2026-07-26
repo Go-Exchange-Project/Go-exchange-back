@@ -11,8 +11,13 @@
 
 ## 무엇을 바꾸는가
 
-**정산 DB 작업은 병렬로, 외부로 나가는 브로드캐스트는 순서대로.** 정산 로직
-(`SettleTradeBatch`·폴백·멱등)은 **한 줄도 바꾸지 않고**, 심볼 큐 소비 구조만 바꾼다.
+**정산 DB 작업은 병렬로, 외부로 나가는 브로드캐스트는 순서대로.** **정산 도메인 로직**
+(`SettleTradeBatch`·멱등·폴백 의미론)은 그대로 두되, **orchestration helper는 바뀐다** — 현재
+`settleTradeBatchWithFallback`(main.go:551)은 정산과 브로드캐스트를 **한 함수 안에서** 수행하고
+반환값이 없어, worker가 "정산만 하고 결과를 coordinator에 넘기는" 구조가 불가능하다. 따라서:
+- **정산 결과를 반환하는 helper**(정산+폴백 수행 → 방출할 trade들 + 실패 정보 반환, 브로드캐스트 안 함)
+- **순서 커밋 단계의 broadcast helper**(coordinator가 `batchSeq` 순서로 호출)
+로 분리한다. 도메인 로직(트랜잭션·멱등·폴백 판단)은 이동만 하고 의미는 불변.
 
 ```
 단일 dispatcher
@@ -38,15 +43,58 @@
 
 ## 설계
 
-### 구조 (심볼 큐당)
+### 토폴로지 — 파티션 dispatcher 유지 + 전역 공용 worker pool
 
-- **dispatcher 1개**(현 워커 루프 자리): 큐에서 순차로 꺼내 `collectTradeBatch`로 배치(≤32) 구성 →
-  **배치에 단조 증가 `batchSeq` 부여** → 워커 풀에 던지고 **즉시 다음 배치 수집**(현재는 여기서 DB
-  왕복을 기다려 직렬화됨 = 진단이 확정한 병목). in-flight 카운터 증가.
-- **worker N개**: `settleTradeBatchWithFallback`의 **정산 부분만** 수행(브로드캐스트는 하지 않음) →
-  결과(`batchSeq` + 브로드캐스트할 trade들 + 실패 정보)를 **completion 채널**로 반환.
-- **coordinator**(dispatcher와 같은 goroutine): completion을 받아 작은 **pending map**에 저장하고
-  `nextBroadcastSeq`부터 **연속으로만** 방출 → 브로드캐스트가 디스패치 순서로 직렬화. in-flight 감소.
+기존 `settlementQueues`는 **심볼별이 아니라 해시 파티션 큐**(여러 심볼이 한 큐를 공유할 수 있다).
+이를 유지하고 **정산 worker만 전역 공유**한다:
+
+```
+hashed partition queues
+  dispatcher 0 ─┐
+  dispatcher 1 ─┼─→ global settlement worker pool (N)
+  ...           │
+  dispatcher P-1┘
+```
+
+- 각 **dispatcher가 자기 파티션의** 순서·종결 배리어·broadcast reorder 상태를 **소유**한다.
+- **전체 DB 동시성은 정확히 N**(파티션 수 × N이 아니다).
+- 기존 심볼 해시 라우팅·파티션 내 FIFO는 그대로 — 다중 심볼이 같은 파티션에 배정돼도 기존보다
+  약화되지 않는다.
+- **파티션 수 P**는 기존 `GOEXCHANGE_SETTLEMENT_WORKERS`가 계속 의미한다(**의미 변경 없음**).
+  동시 정산 수 N은 **신규 `GOEXCHANGE_SETTLEMENT_CONCURRENCY`** 로 분리한다(아래 "병렬도 설정").
+
+### dispatcher 상태기계 (교착 없는 event loop)
+
+dispatcher가 job 送信과 completion 수신을 **블로킹 순차**로 하면 교착한다:
+`dispatcher → 가득 찬 jobs 채널 send 대기` × `worker → 가득 찬 completion 채널 send 대기`
+→ worker가 jobs를 소비 못 하고 dispatcher는 completion을 못 받는다.
+
+따라서 dispatcher는 **항상 select로 multiplex하는 명시적 event loop**다:
+
+```go
+for {
+    select {
+    case jobs <- nextBatch:      // 배치 디스패치(있을 때만 활성 — 없으면 nil 채널)
+    case res := <-completions:   // in-flight 감소 + reorder 버퍼 + 순서대로 방출
+    case ev, ok := <-partitionQueue: // 입력 수집(배리어 중엔 nil 채널로 비활성)
+    }
+}
+```
+
+**규칙(불변식)**:
+- dispatcher는 **jobs send와 completion receive를 절대 분리해 블로킹하지 않는다**(항상 같은 select).
+- **종결 배리어 중에는 새 job을 dispatch하지 않고 completion만 수신**한다(입력·jobs 케이스를 nil로
+  비활성화) → in-flight 단조 감소 → 유한 시간에 0.
+- **채널 용량**: `jobs`는 전역 공용(용량 = N, worker 수와 동일하게 두어 대기 job을 최소화),
+  `completions`는 **파티션별**이며 용량 = 해당 파티션의 최대 in-flight(= N) → **worker의 completion
+  送信이 영구 블로킹하지 않는다**(각 in-flight 배치는 자기 슬롯을 이미 확보한 상태로만 디스패치된다).
+- **shutdown 순서**: 입력 close → 남은 배치 dispatch → completion drain(순서대로 방출) →
+  worker 종료 → 기존 도미노 유지.
+
+- **worker N개**: `settleTradeBatchWithFallback`의 **정산 부분만** 수행(브로드캐스트 안 함) →
+  결과(`batchSeq` + 방출할 trade들 + 실패 정보)를 자기 파티션 `completions`로 반환.
+- **coordinator 역할은 dispatcher와 같은 goroutine**(위 event loop): completion을 작은 **pending
+  map**에 저장하고 `nextBroadcastSeq`부터 **연속으로만** 방출.
 
 **추적 대상이 batch 단위**라 상태가 작다. trade별 low-watermark·gap 추적은 **불필요**.
 
@@ -71,10 +119,29 @@ dispatcher가 `Wait()`" 규칙이면 안전하지만(등록만 dispatcher 기준
 하므로 **completion 채널 + in-flight 카운터**가 더 자연스럽고 검증하기 쉽다. 배리어·종료 모두
 "in-flight가 0이 될 때까지 completion을 수신·방출"이라는 **하나의 루프**로 표현된다.
 
-### 정합성 근거
+### 정합성 근거 — 그리고 순서 독립성의 **실제 범위**(실측)
 
-- **체결 간 교환법칙**: 홀드가 자금을 미리 예약하므로 정산은 예약분 이동 — 최종 잔고는 순서 무관.
-  부분 체결은 덧셈. 멱등 키·폴백은 무변경.
+- **잔고·수량**: 홀드가 자금을 미리 예약하므로 정산은 예약분 이동 — **덧셈이라 순서 무관**.
+  멱등 키·폴백 무변경.
+- **`AvgBuyPrice`는 순서 독립이 아니다(실측 확인)**: `balance.go:172-173`은 매 체결마다
+  `(avg*qty + cost) / newQty`로 **나눗셈**을 수행하고 `shopspring/decimal.Div`는 유한 정밀도
+  (`DivisionPrecision=16`) 반올림을 한다. 재현 실험(`_workspace/avgprice_exp/main.go`,
+  `go run ./_workspace/avgprice_exp`) 결과:
+  - 수량(qty)은 **모든 케이스에서 정순=역순 동일**.
+  - 평균가는 케이스에 따라 **다름** — 기존 보유분 + 3건 케이스에서 정순 `50000011` vs 역순
+    `50000010.9999999999999999`, **차이 1e-16**.
+  → 따라서 "최종 잔고·원장·주문 상태가 전부 동일"이라는 단정은 **틀렸다**. 정확한 주장은
+  **"잔고·수량·주문 상태는 순서 무관, `AvgBuyPrice`는 마지막 자리 수준의 순서 의존이 있을 수 있다"**.
+- **원장 행은 byte-for-byte 동일하지 않다**: 원장은 `AvailableBalanceAfter`/`LockedBalanceAfter`
+  (커밋 시점의 중간 잔액)를 기록하므로, 최종 합계가 같아도 **행별 중간 잔액은 커밋 순서에 따라
+  달라진다**. 등가성 테스트는 이를 기대해서는 안 된다(아래 검증 계획 참조).
+- **비협상 정합성 5검사에는 영향 없음(확인)**: `reconciliation_worker.go`는 원장-지갑 일치·자산
+  총량 보존·시장가 잔존만 검사하며 **`avg_buy_price`를 검사하지 않는다**. 1e-16 드리프트는 이
+  불변식들을 깨지 않는다(자산 총량은 수량 기준, 원장-지갑은 잔액 기준).
+
+**미결 결정(사용자 판단 필요)**: 위 `AvgBuyPrice` 순서 의존(1e-16)을 **허용**할지, 아니면
+**동일 지갑 충돌 배치를 병렬 실행하지 않는 conflict-aware scheduling**으로 제거할지.
+(누적원가/누적수량 방식으로 바꾸는 것은 이번 범위를 크게 넘으므로 비추천.)
 - **데드락 안전(검증 완료)**: `SettleTradeBatch`는 **주문 락도 지갑 락도 전역 오름차순**
   (settlement_batch.go:107 `LockByIDs(sortedUintKeys(orderIDSet))`, :188
   `walletRepo.LockByIDs(sortedUintKeys(walletIDSet))`)이고 모든 트랜잭션이 **주문→지갑** 같은 단계
@@ -83,21 +150,27 @@ dispatcher가 `Wait()`" 규칙이면 안전하지만(등록만 dispatcher 기준
   **병렬도만 감소**. 단일 심볼 집중에서는 자주 발생할 수 있어 **실효 병렬도가 기대보다 낮을 수 있다**
   (정직한 한계, 재측정이 판정).
 
-### 병렬도 설정
+### 병렬도 설정 — 기존 env 의미를 바꾸지 않는다
 
-- **`GOEXCHANGE_SETTLEMENT_WORKERS`의 의미가 바뀐다**: 현재는 **심볼 파티션 수**, 변경 후 논의 대상은
-  **동시 정산 수**다. 같은 이름을 재사용하면 운영 의미가 달라지므로 **스펙·완료 문서·README에 의미
-  변경을 명시**한다. (최소 변경을 위해 재사용하되, 파티션 수와 병렬도를 분리해야 할 필요가 측정에서
-  드러나면 별도 env로 분리 — 후속.)
+- **`GOEXCHANGE_SETTLEMENT_WORKERS`는 지금 의미(파티션 수 P) 그대로 둔다.** 같은 이름을 "동시 정산
+  수"로 재해석하면 운영자가 아는 의미가 바뀌어 위험하다.
+- **신규 `GOEXCHANGE_SETTLEMENT_CONCURRENCY`(=N)** 로 전역 worker pool 크기를 정의한다.
+  **N=1이면 현재 동작과 동등**(롤백 안전판·등가성 기준선).
 - **상한 근거**: 정산 병렬 트랜잭션은 주문 홀드·아웃박스·리컨실리에이션과 **같은 DB 풀**을 공유한다
-  (`GOEXCHANGE_DB_MAX_OPEN_CONNS`, 기본 25). 병렬도는 `min(설정값, DB 풀 여유)` 관계를 검토해
-  풀 고갈로 주문 경로가 굶지 않게 한다. 기본값 10을 곧바로 쓰지 않는다.
-- **실증 스윕**: 재측정에서 **1/2/4/8**. **1이면 현재 동작과 동등**(롤백 안전판·등가성 기준선).
+  (`GOEXCHANGE_DB_MAX_OPEN_CONNS`, 기본 **25**). 실효 병렬도는 `min(N, DB 풀 여유)`이므로 풀 고갈로
+  주문 경로가 굶지 않도록 **보수적 기본값(4)** 에서 시작한다(기본 10을 곧바로 쓰지 않는다).
+- **실증 스윕**: 재측정에서 **1/2/4/8**.
 
 ## 검증 계획
 
-1. **등가성(정합성 핵심)**: 같은 이벤트 열을 병렬 N과 직렬 1로 처리했을 때 **최종 잔고·원장·주문
-   상태가 동일**함을 통합 테스트로 확인.
+1. **등가성(정합성 핵심) — 무엇이 같아야 하는지 정확히**: 같은 이벤트 열을 병렬 N(예: 4)과 직렬
+   1(`CONCURRENCY=1`)로 처리했을 때
+   - **동일해야 함**: 지갑 `available/locked/quantity/krw` 최종값, 주문 `FilledAmount`·상태,
+     원장 행 **개수와 delta 합계**, 자산 총량 보존, `failed_settlements`/`failed_market_completions` 0.
+   - **동일할 필요 없음(명시적 비-기대)**: 원장 행별 `AvailableBalanceAfter`/`LockedBalanceAfter`
+     (커밋 순서 의존), `AvgBuyPrice`의 최종 자리(위 실측대로 1e-16 수준 차이 가능 —
+     단, "미결 결정"에서 conflict-aware를 택하면 이것도 동일해야 함).
+   - 원장 행 집합을 **byte-for-byte 비교하지 않는다**.
 2. **브로드캐스트 순서 보존(회귀 방지)**: 워커 완료를 의도적으로 뒤섞어도(#2·#3 먼저 완료) 방출은
    `#1→#2→#3` 순서임을 결정론적으로 단언.
 3. **종결 이벤트 배리어**: 체결 다수 + 종결 이벤트 혼합 시 종결이 **앞선 모든 배치의 커밋·브로드캐스트
