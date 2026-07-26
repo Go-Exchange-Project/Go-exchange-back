@@ -47,7 +47,7 @@ func TestIntegrationCheckLedgerWalletPageFindsNoViolationWhenLedgerMatchesWallet
 	}).Error)
 
 	repo := NewReconciliationRepository(db)
-	rows, err := repo.CheckLedgerWalletPage(0, 500)
+	rows, err := repo.CheckLedgerWalletPage(wallet.ID-1, 500)
 	require.NoError(t, err)
 
 	row := findLedgerWalletRow(rows, wallet.ID)
@@ -86,7 +86,7 @@ func TestIntegrationCheckLedgerWalletPageFindsGapWhenWalletDivergesFromLedger(t 
 	}).Error)
 
 	repo := NewReconciliationRepository(db)
-	rows, err := repo.CheckLedgerWalletPage(0, 500)
+	rows, err := repo.CheckLedgerWalletPage(wallet.ID-1, 500)
 	require.NoError(t, err)
 
 	row := findLedgerWalletRow(rows, wallet.ID)
@@ -109,7 +109,7 @@ func TestIntegrationCheckLedgerWalletPageReturnsNullImpliedForWalletWithNoLedger
 	require.NoError(t, db.Create(&wallet).Error)
 
 	repo := NewReconciliationRepository(db)
-	rows, err := repo.CheckLedgerWalletPage(0, 500)
+	rows, err := repo.CheckLedgerWalletPage(wallet.ID-1, 500)
 	require.NoError(t, err)
 
 	row := findLedgerWalletRow(rows, wallet.ID)
