@@ -833,3 +833,77 @@ func TestEngineProcessesCancelsBeforeNewOrders(t *testing.T) {
 		assert.Equalf(t, "cancel", kinds[i], "first %d events must be cancels (priority), got %v", M, kinds)
 	}
 }
+
+// (A) 게이트가 신규 주문을 억제 — 게이트 없는 코드에서 확실히 RED
+func TestEngineSuppressesNewOrdersWhenExecutionBackpressured(t *testing.T) {
+	me := newTestEngine()
+	W := int(float64(cap(me.ExecutionCh)) * engineEmitHighWatermarkRatio)
+	for i := 0; i < W; i++ {
+		me.ExecutionCh <- ExecutionEvent{}
+	} // 소비자 없이 W까지 채움
+	// 체결을 만들지 않는 non-crossing limit buy(상대 매도 없음 → emit 없음)
+	me.OrderCh <- &Order{ID: 1, CoinSymbol: "BTC", Side: model.OrderSideBuy,
+		OrderType: model.OrderTypeLimit, Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)}
+	me.Start()
+	defer func() { me.Stop(); <-me.Done() }()
+
+	time.Sleep(30 * time.Millisecond) // 여러 ticker 주기
+	assert.Equal(t, 1, len(me.OrderCh), "게이트 켜진 동안 주문이 안 꺼내져야 함")
+
+	for i := 0; i < W; i++ {
+		<-me.ExecutionCh
+	} // W 아래로 드레인
+	assert.Eventually(t, func() bool { return len(me.OrderCh) == 0 }, time.Second, 3*time.Millisecond,
+		"드레인 후 다음 ticker에 주문이 처리돼야 함")
+}
+
+// (B) 취소 진행 확인(실제 목적) + 억제 동시 단언
+func TestEngineProcessesCancelsWhenExecutionBackpressured(t *testing.T) {
+	me := newTestEngine()
+	book := me.GetOrderBook("BTC")
+	book.AddOrder(&Order{ID: 1, UserID: 100, CoinSymbol: "BTC", Side: model.OrderSideSell,
+		OrderType: model.OrderTypeLimit, Price: decimal.NewFromInt(200), Amount: decimal.NewFromInt(1)})
+	W := int(float64(cap(me.ExecutionCh)) * engineEmitHighWatermarkRatio)
+	for i := 0; i < W; i++ {
+		me.ExecutionCh <- ExecutionEvent{}
+	} // 게이트 on, OrderCancelled emit 헤드룸 남김
+	me.OrderCh <- &Order{ID: 2, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit,
+		Price: decimal.NewFromInt(100), Amount: decimal.NewFromInt(1)} // 게이트 동안 처리되면 안 됨
+	me.Start()
+	defer func() { me.Stop(); <-me.Done() }()
+
+	done := make(chan CancelOrderResult, 1)
+	go func() {
+		done <- me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: 1,
+			Side: model.OrderSideSell, Price: decimal.NewFromInt(200)})
+	}()
+	select {
+	case res := <-done: // 1s 타임아웃보다 훨씬 짧은 넉넉한 마진 내 성공
+		require.NoError(t, res.Err)
+		assert.True(t, res.Removed)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("게이트 하에서 취소가 데드라인 내 처리되지 않음 (P2 재현)")
+	}
+	assert.Equal(t, 1, len(me.OrderCh), "게이트 동안 신규 주문은 유지돼야 함(억제 동시 증명)")
+}
+
+// (C) IsIntakeAdmissible 하류 조건
+func TestIsIntakeAdmissibleFalseWhenExecutionBackpressured(t *testing.T) {
+	me := NewMatchingEngine()
+	assert.True(t, me.IsIntakeAdmissible("BTC")) // 하류 여유 → true
+	W := int(float64(cap(me.ExecutionCh)) * engineEmitHighWatermarkRatio)
+	for i := 0; i < W; i++ {
+		me.ExecutionCh <- ExecutionEvent{}
+	}
+	assert.False(t, me.IsIntakeAdmissible("BTC"), "하류 포화면 OrderCh 비어도 false")
+}
+
+// (D) emitBackpressured 경계
+func TestEmitBackpressuredBoundary(t *testing.T) {
+	var nilEngine *MatchingEngine
+	assert.False(t, nilEngine.emitBackpressured())
+	me := NewMatchingEngine()
+	assert.False(t, me.emitBackpressured()) // 빈 채널
+	unbuffered := &MatchingEngine{ExecutionCh: make(chan ExecutionEvent)} // cap 0
+	assert.False(t, unbuffered.emitBackpressured())
+}

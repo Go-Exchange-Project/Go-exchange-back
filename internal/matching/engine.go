@@ -24,6 +24,19 @@ var (
 // (④가 히스테리시스·env로 정교화)
 const orderIntakeHighWatermarkRatio = 0.9
 
+// 0.75 is an operational starting point, not a correctness boundary.
+// It reserves 256 slots at the default capacity to absorb execution
+// events already being produced by the current order and cancellations.
+const engineEmitHighWatermarkRatio = 0.75
+
+func (me *MatchingEngine) emitBackpressured() bool {
+	if me == nil || me.ExecutionCh == nil || cap(me.ExecutionCh) == 0 {
+		return false
+	}
+	threshold := int(float64(cap(me.ExecutionCh)) * engineEmitHighWatermarkRatio)
+	return len(me.ExecutionCh) >= threshold
+}
+
 // Engine은 매칭 엔진의 소비자 표면이다. 구현: MatchingEngine(단일), ShardedEngine(B-3).
 type Engine interface {
 	SubmitOrder(*Order)                                     // 블로킹 — 부트스트랩/리플레이 전용
@@ -146,10 +159,14 @@ func (me *MatchingEngine) Start() {
 			default:
 			}
 			// 취소가 없을 때만 주문/ticker/stop.
+			orderCh := me.OrderCh
+			if me.emitBackpressured() {
+				orderCh = nil // 하류 포화 — 신규 주문 억제, 취소 emit 헤드룸 확보
+			}
 			select {
 			case cmd := <-me.CancelCh:
 				me.processCancel(cmd)
-			case order := <-me.OrderCh:
+			case order := <-orderCh:
 				me.processOrder(order)
 			case <-ticker.C:
 				// 코얼레싱: dirty 심볼의 스냅샷만 생성해 캐시 저장 + 논블로킹 브로드캐스트.
@@ -320,7 +337,8 @@ func (me *MatchingEngine) TrySubmitOrder(order *Order, within time.Duration) boo
 // IsIntakeAdmissible는 OrderCh 점유가 high-watermark 미만이면 true. 단일 엔진이라
 // coinSymbol은 무시한다(인터페이스 통일을 위해 받음 — ShardedEngine이 사용).
 func (me *MatchingEngine) IsIntakeAdmissible(coinSymbol string) bool {
-	return len(me.OrderCh) < int(float64(cap(me.OrderCh))*orderIntakeHighWatermarkRatio)
+	return len(me.OrderCh) < int(float64(cap(me.OrderCh))*orderIntakeHighWatermarkRatio) &&
+		!me.emitBackpressured()
 }
 
 func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {
