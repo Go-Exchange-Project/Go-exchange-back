@@ -160,9 +160,11 @@ func main() {
 	}
 	log.Printf("stale market orders finalized: finalized=%d failed=%d", finalizeResult.Finalized, finalizeResult.Failed)
 
-	// 심볼 파티셔닝 정산 워커: 같은 심볼의 이벤트는 항상 같은 워커가 FIFO로 처리해
-	// 엔진이 만든 순서(trade들 -> MarketOrderDone)를 보존한다. 워커를 채널 하나로
-	// 경쟁 소비시키면 Done 이벤트가 trade 정산을 앞질러 완료가 유실될 수 있다.
+	// 심볼 파티셔닝: 같은 심볼의 이벤트는 항상 같은 파티션 dispatcher가 소유해
+	// 엔진이 만든 순서(trade들 -> MarketOrderDone)를 보존한다. 정산 DB 작업 자체는
+	// 아래 전역 worker pool에서 병렬로 처리되지만, dispatcher가 배치 디스패치
+	// 순서(seq)대로만 브로드캐스트를 커밋하고 종결 이벤트는 배리어로 지킨다 —
+	// 파티션을 채널 하나로 합쳐 경쟁 소비시키면 이 순서 보장이 깨진다.
 	settlementQueues := make([]chan service.OutboxEvent, config.SettlementWorkersFromEnv())
 	for i := range settlementQueues {
 		settlementQueues[i] = make(chan service.OutboxEvent, settlementWorkerQueueSize)
