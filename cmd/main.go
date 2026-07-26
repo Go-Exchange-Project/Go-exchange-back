@@ -168,35 +168,33 @@ func main() {
 		settlementQueues[i] = make(chan service.OutboxEvent, settlementWorkerQueueSize)
 	}
 	metrics.RegisterSettlementWorkerQueueGauges(settlementQueueLenFns(settlementQueues))
+
+	concurrency := config.SettlementConcurrencyFromEnv()
+	settlementJobs := make(chan settlementJob, concurrency)
+	// 전역 worker pool: 정산만 하고 방출은 dispatcher가 순서대로.
+	var settlementWorkerWg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		settlementWorkerWg.Add(1)
+		go func() {
+			defer settlementWorkerWg.Done()
+			runSettlementWorker(settlementJobs, func(batch []service.OutboxEvent, collect func(string, []byte)) {
+				settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService,
+					orderService, failedMarketCompletionService, orderService, collect, outboxRepo, log.Default())
+			})
+		}()
+	}
+	log.Printf("settlement partitions=%d concurrency=%d", len(settlementQueues), concurrency)
+
 	var settlementWg sync.WaitGroup
 	for _, queue := range settlementQueues {
 		settlementWg.Add(1)
 		go func(queue chan service.OutboxEvent) {
 			defer settlementWg.Done()
-			var pending *service.OutboxEvent
-			for {
-				var event service.OutboxEvent
-				if pending != nil {
-					event, pending = *pending, nil
-				} else {
-					received, ok := <-queue
-					if !ok {
-						return
-					}
-					event = received
-				}
-				if event.Event.Trade == nil {
-					processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, outboxRepo, log.Default())
-					continue
-				}
-				batch, next, open := collectTradeBatch(event, queue, settlementBatchMaxSize)
-				pending = next
-				settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, outboxRepo, log.Default())
-				if !open {
-					// 채널 닫힘 — 잔여 배치는 방금 처리했고 pending은 nil.
-					return
-				}
-			}
+			runPartitionDispatcher(queue, settlementJobs, concurrency, settlementBatchMaxSize,
+				func(event service.OutboxEvent, collect func(string, []byte)) {
+					processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService,
+						failedMarketCompletionService, orderService, collect, outboxRepo, log.Default())
+				}, broadcast)
 		}(queue)
 	}
 
@@ -372,6 +370,8 @@ func main() {
 	settlementDrained := make(chan struct{})
 	go func() {
 		settlementWg.Wait()
+		close(settlementJobs)
+		settlementWorkerWg.Wait()
 		close(settlementDrained)
 	}()
 	select {
