@@ -19,29 +19,44 @@
 체인: **엔진 매칭 → `ExecutionCh`(1024) → OutboxWriter(단일 소비자) → 정산 큐(256, 심볼 해시)
 → 정산 워커(심볼당 1개, `main.go:426`) → DB.** 직렬 체인이라 가장 느린 링크가 먼저 backup되며
 역류한다. **결정적 판별 신호 = 정산 큐 깊이**(게이지 이미 존재, `RegisterSettlementWorkerQueueGauges`
-main.go:170):
+main.go:170).
 
-| 로드 중 관측 | 최초 바인딩 링크 | (후속) 수정 방향 |
+**중요 — ① 게이트가 관측 상태를 바꾼다**: 3차 ①이 이미 반영돼(engine.go:30/163/341), 정상 작동일수록
+`ExecutionCh`는 **1024까지 안 차고 ~768(high-watermark) 부근에서 engine_gate 셰딩이 시작**된다.
+따라서 재현 조건은 "채널 100% 포화"가 아니라 **"ExecutionCh가 high-watermark에 지속 도달 +
+engine_gate 셰딩 발생"**이다. **① 게이트를 끄고 과거 포화를 재현하지 않는다** — 이번 진단은
+**현재 시스템의 실제 안정 상태**에서 최초 제한 링크를 찾는 것이 목적이다.
+
+| 로드 중 관측 | 최초 바인딩 링크 | (후속) 방향 |
 |---|---|---|
-| **정산 큐 포화**(≈256) + `ExecutionCh` 포화 | **정산 워커**(심볼당 1개) | 정산 병렬화(체결 병렬풀 + 종결 이벤트 워터마크 순서 보존) |
-| `ExecutionCh` 포화인데 **정산 큐는 안 참** | **OutboxWriter**(단일 소비자) | OutboxWriter 최적화/병렬화 |
-| 둘 다 안 참인데 처리량 캡 | **엔진 매칭 자체** | 엔진 분할(단일 심볼엔 난제) |
+| **정산 큐 256 지속 포화** + ExecutionCh high-watermark 지속 + 셰딩 | **정산 워커**(심볼당 1개) | 정산 병렬화(체결 병렬풀 + 종결 이벤트 워터마크 순서 보존) |
+| **정산 큐 여유** + ExecutionCh high-watermark 지속 + 셰딩 | **OutboxWriter 계층 후보** | goroutine 스택 + outbox flush 히스토그램으로 **세분화**(outbox batch INSERT / OutboxWriter 직렬화 / sharded execution merge 채널 / 정산 큐 forward 직전 경로) |
+| **두 큐 모두 여유 + 셰딩 없음** + 처리량 캡 | **엔진 매칭 또는 부하 발생기** | 조사(엔진 분할은 단일 심볼 난제; 드라이버 한계도 배제) |
 
 강한 사전 가설(코드 근거)은 "정산 워커"지만, **가설이지 결론이 아니다** — 정산 큐 게이지가 갈라준다.
 
 ## 진단 방법 (측정, 앱 무수정)
 
-1. **재현**: 단일 심볼 BTC에 **crossing 주문**(매수가 매도를 넘겨 즉시 체결)을 고속 주입해 체결을
-   대량 유발 → `ExecutionCh` 포화를 만든다. (기존 `order-spike-availability.js`의 crossing 흐름을
-   높인 변형 또는 전용 소형 드라이버 — 드라이버 자체는 측정 도구이지 앱 수정 아님.)
-2. **샘플(로드 중반)**:
+0. **Preflight(부하 시작 전 필수)**: pprof 서버는 `GOEXCHANGE_ENABLE_PPROF=true`일 때만 뜬다
+   (main.go:42; `docker-compose.stress.yml`은 기본 false, line 24). ① `GOEXCHANGE_ENABLE_PPROF=true`
+   확인 → ② `curl http://127.0.0.1:6060/debug/pprof/` 성공 확인 → **실패 시 부하 시작 금지**.
+   (env/구성 변경이라 "앱 무수정" 경계와 충돌 없음.)
+1. **재현**: 단일 심볼 BTC에 **crossing 주문**을 고속 주입해 체결을 대량 유발 → **ExecutionCh가
+   high-watermark(~768)에 지속 도달 + engine_gate 셰딩이 발생하는 안정 상태**를 만든다(채널 100%
+   포화가 목표가 아님 — ①이 그 전에 셰딩하며, 게이트를 끄지 않는다). 드라이버는 기존
+   `order-spike-availability.js`의 crossing 흐름을 높인 변형 또는 전용 소형 드라이버(측정 도구이지 앱 수정 아님).
+2. **샘플(안정 상태)**:
    - `matching_engine_channel_length{channel="execution"|"order"}` — 이미 존재.
    - **정산 큐 깊이** `settlement_worker_queue_*` — 이미 존재(핵심 신호).
-   - 정산 처리율(trades/s) — 기존 카운터 또는 trade 테이블 증가율.
-   - **CPU pprof 30초**(`/debug/pprof/profile`) — 어디에 CPU가 가는지(DB idle이면 적을 것).
-   - **goroutine 프로파일**(`/debug/pprof/goroutine?debug=2`) — **블로킹 위상**의 핵심 도구:
-     엔진이 `chansend`(ExecutionCh)에, OutboxWriter가 정산 큐 send에, 정산 워커가 DB syscall에
-     각각 몇 개나 막혀 있는지 스택으로 드러남. **앱 무수정으로 가능**.
+   - `orders_admission_rejected_total{stage="engine_gate"}` 증가 — 셰딩 발생 확인(재현 성립 판정).
+   - **정산 처리율(trades/s)** — 출처 고정: `order_settlement_duration_seconds_count` 증가율 **또는**
+     trade 테이블 row 증가량 중 runbook에서 하나로 고정.
+   - **CPU pprof 30초**(`/debug/pprof/profile`) — CPU 소재(DB idle이면 적을 것).
+   - **goroutine 프로파일 — 반복 수집**(`/debug/pprof/goroutine?debug=2`는 순간 스냅샷이지 누적
+     block profile 아님): baseline 1회 + hold 안정 상태 10~15초 간격 **≥3회** + high-watermark/셰딩
+     직후 1회 + recovery 1회. **판정 증거 = 반복 덤프에서 같은 블로킹 위치가 지속됐는지**(단일
+     스택으로 단정 금지). 엔진이 `chansend`(ExecutionCh)에, OutboxWriter가 정산 큐 send에, 정산
+     워커가 DB syscall에 몇 개나 막혀 있는지. **앱 무수정으로 가능**.
    - 서버·DB CPU(top).
 3. **block profile 주의**: `runtime.SetBlockProfileRate`가 앱에 설정돼 있지 않아 **block profile은
    앱 무수정으론 불가**. 대신 **goroutine 프로파일**(블록된 goroutine 현재 스택)이 같은 질문
