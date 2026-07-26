@@ -13,6 +13,7 @@ const (
 	EnvGOExchangeCORSOrigins            = "GOEXCHANGE_CORS_ALLOWED_ORIGINS"
 	EnvGOExchangeEnablePprof            = "GOEXCHANGE_ENABLE_PPROF"
 	EnvGOExchangeSettlementWorkers      = "GOEXCHANGE_SETTLEMENT_WORKERS"
+	EnvGOExchangeSettlementConcurrency  = "GOEXCHANGE_SETTLEMENT_CONCURRENCY"
 	EnvGOExchangeReconciliationInterval = "GOEXCHANGE_RECONCILIATION_INTERVAL"
 	EnvGOExchangeEngineShards           = "GOEXCHANGE_ENGINE_SHARDS"
 	EnvGOExchangeOutboxBatchSize        = "GOEXCHANGE_OUTBOX_BATCH_SIZE"
@@ -21,6 +22,7 @@ const (
 )
 
 const defaultSettlementWorkers = 10
+const defaultSettlementConcurrency = 4
 const defaultReconciliationIntervalSeconds = 3600
 const defaultOutboxBatchSize = 512
 const defaultAcceptanceTimeoutMs = 100
@@ -82,6 +84,14 @@ func parseBoolEnv(value string) bool {
 
 func SettlementWorkersFromEnv() int {
 	return parsePositiveIntEnv(EnvGOExchangeSettlementWorkers, defaultSettlementWorkers)
+}
+
+// EnvGOExchangeSettlementConcurrency는 전역 정산 worker pool 크기(동시 정산 트랜잭션 수)다.
+// 기존 EnvGOExchangeSettlementWorkers(해시 파티션 수)와는 다른 축이다 — 파티션 수는 순서
+// 보존 단위, 이 값은 DB 동시성 상한. DB 풀(GOEXCHANGE_DB_MAX_OPEN_CONNS, 기본 25)을 주문
+// 홀드·아웃박스·리컨실리에이션과 공유하므로 보수적 기본값에서 시작한다.
+func SettlementConcurrencyFromEnv() int {
+	return parsePositiveIntEnv(EnvGOExchangeSettlementConcurrency, defaultSettlementConcurrency)
 }
 
 func ReconciliationIntervalFromEnv() time.Duration {

@@ -208,3 +208,24 @@ func TestOrderAcceptanceTimeoutFromEnvFallsBackOnInvalid(t *testing.T) {
 	t.Setenv(EnvGOExchangeAcceptanceTimeoutMs, "nope")
 	assert.Equal(t, 100*time.Millisecond, OrderAcceptanceTimeoutFromEnv())
 }
+
+func TestSettlementConcurrencyFromEnvDefaultsWhenUnset(t *testing.T) {
+	t.Setenv(EnvGOExchangeSettlementConcurrency, "")
+	if got, want := SettlementConcurrencyFromEnv(), 4; got != want {
+		t.Fatalf("SettlementConcurrencyFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestSettlementConcurrencyFromEnvUsesExplicitValue(t *testing.T) {
+	t.Setenv(EnvGOExchangeSettlementConcurrency, "8")
+	if got, want := SettlementConcurrencyFromEnv(), 8; got != want {
+		t.Fatalf("SettlementConcurrencyFromEnv() = %d, want %d", got, want)
+	}
+}
+
+func TestSettlementConcurrencyFromEnvFallsBackOnInvalid(t *testing.T) {
+	t.Setenv(EnvGOExchangeSettlementConcurrency, "0")
+	if got, want := SettlementConcurrencyFromEnv(), 4; got != want {
+		t.Fatalf("SettlementConcurrencyFromEnv() = %d, want %d", got, want)
+	}
+}
