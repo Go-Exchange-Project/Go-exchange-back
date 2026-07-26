@@ -39,7 +39,7 @@
 **Interfaces:**
 - Produces: `config.SettlementConcurrencyFromEnv() int` (기본 4)
 
-- [ ] **Step 1: 실패 테스트** — `config/runtime_test.go`에 추가(기존 `SettlementWorkersFromEnv`
+- [x] **Step 1: 실패 테스트** — `config/runtime_test.go`에 추가(기존 `SettlementWorkersFromEnv`
   테스트 패턴 그대로):
 
 ```go
@@ -67,7 +67,7 @@ func TestSettlementConcurrencyFromEnvFallsBackOnInvalid(t *testing.T) {
 
 Run: `go test ./config/... -run SettlementConcurrency -v` → FAIL(undefined).
 
-- [ ] **Step 2: 구현** — `config/runtime.go`:
+- [x] **Step 2: 구현** — `config/runtime.go`:
 
 ```go
 // EnvGOExchangeSettlementConcurrency는 전역 정산 worker pool 크기(동시 정산 트랜잭션 수)다.
@@ -85,7 +85,7 @@ func SettlementConcurrencyFromEnv() int {
 
 Run: `go test ./config/... -count=1` → PASS.
 
-- [ ] **Step 3: Commit** — `feat(config): 정산 동시성 GOEXCHANGE_SETTLEMENT_CONCURRENCY 추가 (3차 ②-수정)`
+- [x] **Step 3: Commit** — `feat(config): 정산 동시성 GOEXCHANGE_SETTLEMENT_CONCURRENCY 추가 (3차 ②-수정)`
 
 ---
 
@@ -104,7 +104,7 @@ Run: `go test ./config/... -count=1` → PASS.
   - `func runPartitionDispatcher(queue <-chan service.OutboxEvent, jobs chan<- settlementJob, concurrency int, maxBatch int, settleSingle func(event service.OutboxEvent, collect func(string, []byte)), broadcast func(string, []byte))`
 - Consumes: 기존 `collectTradeBatch`, `service.OutboxEvent`.
 
-- [ ] **Step 1: 순서 보존 실패 테스트** — 워커 완료를 일부러 뒤섞어도 방출은 디스패치 순서:
+- [x] **Step 1: 순서 보존 실패 테스트** — 워커 완료를 일부러 뒤섞어도 방출은 디스패치 순서:
 
 ```go
 func TestPartitionDispatcherBroadcastsInDispatchOrder(t *testing.T) {
@@ -150,7 +150,7 @@ func TestPartitionDispatcherBroadcastsInDispatchOrder(t *testing.T) {
 
 Run: `go test ./cmd/... -run BroadcastsInDispatchOrder -v` → FAIL(컴파일: 미정의).
 
-- [ ] **Step 2: 종결 이벤트 배리어 실패 테스트** — 종결 이벤트는 앞선 배치 방출 뒤에 처리:
+- [x] **Step 2: 종결 이벤트 배리어 실패 테스트** — 종결 이벤트는 앞선 배치 방출 뒤에 처리:
 
 ```go
 func TestPartitionDispatcherProcessesTerminalEventAfterPrecedingBatches(t *testing.T) {
@@ -195,7 +195,7 @@ func TestPartitionDispatcherProcessesTerminalEventAfterPrecedingBatches(t *testi
 
 Run: 위와 함께 → FAIL.
 
-- [ ] **Step 3: 구현** — `cmd/settlement_pipeline.go`:
+- [x] **Step 3: 구현** — `cmd/settlement_pipeline.go`:
 
 ```go
 package main
@@ -370,7 +370,7 @@ func runPartitionDispatcher(
 
 Run: Step 1·2 테스트 → PASS.
 
-- [ ] **Step 4: 종료 드레인 테스트** — 큐 close 후 잔여 배치가 전부 방출되고 함수가 반환:
+- [x] **Step 4: 종료 드레인 테스트** — 큐 close 후 잔여 배치가 전부 방출되고 함수가 반환:
 
 ```go
 func TestPartitionDispatcherDrainsOnQueueClose(t *testing.T) {
@@ -404,7 +404,7 @@ func TestPartitionDispatcherDrainsOnQueueClose(t *testing.T) {
 
 Run: `go test ./cmd/... -run PartitionDispatcher -v -race` → PASS(3종).
 
-- [ ] **Step 5: Commit** — `feat(settlement): 정산 병렬 파이프라인(dispatcher·worker·순서 커밋) 추가 (3차 ②-수정)`
+- [x] **Step 5: Commit** — `feat(settlement): 정산 병렬 파이프라인(dispatcher·worker·순서 커밋) 추가 (3차 ②-수정)`
 
 ---
 
@@ -413,7 +413,7 @@ Run: `go test ./cmd/... -run PartitionDispatcher -v -race` → PASS(3종).
 **Files:**
 - Modify: `cmd/main.go` (worker 루프 166-201 교체, 기동 로그)
 
-- [ ] **Step 1: 배선 교체** — 기존 파티션별 인라인 워커 루프를 dispatcher + 전역 pool로:
+- [x] **Step 1: 배선 교체** — 기존 파티션별 인라인 워커 루프를 dispatcher + 전역 pool로:
 
 ```go
 	settlementQueues := make([]chan service.OutboxEvent, config.SettlementWorkersFromEnv())
@@ -452,7 +452,7 @@ Run: `go test ./cmd/... -run PartitionDispatcher -v -race` → PASS(3종).
 	}
 ```
 
-- [ ] **Step 2: 종료 순서** — 기존 `settlementWg.Wait()` 뒤에 **jobs 채널 close + worker 대기**를
+- [x] **Step 2: 종료 순서** — 기존 `settlementWg.Wait()` 뒤에 **jobs 채널 close + worker 대기**를
   추가한다(모든 dispatcher가 반환한 뒤에만 close해야 send-on-closed가 없다):
 
 ```go
@@ -461,9 +461,9 @@ Run: `go test ./cmd/... -run PartitionDispatcher -v -race` → PASS(3종).
 	settlementWorkerWg.Wait()
 ```
 
-- [ ] **Step 3: 검증** — `go build ./...`; `go test ./cmd/... -count=1 -race` PASS(기존 outbox 도미노·
+- [x] **Step 3: 검증** — `go build ./...`; `go test ./cmd/... -count=1 -race` PASS(기존 outbox 도미노·
   graceful shutdown 테스트 무수정 그린). 기동 로그에 `settlement partitions=.. concurrency=..` 출력 확인.
-- [ ] **Step 4: Commit** — `refactor(settlement): 정산 파이프라인을 파티션 dispatcher+전역 풀로 배선 (3차 ②-수정)`
+- [x] **Step 4: Commit** — `refactor(settlement): 정산 파이프라인을 파티션 dispatcher+전역 풀로 배선 (3차 ②-수정)`
 
 ---
 
@@ -474,7 +474,7 @@ Run: `go test ./cmd/... -run PartitionDispatcher -v -race` → PASS(3종).
   `cmd/settlement_equivalence_integration_test.go`
 - Test: `internal/service/avg_buy_price_permutation_test.go`(순열 오차, DB 불필요)
 
-- [ ] **Step 1: 순열 오차 상한 측정 테스트(DB 불필요)** — 스펙 A′의 "상한은 측정으로":
+- [x] **Step 1: 순열 오차 상한 측정 테스트(DB 불필요)** — 스펙 A′의 "상한은 측정으로":
 
 ```go
 // 여러 체결 순열에 대해 러닝 가중평균의 최대 오차를 측정한다(balance.go의 산술과 동일).
@@ -513,15 +513,15 @@ func TestAvgBuyPriceOrderDependenceStaysWithinTolerance(t *testing.T) {
 
 Run: `go test ./internal/service/... -run AvgBuyPriceOrderDependence -v` → PASS + 로그의 최대 오차 기록.
 
-- [ ] **Step 2: 등가성 통합 테스트** — 같은 이벤트 열을 `concurrency=4`와 `1`로 처리 후 비교.
+- [x] **Step 2: 등가성 통합 테스트** — 같은 이벤트 열을 `concurrency=4`와 `1`로 처리 후 비교.
   **동일 단언**: 지갑 `available/locked/quantity/krw`, 주문 `FilledAmount`·상태, 원장 행 **개수와
   delta 합계**, `failed_settlements`/`failed_market_completions` = 0.
   **비-단언(명시)**: 원장 행별 `BalanceAfter`, `AvgBuyPrice`는 `Equal` 대신 위 tolerance 비교.
   (`openServiceIntegrationDB` + 기존 시드 헬퍼 재사용, `cleanupServiceUsers`로 격리.)
-- [ ] **Step 3: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0) +
+- [x] **Step 3: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0) +
   `go test ./cmd/... ./internal/service/... -race -count=1` → 전부 PASS. 기존 정산·폴백·멱등·
   부트스트랩 테스트 무수정 그린.
-- [ ] **Step 4: Commit** — `test(settlement): 병렬 정산 등가성과 평균매입가 오차 상한 검증 추가 (3차 ②-수정)`
+- [x] **Step 4: Commit** — `test(settlement): 병렬 정산 등가성과 평균매입가 오차 상한 검증 추가 (3차 ②-수정)`
 
 ---
 
@@ -530,23 +530,23 @@ Run: `go test ./internal/service/... -run AvgBuyPriceOrderDependence -v` → PAS
 **Files:**
 - Modify: `Go-exchange-front/src/components/trading/AuthPanel.tsx:278`
 
-- [ ] **Step 1: 포맷 적용** — 현재 `{wallet.avg_buy_price}` 원문 출력을 바로 아래 평가액과 동일하게
+- [x] **Step 1: 포맷 적용** — 현재 `{wallet.avg_buy_price}` 원문 출력을 바로 아래 평가액과 동일하게
   `formatKRWAmount(...)`로 포맷(값이 없거나 파싱 불가면 기존 fallback 유지). 백엔드 저장값은 불변.
-- [ ] **Step 2: 검증** — 프런트 테스트 스위트 그린(`npm test` 또는 리포 관례). `50000010.9999999999999999`
+- [x] **Step 2: 검증** — 프런트 테스트 스위트 그린(`npm test` 또는 리포 관례). `50000010.9999999999999999`
   같은 값이 포맷되어 노출되지 않음을 단언하는 테스트 1개 추가(`data-testid="balance-avg-buy-BTC"`).
-- [ ] **Step 3: Commit** — `fix(trading): 평균매수가를 시장 가격 정밀도로 포맷 (3차 ②-수정 동반)`
+- [x] **Step 3: Commit** — `fix(trading): 평균매수가를 시장 가격 정밀도로 포맷 (3차 ②-수정 동반)`
 
 ---
 
 ### Task 6: 완료 문서 + README
 
-- [ ] **Step 1: 완료 문서** — `docs/refactor/18_3차②_정산_병렬화_완료.md`: 왜(24번이 확정한 정산 워커
+- [x] **Step 1: 완료 문서** — `docs/refactor/18_3차②_정산_병렬화_완료.md`: 왜(24번이 확정한 정산 워커
   바인딩) / 어떻게(파티션 dispatcher + 전역 pool, event loop 교착 방지, 수집 closure로 방출 지연,
   순서 커밋, 종결 배리어) / 결과(테스트, 회귀 그린, **측정된 AvgBuyPrice 최대 오차 기록**).
   **A′ 결정**(허용 + 포맷 + tolerance)과 **처리량 실증은 24번 재실행(1/2/4/8 스윕)** 임을 명기 —
   수치 주장 금지.
-- [ ] **Step 2: README** — 3차 표 ②-수정 🔨→✅ + 완료 문서 링크.
-- [ ] **Step 3: Commit + 푸시 + CI** — `gh run watch` 그린.
+- [x] **Step 2: README** — 3차 표 ②-수정 🔨→✅ + 완료 문서 링크.
+- [x] **Step 3: Commit + 푸시 + CI** — `gh run watch` 그린.
 
 ---
 
