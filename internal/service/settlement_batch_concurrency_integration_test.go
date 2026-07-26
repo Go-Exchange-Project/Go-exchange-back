@@ -43,6 +43,17 @@ var (
 	// avg_buy_price_permutation_test.go와 같은 허용치. AvgBuyPrice만 나눗셈이 개입해
 	// 순서 의존이고, 나머지 잔고 필드는 덧셈뿐이라 반올림이 없다.
 	crossBatchAvgBuyPriceTolerance = decimal.RequireFromString("0.000001")
+
+	// 정순(batch1 → batch2) 실행의 절대 기대값. 상대 비교만 하면 세 픽스처가 똑같이
+	// 틀려도 통과하므로, 기준이 되는 정순 결과만은 balance.go의 산술
+	// ((avg*qty + acquisitionCost) / newQty, DivisionPrecision=16)을 그대로 따라
+	// 손으로 계산한 값과 대조한다. acquisitionCost는 수수료 포함 체결대금이다.
+	//   0.7  @ 49999999.9999999999999999
+	//   + 0.11 (cost 5502751.00039995) → 0.81 @ 49999999.9999999999999999*0.7 … /0.81
+	//   + 0.13 (cost 6503254.05412605) → 0.94 @ 50006388.3558787234042553
+	// (역순은 마지막 자리만 다른 …2552가 되어 매 실행 결정론적으로 오차를 관통한다.)
+	crossBatchExpectedQuantity           = decimal.RequireFromString("0.94")
+	crossBatchExpectedForwardAvgBuyPrice = decimal.RequireFromString("50006388.3558787234042553")
 )
 
 func seedCrossBatchFixture(t *testing.T, db *gorm.DB, offsetBase uint) crossBatchFixture {
@@ -153,7 +164,7 @@ func assertWalletsMatchWithAvgBuyPriceTolerance(t *testing.T, walletRepo *reposi
 
 		diff := lw.AvgBuyPrice.Sub(rw.AvgBuyPrice).Abs()
 		assert.True(t, diff.LessThanOrEqual(crossBatchAvgBuyPriceTolerance),
-			"AvgBuyPrice 오차 %s가 허용치 %s 초과: serial=%s concurrent=%s (user %d/%d coin %s)",
+			"AvgBuyPrice 오차 %s가 허용치 %s 초과: left=%s right=%s (user %d/%d coin %s)",
 			diff, crossBatchAvgBuyPriceTolerance, lw.AvgBuyPrice, rw.AvgBuyPrice, leftUserID, rightUserID, lw.CoinSymbol)
 	}
 }
@@ -188,10 +199,13 @@ func assertLedgerTotalsMatch(t *testing.T, db *gorm.DB, leftUserID uint, rightUs
 
 	left := ledgerTotalsByCoin(t, db, leftUserID)
 	right := ledgerTotalsByCoin(t, db, rightUserID)
+	// 양쪽 다 0행이면 "합계가 같다"는 자명하게 참이므로 비교가 무의미하다.
+	require.NotEmpty(t, left, "ledger entries missing for user %d", leftUserID)
 	require.Equal(t, len(right), len(left), "ledger asset count user %d vs %d", leftUserID, rightUserID)
 	for coin, lt := range left {
 		rt, ok := right[coin]
 		require.True(t, ok, "ledger entries missing for coin %s user %d", coin, rightUserID)
+		require.Positive(t, lt.count, "ledger entry count 0 user %d coin %s", leftUserID, coin)
 		assert.Equal(t, rt.count, lt.count, "ledger entry count user %d/%d coin %s", leftUserID, rightUserID, coin)
 		assert.True(t, lt.availableDelta.Equal(rt.availableDelta), "AvailableDelta sum user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, coin, lt.availableDelta, rt.availableDelta)
 		assert.True(t, lt.lockedDelta.Equal(rt.lockedDelta), "LockedDelta sum user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, coin, lt.lockedDelta, rt.lockedDelta)
@@ -241,21 +255,38 @@ func assertCrossBatchAssetConservation(t *testing.T, walletRepo *repository.Wall
 	assert.True(t, btc.Equal(expectedBTC), "BTC 총량 %s != 기대값 %s", btc, expectedBTC)
 }
 
-// 병렬 정산 등가성: 같은 모양의 픽스처 2벌에 대해 한쪽은 배치를 고정 순서로
-// (batch1 → batch2, concurrency=1 동등) 정산하고, 다른 쪽은 두 배치를 각각 별도
-// goroutine에서 동시에(concurrency=N 동등) 정산한 뒤 최종 상태를 비교한다. 커밋
-// 순서는 DB 행 락 경합에 맡긴다 — 순서를 강제하지 않는 게 이 테스트의 요점이다.
+// 병렬 정산 등가성: 같은 모양의 픽스처 3벌을 서로 다른 커밋 순서로 정산한 뒤 최종
+// 상태를 비교한다.
+//
+//	정순 직렬 — batch1 → batch2 고정 순서(concurrency=1 동등). 기준선.
+//	역순 직렬 — batch2 → batch1 고정 순서. 매 실행 반드시 순서 의존 오차를
+//	           관통시키는 결정론적 경로다(정순과 마지막 자리가 다르다).
+//	동시     — 두 배치를 각각 별도 goroutine에서(concurrency=N 동등). 커밋 순서를
+//	           DB 행 락 경합에 맡기는 실제 경합 스모크 테스트이지만, 스케줄러가
+//	           우연히 정순과 같은 순서로 완료하면 아무것도 관통하지 못하므로
+//	           결정론적 검증은 정순-역순 쌍이 담당한다.
+//
+// 그리고 상대 비교만으로는 세 픽스처가 똑같이 틀려도 통과하므로, 기준선인 정순
+// 결과는 절대 기대값(crossBatchExpectedQuantity/…ForwardAvgBuyPrice)과 먼저 대조한다.
 func TestIntegrationSettlementBatchConcurrencyMatchesSerialSettlement(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	walletRepo := repository.NewWalletRepository(db)
 	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), walletRepo)
 
-	serial := seedCrossBatchFixture(t, db, 700)
-	concurrent := seedCrossBatchFixture(t, db, 710)
-	defer cleanupServiceUsers(t, db, append(append([]uint{}, serial.userIDs...), concurrent.userIDs...)...)
+	forward := seedCrossBatchFixture(t, db, 900)
+	defer cleanupServiceUsers(t, db, forward.userIDs...)
+	reverse := seedCrossBatchFixture(t, db, 910)
+	defer cleanupServiceUsers(t, db, reverse.userIDs...)
+	concurrent := seedCrossBatchFixture(t, db, 920)
+	defer cleanupServiceUsers(t, db, concurrent.userIDs...)
 
-	for _, trade := range crossBatchTrades(serial, "serial") {
+	for _, trade := range crossBatchTrades(forward, "forward") {
 		require.NoError(t, settleSingleTradeBatch(settlementService, trade))
+	}
+
+	reverseTrades := crossBatchTrades(reverse, "reverse")
+	for i := len(reverseTrades) - 1; i >= 0; i-- {
+		require.NoError(t, settleSingleTradeBatch(settlementService, reverseTrades[i]))
 	}
 
 	concurrentTrades := crossBatchTrades(concurrent, "concurrent")
@@ -273,24 +304,34 @@ func TestIntegrationSettlementBatchConcurrencyMatchesSerialSettlement(t *testing
 		require.NoError(t, err, "동시 배치 %d 정산 실패", i)
 	}
 
-	for idx := range serial.userIDs {
-		assertWalletsMatchWithAvgBuyPriceTolerance(t, walletRepo, serial.userIDs[idx], concurrent.userIDs[idx])
-		assertLedgerTotalsMatch(t, db, serial.userIDs[idx], concurrent.userIDs[idx])
+	// 1단계: 기준선(정순 직렬)이 절대 기대값과 일치하는가.
+	forwardCoin := findWalletForCoin(t, walletRepo, forward.buyerID, "BTC")
+	assert.True(t, forwardCoin.Quantity.Equal(crossBatchExpectedQuantity),
+		"정순 Quantity %s != 기대값 %s", forwardCoin.Quantity, crossBatchExpectedQuantity)
+	assert.True(t, forwardCoin.AvgBuyPrice.Equal(crossBatchExpectedForwardAvgBuyPrice),
+		"정순 AvgBuyPrice %s != 기대값 %s", forwardCoin.AvgBuyPrice, crossBatchExpectedForwardAvgBuyPrice)
+	assertCrossBatchAssetConservation(t, walletRepo, forward)
+
+	// 2단계: 역순·동시가 그 기준선과 tolerance 이내로 같은가.
+	orderIDs := append([]uint{}, forward.orderIDs...)
+	for _, other := range []crossBatchFixture{reverse, concurrent} {
+		for idx := range forward.userIDs {
+			assertWalletsMatchWithAvgBuyPriceTolerance(t, walletRepo, forward.userIDs[idx], other.userIDs[idx])
+			assertLedgerTotalsMatch(t, db, forward.userIDs[idx], other.userIDs[idx])
+		}
+		for idx := range forward.orderIDs {
+			assertOrdersMatch(t, db, forward.orderIDs[idx], other.orderIDs[idx])
+		}
+		assertCrossBatchAssetConservation(t, walletRepo, other)
+		orderIDs = append(orderIDs, other.orderIDs...)
+
+		otherCoin := findWalletForCoin(t, walletRepo, other.buyerID, "BTC")
+		t.Logf("매수자 AvgBuyPrice: 정순=%s 비교=%s 차이=%s",
+			forwardCoin.AvgBuyPrice, otherCoin.AvgBuyPrice,
+			forwardCoin.AvgBuyPrice.Sub(otherCoin.AvgBuyPrice).Abs())
 	}
 
-	for idx := range serial.orderIDs {
-		assertOrdersMatch(t, db, serial.orderIDs[idx], concurrent.orderIDs[idx])
-	}
-
-	assertNoSettlementFailures(t, db, append(append([]uint{}, serial.orderIDs...), concurrent.orderIDs...))
-	assertCrossBatchAssetConservation(t, walletRepo, serial)
-	assertCrossBatchAssetConservation(t, walletRepo, concurrent)
-
-	serialCoin := findWalletForCoin(t, walletRepo, serial.buyerID, "BTC")
-	concurrentCoin := findWalletForCoin(t, walletRepo, concurrent.buyerID, "BTC")
-	t.Logf("매수자 AvgBuyPrice: 직렬=%s 동시=%s 차이=%s",
-		serialCoin.AvgBuyPrice, concurrentCoin.AvgBuyPrice,
-		serialCoin.AvgBuyPrice.Sub(concurrentCoin.AvgBuyPrice).Abs())
+	assertNoSettlementFailures(t, db, orderIDs)
 }
 
 func findWalletForCoin(t *testing.T, walletRepo *repository.WalletRepository, userID uint, coinSymbol string) model.Wallet {
