@@ -30,7 +30,7 @@
 **Interfaces:**
 - `emitBackpressured() bool`(내부). `IsIntakeAdmissible` 시그니처 불변(반환값에 하류 조건 AND).
 
-- [ ] **Step 1: RED 테스트 4종** — `engine_test.go`(기존 `newTestEngine()` snapshotInterval 2ms 사용):
+- [x] **Step 1: RED 테스트 4종** — `engine_test.go`(기존 `newTestEngine()` snapshotInterval 2ms 사용):
 
 ```go
 // (A) 게이트가 신규 주문을 억제 — 게이트 없는 코드에서 확실히 RED
@@ -102,7 +102,7 @@ func TestEmitBackpressuredBoundary(t *testing.T) {
 
 Run: `go test ./internal/matching/... -run 'Suppress|ProcessesCancelsWhenExecution|IntakeAdmissibleFalseWhenExecution|EmitBackpressured' -v` → FAIL/컴파일 실패(미구현).
 
-- [ ] **Step 2: 구현** — `engine.go`:
+- [x] **Step 2: 구현** — `engine.go`:
 
 상수 + 헬퍼:
 ```go
@@ -148,10 +148,10 @@ func (me *MatchingEngine) IsIntakeAdmissible(coinSymbol string) bool {
 
 Run: 위 4종 → PASS.
 
-- [ ] **Step 3: 회귀 + race** — `go test ./internal/matching/... -count=1`(기존 엔진·취소·샤딩·③ 그린)
+- [x] **Step 3: 회귀 + race** — `go test ./internal/matching/... -count=1`(기존 엔진·취소·샤딩·③ 그린)
   + `go test ./internal/matching/... -race -count=1`. 특히 `TestEngineProcessesCancelsBeforeNewOrders`(③)는
   ExecutionCh를 안 채우므로 게이트 off로 무영향임을 확인.
-- [ ] **Step 4: Commit** — 초안: `feat(matching): 하류 포화 시 신규 주문 억제로 취소 진행성 확보 (3차 ①)`
+- [x] **Step 4: Commit** — 초안: `feat(matching): 하류 포화 시 신규 주문 억제로 취소 진행성 확보 (3차 ①)`
 
 ---
 
@@ -161,16 +161,16 @@ Run: 위 4종 → PASS.
 - Create: `docs/refactor/17_3차①_취소_진행성_확보_완료.md`
 - Modify: `docs/refactor/README.md`(3차 ① ✅)
 
-- [ ] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0,
+- [x] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0,
   DSN 55432) + `go test ./internal/matching/... ./internal/service/... ./cmd/... -race -count=1` → 전부 PASS.
   정산·부트스트랩·샤딩 통합 무수정 그린.
-- [ ] **Step 2: 완료 문서** — `17_3차①_취소_진행성_확보_완료.md`: 왜(⑤의 P2 = 엔진 emit 블로킹 →
+- [x] **Step 2: 완료 문서** — `17_3차①_취소_진행성_확보_완료.md`: 왜(⑤의 P2 = 엔진 emit 블로킹 →
   취소 굶주림) / 어떻게(하류 인지 게이트 헬퍼·nil-채널 억제·IsIntakeAdmissible 하류 조건, 별도
   goroutine 없이 순서 보존) / 결과(4 테스트, 회귀 그린). **완화이지 일반 보장 아님**(무제한 fan-out·
   하류 완전 정지 비보장), **게이트 해제 ~100ms 폴링 지연**, **정산 천장은 안 높임(②)**, **취소 0
   실증은 재측정(23번 재실행 or 후속)** 을 명기 — 수치 주장 금지.
-- [ ] **Step 3: README** — 3차 표 ① 🔨→✅ + 완료 문서 링크.
-- [ ] **Step 4: Commit + 푸시 + CI** — author→reviewer, `gh run watch` 그린.
+- [x] **Step 3: README** — 3차 표 ① 🔨→✅ + 완료 문서 링크.
+- [x] **Step 4: Commit + 푸시 + CI** — author→reviewer, `gh run watch` 그린.
 
 ---
 
