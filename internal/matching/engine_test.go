@@ -882,7 +882,7 @@ func TestEngineProcessesCancelsWhenExecutionBackpressured(t *testing.T) {
 		require.NoError(t, res.Err)
 		assert.True(t, res.Removed)
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("게이트 하에서 취소가 데드라인 내 처리되지 않음 (P2 재현)")
+		t.Fatal("게이트 on 상태에서도 취소가 계속 처리돼야 하는데 데드라인 내 처리되지 않음")
 	}
 	assert.Equal(t, 1, len(me.OrderCh), "게이트 동안 신규 주문은 유지돼야 함(억제 동시 증명)")
 }
