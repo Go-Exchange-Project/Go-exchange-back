@@ -73,7 +73,11 @@ ms p95) ② 취소 무실패 ③ 정합성 위반 0**을 급등 스파이크 주
 | ③ | **SLI 3분할** | 뭉뚱그린 가용성을 세 SLI로 분리해 k6에 baked-in: `sli_order_response_availability`(2xx∪503 ∧ ≤RESPONSE_SLO_MS·기본1s) / `sli_order_business_success`(2xx=1−셰딩률) / `sli_cancel_success`(200/(200+인프라실패); 404·409 제외, status0·5xx 실패 포함). threshold 없이 정의+기준선 수집. ①②를 처음부터 정확히 재는 토대 | ✅ 완료 (셀프체크+로컬 스모크로 배선 확인, Go 코드 무변경) | [16_3차③_SLI_3분할_완료.md](16_3차③_SLI_3분할_완료.md) |
 | ① | **취소 진행성 확보 (P2 완화)** | 하류(`ExecutionCh`) 포화 시 엔진 루프가 **신규 주문을 안 꺼내**(nil-채널) 취소 emit용 헤드룸을 남기고, `IsIntakeAdmissible`에 **하류 조건**을 더해 문에서 빠른 503. 별도 goroutine 없이 방출 순서 보존. **완화이지 일반 보장 아님**(한 주문의 무제한 fan-out이 헤드룸 초과 시 여전히 막힘) — 목표는 ⑤ 부하에서 취소 타임아웃 0. 일반 보장은 주문당 emit 상한/재개형 매칭이 전제(후속). `0.75`는 측정용 초기값 | ✅ 완료 (4 테스트+회귀 그린, 취소 0 실증은 재측정) | [17_3차①_취소_진행성_확보_완료.md](17_3차①_취소_진행성_확보_완료.md) |
 | ②-진단 | **처리량 바인딩 링크 진단** (진단 전용) | 앱 무수정으로 기존 계측(정산 큐 게이지·채널 게이지·CPU/goroutine pprof)만 써서 체인(엔진→ExecutionCh→OutboxWriter→정산 큐→정산 워커) 중 **최초 바인딩 링크를 확정**. 결정 신호 = 정산 큐 깊이(정산 워커 vs OutboxWriter vs 엔진). 로컬 우선·신호 흐리면 GCP 승격. **수정 설계는 진단 후 별도 스펙** | ✅ 완료 — **정산 워커 바인딩 확정**(worker 8 큐 256 고정 포화, 나머지 9개 유휴; 반복 goroutine 덤프로 동일 `IO wait`/pgx Exec 위치 지속 확인; DB·backend CPU 모두 유휴에 가까워 로컬 자원 경쟁 배제; GCP 미승격, 로컬로 충분) | [24-2026-07-26-throughput-binding-link-diagnosis.md](../benchmarks/24-2026-07-26-throughput-binding-link-diagnosis.md) |
-| ②-수정 | **정산 병렬화** (순서 보존 브로드캐스트) | ②-진단이 확정한 정산 워커 바인딩 해소: dispatcher 1 + worker N으로 **정산 DB 작업은 병렬**, `batchSeq` + completion 채널 + 작은 reorder 버퍼로 **브로드캐스트는 디스패치 순서 직렬 방출**(프런트가 수신 순서로 삽입하므로 순서 흩뜨림은 가시 회귀 — `Index.tsx:294`). 종결 이벤트는 앞선 배치의 커밋·outbox·브로드캐스트 완료 배리어. 정산 로직·데드락 안전(오름차순 2단계 락) 무변경. `SETTLEMENT_WORKERS`(파티션 수)는 의미 불변, 신규 `GOEXCHANGE_SETTLEMENT_CONCURRENCY`(기본 4)로 동시 정산 수 분리, DB 풀(기본 25) 여유 내로 상한. `AvgBuyPrice` 순서 의존 오차 실측 1e-16(tolerance 1e-6), 처리량 실증은 24번 재실행(1/2/4/8 스윕) | ✅ 완료 (최종 통합 리뷰 Ready to merge, cmd·service `-race` 클린, 프런트 표시 포맷 동반) | [18_3차②_정산_병렬화_완료.md](18_3차②_정산_병렬화_완료.md) |
+| ②-수정 | **정산 병렬화** (순서 보존 브로드캐스트) | ②-진단이 확정한 정산 워커 바인딩 해소: dispatcher 1 + worker N으로 **정산 DB 작업은 병렬**, `batchSeq` + completion 채널 + 작은 reorder 버퍼로 **브로드캐스트는 디스패치 순서 직렬 방출**(프런트가 수신 순서로 삽입하므로 순서 흩뜨림은 가시 회귀 — `Index.tsx:294`). 종결 이벤트는 앞선 배치의 커밋·outbox·브로드캐스트 완료 배리어. 정산 로직·데드락 안전(오름차순 2단계 락) 무변경. `SETTLEMENT_WORKERS`(파티션 수)는 의미 불변, 신규 `GOEXCHANGE_SETTLEMENT_CONCURRENCY`(기본 4)로 동시 정산 수 분리, DB 풀(기본 25) 여유 내로 상한. `AvgBuyPrice` 순서 의존 오차 실측 1e-16(tolerance 1e-6) | ✅ 완료 (최종 통합 리뷰 Ready to merge, cmd·service `-race` 클린, 프런트 표시 포맷 동반) | [18_3차②_정산_병렬화_완료.md](18_3차②_정산_병렬화_완료.md) |
+| ②-실증 | **정산 병렬화 처리량 재측정(25번, 24번 재실행)** | `GOEXCHANGE_SETTLEMENT_CONCURRENCY` 1/2/4/8 스윕. **N=2·N=4에서 24번 부하 기준 정산 워커 바인딩 완전 해소**(정산 큐 256 고정 포화 → 0, 셰딩 65%→0%), 정합성 위반 0(모든 N). **N=8에서는 데드락 재시도(신규 지갑 생성 경합)로 셰딩이 재등장** — 새 바인딩 링크 = 행 락 경합(DB CPU·풀은 기각). N에 비례하는 스케일링은 아님 | ✅ 완료 — **권장 운영값: 기본 4 유지**(8은 이번 로컬 측정에서 이득 미확인) | [25-2026-07-27-settlement-parallelization-remeasurement.md](../benchmarks/25-2026-07-27-settlement-parallelization-remeasurement.md) |
+
+**3차 리팩토링 완결** — ③①②-진단②-수정이 코드로, ②-실증이 처리량 실측으로 완성됐다.
+남은 병목(N=8에서의 행 락 경합·신규 지갑 생성 데드락)은 아래 백로그로 승격.
 
 순서는 **③→①→②**: 측정 토대(③)를 먼저 깔아 ①(취소 500)·②(처리량)의 효과를 세 지표로
 정확히 재고, 아픈 곳(취소 500 = 가용성)을 처리량(측정 선행)보다 먼저 잡는다.
@@ -97,6 +101,8 @@ ms p95) ② 취소 무실패 ③ 정합성 위반 0**을 급등 스파이크 주
 | outbox 보존 정리 | PROCESSED 행 아카이빙/삭제 정책 | outbox 테이블이 관측상 커지면 |
 | ~~MarkProcessed 흡수~~ | ~~outbox PROCESSED 마킹을 정산 트랜잭션에 합쳐 trade당 DB 왕복 2회→1회~~ ✅ 완료 (`bc8c00f`): [18번 벤치마크](../benchmarks/18-2026-07-13-outbox-markprocessed-absorption.md) 같은 세션 A/B로 처리량 +20.6%, A-3 손실을 pre-A-3 수준으로 회복 | — |
 | k6 재측정 | A-1~A-6 반영 후 전후 비교 + `http_req_failed 0.64%` 원인 조사 | 큰 변경 하나 끝날 때마다 |
+| **정산 병렬화 N=8 행 락 경합(신규 지갑 생성)** | [25번 실측](../benchmarks/25-2026-07-27-settlement-parallelization-remeasurement.md): `GOEXCHANGE_SETTLEMENT_CONCURRENCY=8`에서 데드락(SQLSTATE 40P01) 4~6건/런 — `WalletRepository.CreateZeroBalanceWallets` 경합으로 추정(안전망인 단건 폴백은 정상 작동, 정합성 위반은 없음). 처리량이 N에 비례하지 않고 N=4~8 사이에서 꺾임 | 승격 권고 — `GOEXCHANGE_SETTLEMENT_CONCURRENCY`를 8 이상으로 올리려는 시도가 생기면, 또는 신규 유저 대량 유입 시나리오가 실제 트래픽에서 문제가 되면 |
+| `order_settlement_duration_seconds_count` 죽은 메트릭 | 24번이 발견: 라이브 배치 정산 경로(`SettleTradeBatch`)를 관측하지 못함(부트스트랩 리플레이 경로에서만 관측) | 관측성 정비 시 |
 
 ## 리뷰에서 나왔지만 채택하지 않은 것
 
