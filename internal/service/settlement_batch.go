@@ -166,6 +166,15 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 			}
 		}
 		if len(missingCreatable) > 0 {
+			// map 순회 순서는 무작위라, 겹치는 신규 지갑 키를 서로 다른 트랜잭션이
+			// 동시에 생성하면 배치 INSERT 행 순서가 반대로 나올 수 있다 — 정렬해
+			// 모든 트랜잭션이 같은 순서로 락을 요청하게 한다(sortedUintKeys와 같은 목적).
+			sort.Slice(missingCreatable, func(i, j int) bool {
+				if missingCreatable[i].UserID != missingCreatable[j].UserID {
+					return missingCreatable[i].UserID < missingCreatable[j].UserID
+				}
+				return missingCreatable[i].CoinSymbol < missingCreatable[j].CoinSymbol
+			})
 			if err := walletRepo.CreateZeroBalanceWallets(missingCreatable); err != nil {
 				return err
 			}
