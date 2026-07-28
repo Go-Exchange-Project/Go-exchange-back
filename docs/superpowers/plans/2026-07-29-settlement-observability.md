@@ -47,7 +47,7 @@
     `SettlementBarrierMarketDone`, `SettlementBarrierCancel`(각각 counter/histogram 묶음),
     `SettlementJobSuccess`, `SettlementJobFallback`, `SettlementJobFailed`
 
-- [ ] **Step 1: 실패 테스트** — `internal/metrics/settlement_observability_test.go`:
+- [x] **Step 1: 실패 테스트** — `internal/metrics/settlement_observability_test.go`:
 
 ```go
 package metrics_test
@@ -94,7 +94,7 @@ func TestOrderSettlementDurationRemainsUnlabeled(t *testing.T) {
 
 Run: `go test ./internal/metrics/... -run Settlement -v` → FAIL(undefined).
 
-- [ ] **Step 2: 구현** — `metrics.go`의 `var (...)` 블록에 추가(기존 항목은 손대지 않는다):
+- [x] **Step 2: 구현** — `metrics.go`의 `var (...)` 블록에 추가(기존 항목은 손대지 않는다):
 
 ```go
 	// 4차 축 1 관측성: DB 호출 1회(트랜잭션 시도) 단위. 기존 order_settlement_duration_seconds
@@ -155,7 +155,7 @@ var (
 
 Run: `go test ./internal/metrics/... -count=1` → PASS.
 
-- [ ] **Step 3: Commit** — 초안: `feat(metrics): 정산 진단용 관측 메트릭 6종 추가 (4차 축1)`
+- [x] **Step 3: Commit** — 초안: `feat(metrics): 정산 진단용 관측 메트릭 6종 추가 (4차 축1)` (커밋 `6ae5097`)
 
 ---
 
@@ -165,7 +165,7 @@ Run: `go test ./internal/metrics/... -count=1` → PASS.
 - Modify: `cmd/main.go`(`settleTradeBatchWithFallback`의 `SettleTradeBatch` 호출, `processTradeSettlement`의 재시도 루프)
 - Test: `cmd/settlement_observability_test.go`
 
-- [ ] **Step 1: 실패 테스트** — 배치 경로 1회 호출에 attempt 샘플 1개, 단건 재시도 N회에 샘플 N개:
+- [x] **Step 1: 실패 테스트** — 배치 경로 1회 호출에 attempt 샘플 1개, 단건 재시도 N회에 샘플 N개:
 
 ```go
 func TestSettleTradeBatchObservesOneAttemptSample(t *testing.T) {
@@ -192,7 +192,7 @@ func TestProcessTradeSettlementObservesEachRetryAttempt(t *testing.T) {
 
 Run: `go test ./cmd/... -run Attempt -v` → FAIL.
 
-- [ ] **Step 2: 구현** — 두 지점에 관측 추가. **기존 `OrderSettlementDuration.Observe`는 그대로 둔다**:
+- [x] **Step 2: 구현** — 두 지점에 관측 추가. **기존 `OrderSettlementDuration.Observe`는 그대로 둔다**:
 
 ```go
 	// settleTradeBatchWithFallback 내부 — SettleTradeBatch 호출 감싸기
@@ -218,7 +218,7 @@ Run: `go test ./cmd/... -run Attempt -v` → FAIL.
 
 Run: 위 테스트 → PASS.
 
-- [ ] **Step 3: Commit** — 초안: `feat(settlement): DB 시도 단위 정산 지연 관측 추가 (4차 축1)`
+- [x] **Step 3: Commit** — 초안: `feat(settlement): DB 시도 단위 정산 지연 관측 추가 (4차 축1)` (커밋 `607da72`)
 
 ---
 
@@ -228,7 +228,7 @@ Run: 위 테스트 → PASS.
 - Modify: `cmd/settlement_pipeline.go`(`runPartitionDispatcher`의 배리어 경로)
 - Test: `cmd/settlement_pipeline_test.go`
 
-- [ ] **Step 1: 실패 테스트** — Done/Cancel이 각각 올바른 타입으로 계수되고, in-flight가 있으면
+- [x] **Step 1: 실패 테스트** — Done/Cancel이 각각 올바른 타입으로 계수되고, in-flight가 있으면
   wait 샘플이 남는다(**시간 값이 아니라 count·라벨만 단언**):
 
 ```go
@@ -252,7 +252,7 @@ func TestDispatcherRecordsBarrierMetricsPerTerminalType(t *testing.T) {
 
 Run: `go test ./cmd/... -run BarrierMetrics -v` → FAIL.
 
-- [ ] **Step 2: 구현** — 배리어 진입 시점(= `pendingTerminal` 설정 시) 시각·in-flight를 기록하고,
+- [x] **Step 2: 구현** — 배리어 진입 시점(= `pendingTerminal` 설정 시) 시각·in-flight를 기록하고,
   해제 시점(= `runTerminal` 직전)에 observe. **배리어 로직 자체는 변경하지 않는다**:
 
 ```go
@@ -284,7 +284,7 @@ Run: `go test ./cmd/... -run BarrierMetrics -v` → FAIL.
 
 Run: 위 테스트 + 기존 dispatcher 3종(순서·배리어·드레인) → 전부 PASS.
 
-- [ ] **Step 3: Commit** — 초안: `feat(settlement): 종결 이벤트 배리어 진입·대기·in-flight 관측 추가 (4차 축1)`
+- [x] **Step 3: Commit** — 초안: `feat(settlement): 종결 이벤트 배리어 진입·대기·in-flight 관측 추가 (4차 축1)` (커밋 `123e784`)
 
 ---
 
@@ -294,7 +294,7 @@ Run: 위 테스트 + 기존 dispatcher 3종(순서·배리어·드레인) → �
 - Modify: `cmd/settlement_pipeline.go`(`settlementJob`에 디스패치 시각, `runSettlementWorker`)
 - Test: `cmd/settlement_pipeline_test.go`
 
-- [ ] **Step 1: 실패 테스트** — worker를 의도적으로 늦게 기동해 dispatch wait를 만들고, 완료 시
+- [x] **Step 1: 실패 테스트** — worker를 의도적으로 늦게 기동해 dispatch wait를 만들고, 완료 시
   execution 샘플이 남는지 확인:
 
 ```go
@@ -313,7 +313,7 @@ func TestDispatcherAndWorkerRecordJobTimingMetrics(t *testing.T) {
 
 Run: `go test ./cmd/... -run JobTiming -v` → FAIL.
 
-- [ ] **Step 2: 구현** — `settlementJob`에 `dispatchAt time.Time` 추가. **dispatcher가 송신을 시도하기
+- [x] **Step 2: 구현** — `settlementJob`에 `dispatchAt time.Time` 추가. **dispatcher가 송신을 시도하기
   직전**에 찍고(송신 대기 포함), worker가 실행 시작 시 observe:
 
 ```go
@@ -352,25 +352,25 @@ type settlementJob struct {
 
 Run: 위 테스트 → PASS.
 
-- [ ] **Step 3: Commit** — 초안: `feat(settlement): job 디스패치 대기·실행 시간 관측 추가 (4차 축1)`
+- [x] **Step 3: Commit** — 초안: `feat(settlement): job 디스패치 대기·실행 시간 관측 추가 (4차 축1)` (커밋 `393af51`)
 
 ---
 
 ### Task 5: 전체 검증 + 통제 부하 + 문서
 
-- [ ] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0,
+- [x] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0,
   DSN 55432) + `go test ./cmd/... ./internal/service/... ./internal/matching/... -race -count=1`.
   **기존 순서·정산·종료·배리어 테스트 무수정 그린**(동작 불변의 증거).
-- [ ] **Step 2: 성능 회귀 확인** — 기존 matching/settlement 벤치마크를 **패치 전후로** 실행해
+- [x] **Step 2: 성능 회귀 확인** — 기존 matching/settlement 벤치마크를 **패치 전후로** 실행해
   (`go test -bench . -benchmem`) **유의미한 할당·시간 증가가 없음**을 확인하고 수치를 기록.
   hot path에서 라벨 map 조회가 없는지(사전 resolve 사용) 코드로 재확인.
-- [ ] **Step 3: 짧은 통제 부하 검증** — 로컬에서 종결 이벤트가 섞인 부하를 짧게 돌려:
+- [x] **Step 3: 짧은 통제 부하 검증** — 로컬에서 종결 이벤트가 섞인 부하를 짧게 돌려:
   1. 신규 메트릭이 **전부 0이 아님**
   2. `settlement_barriers_total`이 실제 Done/Cancel 처리 건수와 **대략 일치**
   3. 완료 job 수와 `job_dispatch_wait`·`job_execution` histogram count **일치**
   4. **정합성·fallback 결과가 패치 전과 동일**
   5. **판정표 네 분기 중 하나를 실제로 선택 가능**
-- [ ] **Step 4: 완료 문서 + README** — `docs/refactor/20_4차축1_정산_관측성_완료.md`:
+- [x] **Step 4: 완료 문서 + README** — `docs/refactor/20_4차축1_정산_관측성_완료.md`:
   왜(27번의 두 원인 분리) / 어떻게(신규 6종, 기존 메트릭 불변, 사전 resolve) / 결과(테스트·벤치마크·
   통제 부하 5확인) / **판정 결과(어느 분기인지)** / **`result` 라벨 제한**과 다음 사이클 예고.
   README 4차 현재 단계 갱신.
