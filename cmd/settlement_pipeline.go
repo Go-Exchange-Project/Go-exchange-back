@@ -1,6 +1,9 @@
 package main
 
 import (
+	"time"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 )
 
@@ -63,6 +66,7 @@ func runPartitionDispatcher(
 		queueOpen       = true
 		readyJob        *settlementJob // 디스패치 대기 중인 배치(없으면 nil)
 		pendingTerminal *service.OutboxEvent
+		barrierStart    time.Time            // 배리어 진입 시각(4차 축1 관측성)
 		carry           *service.OutboxEvent // collectTradeBatch가 돌려준 비-trade 이벤트
 	)
 
@@ -92,6 +96,11 @@ func runPartitionDispatcher(
 		barrier := pendingTerminal != nil
 		if barrier && inFlight == 0 && readyJob == nil {
 			flushBroadcasts()
+			if pendingTerminal.Event.OrderCancelled != nil {
+				metrics.SettlementBarrierWaitCancel.Observe(time.Since(barrierStart).Seconds())
+			} else {
+				metrics.SettlementBarrierWaitDone.Observe(time.Since(barrierStart).Seconds())
+			}
 			runTerminal(*pendingTerminal)
 			pendingTerminal = nil
 			continue
@@ -116,6 +125,14 @@ func runPartitionDispatcher(
 			if first != nil {
 				if first.Event.Trade == nil {
 					pendingTerminal = first
+					barrierStart = time.Now()
+					if first.Event.OrderCancelled != nil {
+						metrics.SettlementBarrierCancel.Inc()
+						metrics.SettlementBarrierInflightCancel.Observe(float64(inFlight))
+					} else {
+						metrics.SettlementBarrierMarketDone.Inc()
+						metrics.SettlementBarrierInflightDone.Observe(float64(inFlight))
+					}
 					continue
 				}
 				batch, next, open := collectTradeBatch(*first, queue, maxBatch)

@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -89,6 +91,46 @@ func TestPartitionDispatcherProcessesTerminalEventAfterPrecedingBatches(t *testi
 
 	assert.Equal(t, []string{"trade", "terminal"}, got,
 		"종결 이벤트는 앞선 배치의 방출 뒤에 처리돼야 한다")
+}
+
+func TestDispatcherRecordsBarrierMetricsPerTerminalType(t *testing.T) {
+	beforeCancel := testutil.ToFloat64(metrics.SettlementBarriersTotal.WithLabelValues("cancel"))
+	beforeDone := testutil.ToFloat64(metrics.SettlementBarriersTotal.WithLabelValues("market_done"))
+	beforeWait := histogramVecSampleCount(t, metrics.SettlementBarrierWait, "cancel")
+
+	queue := make(chan service.OutboxEvent, 8)
+	jobs := make(chan settlementJob, 4)
+
+	// trade 1건(지연 완료) → OrderCancelled → MarketOrderDone 순으로 주입.
+	queue <- service.OutboxEvent{OutboxID: 1, Event: matching.ExecutionEvent{
+		Trade: &model.Trade{CoinSymbol: "BTC"}}}
+	queue <- service.OutboxEvent{OutboxID: 2, Event: matching.ExecutionEvent{
+		OrderCancelled: &matching.OrderCancelled{CoinSymbol: "BTC", OrderID: 7}}}
+	queue <- service.OutboxEvent{OutboxID: 3, Event: matching.ExecutionEvent{
+		MarketOrderDone: testMarketOrderDone()}}
+	close(queue)
+
+	go func() {
+		for job := range jobs {
+			job := job
+			go func() {
+				time.Sleep(30 * time.Millisecond) // 배치가 늦게 끝나 cancel 배리어가 대기하게
+				job.done <- settlementResult{seq: job.seq}
+			}()
+		}
+	}()
+
+	settleSingle := func(service.OutboxEvent, func(string, []byte)) {}
+	broadcast := func(string, []byte) {}
+
+	runPartitionDispatcher(queue, jobs, 3, 32, settleSingle, broadcast)
+
+	assert.Equal(t, beforeCancel+1,
+		testutil.ToFloat64(metrics.SettlementBarriersTotal.WithLabelValues("cancel")))
+	assert.Equal(t, beforeDone+1,
+		testutil.ToFloat64(metrics.SettlementBarriersTotal.WithLabelValues("market_done")))
+	assert.Equal(t, beforeWait+1, histogramVecSampleCount(t, metrics.SettlementBarrierWait, "cancel"),
+		"in-flight가 있던 배리어는 wait 샘플을 남긴다")
 }
 
 func TestPartitionDispatcherDrainsOnQueueClose(t *testing.T) {
