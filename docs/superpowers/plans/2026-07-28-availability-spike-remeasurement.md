@@ -39,9 +39,30 @@
 - [ ] **Step 3: VU 분할** — 23번 프로파일의 각 스테이지 target을 **VM당 절반**으로 설정
   (`300→150`, `5000→2500`, `10000→5000`, …). 합계가 23번과 같아야 비교가 성립한다.
   버스트 피크에서 **VM당 ~5,000** — 23번이 죽은 ~9,800의 절반이라 관측된 절벽 아래다.
-- [ ] **Step 4: 시각 정렬** — 프로파일이 시간 기반이라 **두 VM이 동시에 시작**해야 스테이지가 겹친다.
-  두 VM의 시계 동기(`timedatectl`) 확인 후 **예약 시각 기동**(예: 같은 `at`/`sleep until` 시각) 또는
-  두 SSH를 동시에 발사. 시작 skew를 기록하고 **5초 이상 벌어지면 재실행**.
+- [ ] **Step 4: 시나리오 시작 시각 정렬 (`LOAD_START_AT_MS` 배리어)** —
+  **`k6 run` 명령 시각을 맞추는 것으로는 부족하다.** k6는 각 프로세스에서
+  `프로세스 시작 → setup()(5,000명 등록·로그인·펀딩) → 시나리오 시작` 순으로 돌기 때문에,
+  **setup 소요 시간 차이가 그대로 ramp 시작 skew가 된다**(5,000명 setup은 수 분대라 VM·네트워크
+  편차가 쉽게 수 초를 넘는다). 따라서 **setup 이후에 공통 시각까지 대기하는 배리어**를 넣는다:
+
+```js
+const LOAD_START_AT_MS = parseInt(__ENV.LOAD_START_AT_MS || '0', 10);
+
+// setup() 마지막 — 유저 생성·펀딩을 끝낸 뒤 공통 시작 시각까지 대기한다.
+const remainingMs = LOAD_START_AT_MS - Date.now();
+if (LOAD_START_AT_MS > 0 && remainingMs <= 0) {
+  throw new Error('setup missed the coordinated load start deadline'); // 이 런은 폐기
+}
+if (remainingMs > 0) {
+  sleep(remainingMs / 1000);
+}
+```
+
+  - 두 VM에 **같은 `LOAD_START_AT_MS`**(UTC epoch ms)를 주고, 값은 **양쪽 setup 예상 시간보다 충분히
+    뒤로** 잡는다. setup이 그 시각을 넘기면 **즉시 폐기 후 재실행**(위 throw가 강제).
+  - 두 VM 시계 동기(`timedatectl`) 먼저 확인.
+  - **실제 시나리오 시작 시각은 양쪽 k6 로그에서 다시 확인**하고 기록한다(배리어가 작동했다는 증거).
+  - **skew 기준: 목표 ≤1초, 허용 상한 2초, 2초 초과면 폐기 후 재실행**(30초 ramp 대비 비율을 감안).
 - [ ] **Step 5: 서버 preflight** — `GOEXCHANGE_ENABLE_PPROF=true`, 기동 로그에서
   `settlement partitions=.. concurrency=4` 확인, `/metrics` 노출 확인, 리셋(9테이블 TRUNCATE +
   `bootstrap loaded=0`).
@@ -50,8 +71,14 @@
 
 ### Phase 1: 측정 실행
 
-- [ ] **Step 1: 부하** — 두 VM에서 동시에 `order-spike-availability.js` 실행(각자 절반 VU, 분할된
-  `USER_INDEX_OFFSET`). setup(유저 생성·펀딩)은 VM별로 자기 범위만 처리한다.
+- [ ] **Step 1: 부하** — 두 VM에서 `order-spike-availability.js` 실행(각자 절반 VU, 분할된
+  `USER_INDEX_OFFSET`, **같은 `LOAD_START_AT_MS`**). setup은 VM별로 자기 범위만 처리한다.
+  **구조화된 요약을 반드시 저장**한다(콘솔 텍스트를 사람이 옮겨 적어 합산하지 않는다):
+
+```bash
+k6 run --summary-export summary-a.json -e USER_INDEX_OFFSET=0    -e LOAD_START_AT_MS=<epoch> ...
+k6 run --summary-export summary-b.json -e USER_INDEX_OFFSET=5000 -e LOAD_START_AT_MS=<epoch> ...
+```
 - [ ] **Step 2: 서버측 샘플(15초 간격)** — `matching_engine_channel_length{execution|order}` ·
   `settlement_worker_queue_length` · `orders_admission_rejected_total{stage}` ·
   `settlement_batch_fallbacks_total` · 서버/DB CPU · DB 커넥션 사용량.
@@ -71,8 +98,12 @@
 
 ### Phase 2: SLI 집계 (두 VM 합산)
 
-세 SLI는 **비율**이라 단순 평균이 아니라 **분자·분모를 합산**해야 한다. k6 요약의 Rate는
-통과/실패 건수를 함께 출력하므로 VM A·B의 건수를 더해 재계산한다:
+세 SLI는 **비율**이라 단순 평균이 아니라 **분자·분모를 합산**해야 한다. `--summary-export`로 저장한
+두 JSON에서 각 Rate의 `passes`/`fails`를 읽어 합산 재계산한다(콘솔 텍스트 수기 전사 금지):
+
+```
+combined rate = (A.passes + B.passes) / (A.passes + A.fails + B.passes + B.fails)
+```
 
 - [ ] **Step 1** — `sli_order_response_availability` = (A통과+B통과) / (A전체+B전체)
 - [ ] **Step 2** — `sli_order_business_success` = (A 2xx + B 2xx) / (A전체+B전체)
@@ -80,6 +111,8 @@
   (404/409는 양쪽 모두 분모 제외 — 스크립트가 이미 처리)
 - [ ] **Step 4: 교차 검증** — 합산 SLI가 **서버 로그 기반 상태 분포**(Phase 1 Step 3·4)와 방향이
   일치하는지 확인. 어긋나면 클라이언트 집계가 아니라 **서버측 수치를 신뢰**하고 그 사실을 기록.
+- [ ] **Step 5: 원본 보존** — 양쪽 **stdout·`summary-*.json`·실제 시나리오 시작/종료 시각**(배리어
+  작동 증거)을 `_workspace/` 측정 원본에 함께 보관한다. **`DEV_TOOLS_TOKEN`·외부 IP는 제거**한 뒤 저장.
 
 ---
 
