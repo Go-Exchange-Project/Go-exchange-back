@@ -566,7 +566,9 @@ func settleTradeBatchWithFallback(
 	for i, event := range batch {
 		items[i] = service.TradeBatchItem{Trade: event.Event.Trade, OutboxEventID: event.OutboxID}
 	}
+	attemptStart := time.Now()
 	results, err := batchSettler.SettleTradeBatch(items)
+	metrics.SettlementAttemptBatch.Observe(time.Since(attemptStart).Seconds())
 	if err != nil {
 		metrics.SettlementBatchFallbacksTotal.Inc()
 		logger.Printf("settle trade batch of %d failed, falling back to per-trade settlement: %v", len(batch), err)
@@ -681,13 +683,17 @@ func processTradeSettlement(
 		logger = log.Default()
 	}
 
-	settlementStart := time.Now()
+	settlementStart := time.Now() // 기존 그대로(논리 전체)
+	attemptStart := time.Now()
 	result, err := settler.SettleTrade(trade, outboxEventID)
+	metrics.SettlementAttemptSingle.Observe(time.Since(attemptStart).Seconds())
 	for attempt := 0; err != nil && service.IsTransientSettlementError(err) && attempt < len(transientRetryDelays); attempt++ {
 		time.Sleep(transientRetryDelays[attempt])
+		attemptStart = time.Now()
 		result, err = settler.SettleTrade(trade, outboxEventID)
+		metrics.SettlementAttemptSingle.Observe(time.Since(attemptStart).Seconds())
 	}
-	metrics.OrderSettlementDuration.Observe(time.Since(settlementStart).Seconds())
+	metrics.OrderSettlementDuration.Observe(time.Since(settlementStart).Seconds()) // 기존 유지
 	if err != nil {
 		logger.Printf("settle trade failed: %v", err)
 		if failureRecorder == nil {
