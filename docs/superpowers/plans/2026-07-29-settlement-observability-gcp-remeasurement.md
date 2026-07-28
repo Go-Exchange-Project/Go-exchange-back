@@ -35,8 +35,8 @@
 
 비싼 전체 실행을 계측 실수로 버리지 않기 위한 단계다.
 
-- [ ] **Step 1: 코드 동일성** — 위 `git diff --stat` 재확인(관측성 패치 외 Go 변경 없음).
-- [ ] **Step 2: 저부하 1~2분 실행** 후 다음을 **전부** 확인:
+- [x] **Step 1: 코드 동일성** — 위 `git diff --stat` 재확인(관측성 패치 외 Go 변경 없음).
+- [x] **Step 2: 저부하 1~2분 실행** 후 다음을 **전부** 확인:
   - 신규 메트릭 **6종이 `/metrics`에 노출**
   - histogram의 **`_bucket`·`_sum`·`_count` 모두** 수집됨
   - **시작·중간·종료 스냅샷이 생성**됨
@@ -44,22 +44,25 @@
   - **`barriers_total`과 k6 Done/Cancel 수 일치**
   - **dispatch wait count = execution count = 완료 job 수**
   - 기존 SLI·정합성 검사 정상
-- [ ] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**. 원인 해결 후 Phase 0 재수행.
+- [x] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**. 원인 해결 후 Phase 0 재수행.
+  (7항목 전부 통과 — [28번 문서](../../benchmarks/28-2026-07-29-settlement-observability-gcp.md) Phase 0 참고)
 
 ---
 
 ### Phase 1: 26번 동일 규모 재현
 
-- [ ] **Step 1: 리셋 + 기동** — 9테이블 TRUNCATE + `bootstrap loaded=0` + 기동 로그
+- [x] **Step 1: 리셋 + 기동** — 9테이블 TRUNCATE + `bootstrap loaded=0` + 기동 로그
   `settlement partitions=.. concurrency=4` 확인. `GOEXCHANGE_ENABLE_PPROF=true`.
-- [ ] **Step 2: 부하** — 26번과 동일 프로파일·분할·배리어(`LOAD_START_AT_MS`). 실제 시나리오 시작
+- [x] **Step 2: 부하** — 26번과 동일 프로파일·분할·배리어(`LOAD_START_AT_MS`). 실제 시나리오 시작
   시각을 양쪽 k6 로그에서 확인·기록(skew ≤1초 목표, 2초 초과 시 폐기·재실행).
-- [ ] **Step 3: 구간별 스냅샷** — **hold·burst·recovery 각 구간의 최소 시작·종료 스냅샷**을 남긴다.
+  (실측 skew ≈ 0.1초, 양쪽 6m35.8s/6m35.9s)
+- [x] **Step 3: 구간별 스냅샷** — **hold·burst·recovery 각 구간의 최소 시작·종료 스냅샷**을 남긴다.
   **최종 누적값만으로 판정하지 않는다.** 각 스냅샷의 캡처 시각을 함께 기록.
   (기존 게이지·SLI·정합성 수집은 26번 그대로 병행.)
-- [ ] **Step 4: 드레인 + 정합성 5검사 + fallback** — 26번과 동일.
-- [ ] **Step 5: 원본 보존** — 스냅샷·k6 stdout·`summary-*.json`·시각 기록을 `_workspace/`에.
-  **토큰·외부 IP 제거.**
+  (15초 간격 63개 스냅샷, 구간 경계 선택본 `picked_snapshots.json`)
+- [x] **Step 4: 드레인 + 정합성 5검사 + fallback** — 26번과 동일. (9항목 전부 0)
+- [x] **Step 5: 원본 보존** — 스냅샷·k6 stdout·`summary-*.json`·시각 기록을 `_workspace/`에.
+  **토큰·외부 IP 제거.** (26번과 동일하게 용량 문제로 로컬 보관, 리포 미커밋)
 
 ---
 
@@ -86,14 +89,15 @@ dispatch wait 평균  = Δdispatch_wait_sum / Δdispatch_wait_count
 
 ### Phase 3: 계측 내부 무결성 (결과 해석 **전에** 검증)
 
-- [ ] `barriers_total{cancel}` = 정상 처리된 cancel terminal 수
-- [ ] `barriers_total{market_done}` = market done 수
-- [ ] dispatch wait count = job execution count
-- [ ] batch attempt count **≥** logical batch job count
-- [ ] 그 차이가 **실제 retry 로그와 일치**
-- [ ] settlement batch의 trade 합계 = settled trade 증가량
-- [ ] k6 주문 합계 = 서버·DB 주문 합계
-- [ ] **하나라도 불일치면 계측 문제로 보고 판정을 보류**하고 원인부터 규명한다.
+- [x] `barriers_total{cancel}` = 정상 처리된 cancel terminal 수 (5,570=5,570)
+- [x] `barriers_total{market_done}` = market done 수 (17,313=17,313)
+- [x] dispatch wait count = job execution count (18,087=18,087)
+- [x] batch attempt count **≥** logical batch job count (18,087=18,087)
+- [x] 그 차이가 **실제 retry 로그와 일치** (차이 0, 재시도 로그도 0)
+- [x] settlement batch의 trade 합계 = settled trade 증가량 (48,835=48,835)
+- [x] k6 주문 합계 = 서버·DB 주문 합계 (86,769+REJECTED 30=86,799=86,799)
+- [x] **하나라도 불일치면 계측 문제로 보고 판정을 보류**하고 원인부터 규명한다.
+  (7항목 전부 일치 — 판정 진행)
 
 ---
 
@@ -106,19 +110,21 @@ dispatch wait 평균  = Δdispatch_wait_sum / Δdispatch_wait_count
 | attempt duration **큼** + worker busy **높음** + DB 실행이 wait보다 지배 + dispatch wait도 포화와 함께 증가 | **DB transaction** | SQL·락·왕복 |
 | dispatch wait **큼** + worker 실행 시간 상대적으로 작음 + jobs 채널/공용 pool 대기 두드러짐 | **Worker scheduling** | pool·dispatcher 연결 방식 |
 
-- [ ] **둘 이상의 신호가 동시에 강하면 단일 원인으로 몰지 말고 기여도를 함께 기록**한다.
+- [x] **둘 이상의 신호가 동시에 강하면 단일 원인으로 몰지 말고 기여도를 함께 기록**한다.
+  (파티션 전체 fence가 지배적 — 배치 파편화 신호는 그 fence의 직접적 하류 결과로 함께 기록.
+  자세한 근거는 [28번 문서](../../benchmarks/28-2026-07-29-settlement-observability-gcp.md) Phase 4)
 
 ---
 
 ### Phase 5: 안전 게이트 + 문서
 
-- [ ] **성능 결과는 다음이 모두 만족될 때만 유효**: 응답 가용성 유지 · 취소 인프라 실패율 0% ·
+- [x] **성능 결과는 다음이 모두 만족될 때만 유효**: 응답 가용성 유지 · 취소 인프라 실패율 0% ·
   정합성 위반 0 · fallback 0 · 회복 성능 악화 없음 · load-gen 완주 및 시작 skew 충족 ·
-  **계측 내부 무결성 충족**(Phase 3).
-- [ ] **문서** — `docs/benchmarks/28-<측정일>-settlement-observability-gcp.md`:
+  **계측 내부 무결성 충족**(Phase 3). (전 게이트 충족)
+- [x] **문서** — `docs/benchmarks/28-2026-07-29-settlement-observability-gcp.md`:
   비교 조건 동일성(diff 확인 포함) / 구간별 계산표 / 무결성 검증 결과 / **판정(지배 기여도)** /
   27번 대비(정산 큐 포화 재현 여부) / 한계.
-- [ ] **README** 4차 현재 단계 갱신, 20번 완료 문서에 "GCP 스케일 판정" 링크 추가.
+- [x] **README** 4차 현재 단계 갱신, 20번 완료 문서에 "GCP 스케일 판정" 링크 추가.
 - [ ] **Commit + 푸시 + CI**, **모든 VM stop**(load-gen 2대 포함).
 
 ---
