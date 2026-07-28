@@ -94,6 +94,60 @@ var (
 		Name: "orders_admission_rejected_total",
 		Help: "Total orders fast-rejected by admission control (503), labeled by shedding stage.",
 	}, []string{"stage"})
+
+	// 4차 축 1 관측성: DB 호출 1회(트랜잭션 시도) 단위. 기존 order_settlement_duration_seconds
+	// (논리적 단건 정산 전체)와는 의미가 다른 별도 메트릭이다 — 기존 것은 그대로 보존한다.
+	SettlementAttemptDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "settlement_attempt_duration_seconds",
+		Help:    "Duration of one settlement DB call (transaction attempt).",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"path"})
+
+	SettlementBarriersTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "settlement_barriers_total",
+		Help: "Terminal-event barrier entries in the partition dispatcher.",
+	}, []string{"type"})
+
+	SettlementBarrierWait = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "settlement_barrier_wait_seconds",
+		Help:    "Time a terminal event waited for preceding in-flight batches.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"type"})
+
+	SettlementBarrierInflight = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "settlement_barrier_inflight_batches",
+		Help:    "In-flight batch count at barrier entry.",
+		Buckets: []float64{0, 1, 2, 4, 8, 16},
+	}, []string{"type"})
+
+	// dispatcher가 job 송신을 "시도한" 시점부터 worker 실행 시작까지 — 채널 송신 대기·
+	// 채널 내부 대기·worker 스케줄링 대기를 의도적으로 모두 포함한다.
+	SettlementJobDispatchWait = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "settlement_job_dispatch_wait_seconds",
+		Help:    "From dispatch attempt to worker execution start (includes channel send wait).",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	SettlementJobExecution = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "settlement_job_execution_seconds",
+		Help:    "Worker start to logical job completion (includes retries and fallback).",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"result"})
+)
+
+// hot path에서 라벨 map 조회를 피하기 위해 초기화 시 1회 resolve한다.
+var (
+	SettlementAttemptBatch          = SettlementAttemptDuration.WithLabelValues("batch")
+	SettlementAttemptSingle         = SettlementAttemptDuration.WithLabelValues("single")
+	SettlementBarrierMarketDone     = SettlementBarriersTotal.WithLabelValues("market_done")
+	SettlementBarrierCancel         = SettlementBarriersTotal.WithLabelValues("cancel")
+	SettlementBarrierWaitDone       = SettlementBarrierWait.WithLabelValues("market_done")
+	SettlementBarrierWaitCancel     = SettlementBarrierWait.WithLabelValues("cancel")
+	SettlementBarrierInflightDone   = SettlementBarrierInflight.WithLabelValues("market_done")
+	SettlementBarrierInflightCancel = SettlementBarrierInflight.WithLabelValues("cancel")
+	SettlementJobSuccess            = SettlementJobExecution.WithLabelValues("success")
+	SettlementJobFallback           = SettlementJobExecution.WithLabelValues("fallback")
+	SettlementJobFailed             = SettlementJobExecution.WithLabelValues("failed")
 )
 
 // RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를
