@@ -12,6 +12,12 @@ const DEV_TOOLS_TOKEN_HEADER = 'X-GoExchange-Dev-Token';
 // ~10,000 버스트를 담기 위해 TOTAL_USERS를 피크 VU(10,000)에 맞춘다(1 VU = 1 user,
 // 지갑 공유로 인한 잔고 경합 혼선을 피한다 — 22번과 동일 원칙).
 const TOTAL_USERS = parseInt(__ENV.TOTAL_USERS || '10000', 10);
+// 26번(23번 재실행): load-gen 수평 2대 분할 시 유저 인덱스가 겹치지 않게 오프셋을
+// 둔다 — VM A는 OFFSET=0, VM B는 OFFSET=5000. 각 VM은 자기 범위만 setup한다.
+const USER_INDEX_OFFSET = parseInt(__ENV.USER_INDEX_OFFSET || '0', 10);
+// 26번: 두 VM의 setup(등록·로그인·펀딩) 소요 시간이 달라도 시나리오가 같은 UTC
+// 시각에 시작하도록 하는 배리어. 0이면 비활성(기존 단일 VM 동작과 동일).
+const LOAD_START_AT_MS = parseInt(__ENV.LOAD_START_AT_MS || '0', 10);
 const SETUP_BATCH_SIZE = 100;
 const COIN_SYMBOL = 'BTC';
 
@@ -96,8 +102,8 @@ export function setup() {
       'POST',
       `${BASE_URL}/auth/register`,
       JSON.stringify({
-        name: `Spike Test User ${i}`,
-        email: `spike-user-${i}@test.local`,
+        name: `Spike Test User ${USER_INDEX_OFFSET + i}`,
+        email: `spike-user-${USER_INDEX_OFFSET + i}@test.local`,
         password: 'loadtest-password-123',
       }),
       { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } },
@@ -113,7 +119,7 @@ export function setup() {
       } else if (res.status === 409) {
         loginNeeded.push(i);
       } else {
-        throw new Error(`setup: failed to register user ${i}: ${res.status} ${res.body}`);
+        throw new Error(`setup: failed to register user ${USER_INDEX_OFFSET + i}: ${res.status} ${res.body}`);
       }
     });
 
@@ -121,14 +127,14 @@ export function setup() {
       const loginRequests = loginNeeded.map((i) => [
         'POST',
         `${BASE_URL}/auth/login`,
-        JSON.stringify({ email: `spike-user-${i}@test.local`, password: 'loadtest-password-123' }),
+        JSON.stringify({ email: `spike-user-${USER_INDEX_OFFSET + i}@test.local`, password: 'loadtest-password-123' }),
         { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } },
       ]);
       const loginResponses = http.batch(loginRequests);
       loginResponses.forEach((res, idx) => {
         const i = loginNeeded[idx];
         if (res.status !== 200) {
-          throw new Error(`setup: user ${i} already registered but login failed: ${res.status} ${res.body}`);
+          throw new Error(`setup: user ${USER_INDEX_OFFSET + i} already registered but login failed: ${res.status} ${res.body}`);
         }
         tokensByIndex[i] = res.json('data.token');
       });
@@ -158,11 +164,22 @@ export function setup() {
     fundResponses.forEach((res, idx) => {
       const i = batchIndices[idx];
       if (res.status !== 200) {
-        throw new Error(`setup: failed to fund wallet for user ${i}: ${res.status} ${res.body}`);
+        throw new Error(`setup: failed to fund wallet for user ${USER_INDEX_OFFSET + i}: ${res.status} ${res.body}`);
       }
       const role = i % 2 === 1 ? 'buyer' : 'seller';
       users.push({ token: tokensByIndex[i], role });
     });
+  }
+
+  // 26번: setup(등록·로그인·펀딩)을 끝낸 뒤에만 공통 시작 시각까지 대기한다 —
+  // 두 VM의 setup 소요 시간 차이가 그대로 ramp 시작 skew가 되는 것을 막는다.
+  // 시각을 이미 넘겼으면 이 런은 폐기(throw)한다 — 억지로 진행하지 않는다.
+  const remainingMs = LOAD_START_AT_MS - Date.now();
+  if (LOAD_START_AT_MS > 0 && remainingMs <= 0) {
+    throw new Error('setup missed the coordinated load start deadline');
+  }
+  if (remainingMs > 0) {
+    sleep(remainingMs / 1000);
   }
 
   return { users };

@@ -45,6 +45,7 @@ resource "google_compute_firewall" "allow_api" {
   source_ranges = [
     var.allowed_admin_cidr,
     "${google_compute_instance.load_gen.network_interface[0].network_ip}/32",
+    "${google_compute_instance.load_gen_b.network_interface[0].network_ip}/32",
   ]
   target_tags = ["goexchange-server"]
 
@@ -81,6 +82,33 @@ resource "google_compute_instance" "server" {
 
 resource "google_compute_instance" "load_gen" {
   name         = "${local.name_prefix}-load-gen"
+  machine_type = var.load_gen_machine_type
+  zone         = var.gcp_zone
+  tags         = ["goexchange-loadgen"]
+
+  boot_disk {
+    initialize_params {
+      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
+      size  = var.root_volume_size_gb
+      type  = "pd-ssd"
+    }
+  }
+
+  network_interface {
+    network    = google_compute_network.this.id
+    subnetwork = google_compute_subnetwork.this.id
+    access_config {}
+  }
+
+  metadata = {
+    ssh-keys = local.ssh_keys
+  }
+}
+
+# 26번(23번 재실행): load-gen 수직 증설(e2-standard-8→16)로도 ~9,800 VU 근처
+# 크래시가 재발해, per-VM 커넥션 생성 속도 한계로 추정하고 수평(2대)으로 전환한다.
+resource "google_compute_instance" "load_gen_b" {
+  name         = "${local.name_prefix}-load-gen-b"
   machine_type = var.load_gen_machine_type
   zone         = var.gcp_zone
   tags         = ["goexchange-loadgen"]

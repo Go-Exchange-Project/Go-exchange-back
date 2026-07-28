@@ -28,6 +28,16 @@ output "load_gen_ssh_command" {
   value       = "ssh -i ${replace(pathexpand(var.ssh_public_key_path), ".pub", "")} ${var.ssh_username}@${google_compute_instance.load_gen.network_interface[0].access_config[0].nat_ip}"
 }
 
+output "load_gen_b_external_ip" {
+  description = "26번 수평 증설 부하생성 인스턴스 B의 외부 IP."
+  value       = google_compute_instance.load_gen_b.network_interface[0].access_config[0].nat_ip
+}
+
+output "load_gen_b_ssh_command" {
+  description = "26번 수평 증설 부하생성 인스턴스 B SSH 접속 명령."
+  value       = "ssh -i ${replace(pathexpand(var.ssh_public_key_path), ".pub", "")} ${var.ssh_username}@${google_compute_instance.load_gen_b.network_interface[0].access_config[0].nat_ip}"
+}
+
 output "db_internal_ip" {
   description = "DB 인스턴스의 내부 IP (외부 IP 없음)."
   value       = google_compute_instance.db.network_interface[0].network_ip
