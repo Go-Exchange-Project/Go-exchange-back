@@ -125,7 +125,7 @@ dispatch wait 평균  = Δdispatch_wait_sum / Δdispatch_wait_count
   비교 조건 동일성(diff 확인 포함) / 구간별 계산표 / 무결성 검증 결과 / **판정(지배 기여도)** /
   27번 대비(정산 큐 포화 재현 여부) / 한계.
 - [x] **README** 4차 현재 단계 갱신, 20번 완료 문서에 "GCP 스케일 판정" 링크 추가.
-- [ ] **Commit + 푸시 + CI**, **모든 VM stop**(load-gen 2대 포함).
+- [x] **Commit + 푸시 + CI**, **모든 VM stop**(load-gen 2대 포함). (커밋 `6afc7da`, CI 그린 `30393814565`)
 
 ---
 
