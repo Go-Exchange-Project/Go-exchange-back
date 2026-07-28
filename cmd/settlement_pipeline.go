@@ -15,9 +15,10 @@ type broadcastMessage struct {
 
 // settlementJob은 worker에게 넘기는 배치 1개. done은 파티션별 completion 채널이다.
 type settlementJob struct {
-	seq   uint64
-	batch []service.OutboxEvent
-	done  chan<- settlementResult
+	seq        uint64
+	batch      []service.OutboxEvent
+	done       chan<- settlementResult
+	dispatchAt time.Time // 송신 시도 시점 — 채널 대기까지 포함해 측정(4차 축1 관측성)
 }
 
 // settlementResult는 정산 완료 후 순서대로 방출할 메시지를 담는다.
@@ -30,6 +31,8 @@ type settlementResult struct {
 // 수집 closure로 메시지를 모아 completion으로 돌려준다(순서 커밋은 dispatcher 몫).
 func runSettlementWorker(jobs <-chan settlementJob, settleBatch func(batch []service.OutboxEvent, collect func(string, []byte))) {
 	for job := range jobs {
+		metrics.SettlementJobDispatchWait.Observe(time.Since(job.dispatchAt).Seconds())
+		execStart := time.Now()
 		var messages []broadcastMessage
 		collect := func(symbol string, payload []byte) {
 			messages = append(messages, broadcastMessage{coinSymbol: symbol, payload: payload})
@@ -37,6 +40,10 @@ func runSettlementWorker(jobs <-chan settlementJob, settleBatch func(batch []ser
 		if settleBatch != nil {
 			settleBatch(job.batch, collect)
 		}
+		// settleBatch(=settleTradeBatchWithFallback)는 반환값이 없어 worker가 성공/폴백/실패를
+		// 알 수 없다. 이번 패치는 success만 관측하고, fallback/failed 구분은 결과 전달 경로가
+		// 필요하므로 범위 밖이다(다음 사이클).
+		metrics.SettlementJobSuccess.Observe(time.Since(execStart).Seconds())
 		job.done <- settlementResult{seq: job.seq, messages: messages}
 	}
 }
@@ -142,7 +149,7 @@ func runPartitionDispatcher(
 				if !open {
 					queueOpen = false
 				}
-				job := settlementJob{seq: nextSeq, batch: batch, done: completions}
+				job := settlementJob{seq: nextSeq, batch: batch, done: completions, dispatchAt: time.Now()}
 				nextSeq++
 				readyJob = &job
 			}

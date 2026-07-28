@@ -133,6 +133,26 @@ func TestDispatcherRecordsBarrierMetricsPerTerminalType(t *testing.T) {
 		"in-flight가 있던 배리어는 wait 샘플을 남긴다")
 }
 
+func TestDispatcherAndWorkerRecordJobTimingMetrics(t *testing.T) {
+	beforeWait := histogramSampleCount(t, metrics.SettlementJobDispatchWait)
+	beforeExec := histogramVecSampleCount(t, metrics.SettlementJobExecution, "success")
+
+	queue := make(chan service.OutboxEvent, 4)
+	jobs := make(chan settlementJob, 4)
+	queue <- service.OutboxEvent{OutboxID: 1, Event: matching.ExecutionEvent{
+		Trade: &model.Trade{CoinSymbol: "BTC"}}}
+	close(queue)
+
+	okSettleBatch := func(batch []service.OutboxEvent, collect func(string, []byte)) {}
+
+	// worker를 50ms 뒤에 기동해 디스패치 대기를 강제
+	go func() { time.Sleep(50 * time.Millisecond); runSettlementWorker(jobs, okSettleBatch) }()
+	runPartitionDispatcher(queue, jobs, 2, 32, nil, func(string, []byte) {})
+
+	assert.Equal(t, beforeWait+1, histogramSampleCount(t, metrics.SettlementJobDispatchWait))
+	assert.Equal(t, beforeExec+1, histogramVecSampleCount(t, metrics.SettlementJobExecution, "success"))
+}
+
 func TestPartitionDispatcherDrainsOnQueueClose(t *testing.T) {
 	queue := make(chan service.OutboxEvent, 8)
 	jobs := make(chan settlementJob, 4)
