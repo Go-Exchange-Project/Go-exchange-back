@@ -179,8 +179,8 @@ func main() {
 		settlementWorkerWg.Add(1)
 		go func() {
 			defer settlementWorkerWg.Done()
-			runSettlementWorker(settlementJobs, func(batch []service.OutboxEvent, collect func(string, []byte)) {
-				settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService,
+			runSettlementWorker(settlementJobs, func(batch []service.OutboxEvent, collect func(string, []byte)) []uint {
+				return settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService,
 					orderService, failedMarketCompletionService, orderService, collect, outboxRepo, log.Default())
 			})
 		}()
@@ -492,8 +492,9 @@ func processExecutionEvent(
 	return true, false
 }
 
-// processSingleOutboxEvent는 outbox 이벤트 1건을 단건 경로로 처리한다 — 워커 루프의
-// 비-trade(MarketOrderDone) 분기와, 배치 정산 실패 시 폴백 분기가 공유한다.
+// processSingleOutboxEvent는 outbox 이벤트 1건을 단건 경로로 처리하고, 처리가
+// 내구적으로 확정됐는지(handled)를 반환한다. false면 outbox 행이 PENDING으로 남는다 —
+// 호출자는 이를 dependency 미확정(undurable)으로 취급해야 한다.
 func processSingleOutboxEvent(
 	outboxEvent service.OutboxEvent,
 	settler tradeSettler,
@@ -504,21 +505,23 @@ func processSingleOutboxEvent(
 	broadcast func(coinSymbol string, payload []byte),
 	outboxRepo outboxMarker,
 	logger *log.Logger,
-) {
+) bool {
 	handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, logger)
 	if !handled {
 		// 내구 확정 실패(정산 실패의 기록조차 실패) — PENDING으로 남겨
 		// 다음 부팅 리플레이가 재시도한다.
-		return
+		return false
 	}
 	if markedInTx {
 		// 정산 트랜잭션이 outbox 마킹까지 이미 커밋했다 — 별도 왕복 불필요.
-		return
+		return true
 	}
 	if err := outboxRepo.MarkProcessed(outboxEvent.OutboxID); err != nil {
-		// 마킹 실패는 유실이 아니라 다음 리플레이의 멱등 재처리일 뿐.
+		// 마킹 실패는 유실이 아니라 다음 리플레이의 멱등 재처리일 뿐 — 정산은 커밋됐으므로
+		// dependency는 충족이다(undurable이 아니다).
 		logger.Printf("mark outbox event %d processed failed: %v", outboxEvent.OutboxID, err)
 	}
+	return true
 }
 
 // collectTradeBatch는 first(반드시 trade)에 이어 큐에 이미 쌓인 trade를 논블로킹으로
@@ -550,6 +553,8 @@ func collectTradeBatch(first service.OutboxEvent, queue <-chan service.OutboxEve
 // settleTradeBatchWithFallback: 배치 성공 시 Applied trade만 브로드캐스트.
 // 실패 시 전체 롤백된 상태이므로 기존 단건 경로로 건별 재처리 —
 // 불량 trade만 실패 기록으로 빠지고 나머지는 정상 정산된다.
+// 반환값은 내구 확정에 실패한(handled=false) trade의 maker·taker 주문 ID다 —
+// 이 주문들의 terminal은 실행하면 안 된다(dispatcher가 quarantine한다).
 func settleTradeBatchWithFallback(
 	batch []service.OutboxEvent,
 	batchSettler tradeBatchSettler,
@@ -561,7 +566,7 @@ func settleTradeBatchWithFallback(
 	broadcast func(coinSymbol string, payload []byte),
 	outboxRepo outboxMarker,
 	logger *log.Logger,
-) {
+) []uint {
 	items := make([]service.TradeBatchItem, len(batch))
 	for i, event := range batch {
 		items[i] = service.TradeBatchItem{Trade: event.Event.Trade, OutboxEventID: event.OutboxID}
@@ -572,10 +577,14 @@ func settleTradeBatchWithFallback(
 	if err != nil {
 		metrics.SettlementBatchFallbacksTotal.Inc()
 		logger.Printf("settle trade batch of %d failed, falling back to per-trade settlement: %v", len(batch), err)
+		var undurable []uint
 		for _, event := range batch {
-			processSingleOutboxEvent(event, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, outboxRepo, logger)
+			if processSingleOutboxEvent(event, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, outboxRepo, logger) {
+				continue
+			}
+			undurable = append(undurable, event.Event.Trade.BuyOrderID, event.Event.Trade.SellOrderID)
 		}
-		return
+		return undurable
 	}
 	metrics.SettlementBatchSize.Observe(float64(len(batch)))
 	applied := make([]*model.Trade, 0, len(batch))
@@ -585,6 +594,7 @@ func settleTradeBatchWithFallback(
 		}
 	}
 	broadcastSettledTrades(applied, broadcast, logger)
+	return nil
 }
 
 func processMarketOrderDone(

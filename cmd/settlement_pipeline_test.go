@@ -143,7 +143,7 @@ func TestDispatcherAndWorkerRecordJobTimingMetrics(t *testing.T) {
 		Trade: &model.Trade{CoinSymbol: "BTC"}}}
 	close(queue)
 
-	okSettleBatch := func(batch []service.OutboxEvent, collect func(string, []byte)) {}
+	okSettleBatch := func(batch []service.OutboxEvent, collect func(string, []byte)) []uint { return nil }
 
 	// worker를 50ms 뒤에 기동해 디스패치 대기를 강제
 	go func() { time.Sleep(50 * time.Millisecond); runSettlementWorker(jobs, okSettleBatch) }()

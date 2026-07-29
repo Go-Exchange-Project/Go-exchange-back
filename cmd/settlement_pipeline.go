@@ -21,30 +21,31 @@ type settlementJob struct {
 	dispatchAt time.Time // 송신 시도 시점 — 채널 대기까지 포함해 측정(4차 축1 관측성)
 }
 
-// settlementResult는 정산 완료 후 순서대로 방출할 메시지를 담는다.
+// settlementResult는 정산 완료 후 순서대로 방출할 메시지와, 내구 확정에 실패해
+// terminal 실행이 금지된 주문 ID를 담는다.
 type settlementResult struct {
-	seq      uint64
-	messages []broadcastMessage
+	seq               uint64
+	messages          []broadcastMessage
+	undurableOrderIDs []uint
 }
 
 // runSettlementWorker는 전역 pool의 worker 1개다. 브로드캐스트는 하지 않고
 // 수집 closure로 메시지를 모아 completion으로 돌려준다(순서 커밋은 dispatcher 몫).
-func runSettlementWorker(jobs <-chan settlementJob, settleBatch func(batch []service.OutboxEvent, collect func(string, []byte))) {
+// undurable 주문 ID는 판정하지 않고 그대로 전달만 한다(판정은 dispatcher 몫).
+func runSettlementWorker(jobs <-chan settlementJob, settleBatch func(batch []service.OutboxEvent, collect func(string, []byte)) []uint) {
 	for job := range jobs {
 		metrics.SettlementJobDispatchWait.Observe(time.Since(job.dispatchAt).Seconds())
 		execStart := time.Now()
 		var messages []broadcastMessage
+		var undurable []uint
 		collect := func(symbol string, payload []byte) {
 			messages = append(messages, broadcastMessage{coinSymbol: symbol, payload: payload})
 		}
 		if settleBatch != nil {
-			settleBatch(job.batch, collect)
+			undurable = settleBatch(job.batch, collect)
 		}
-		// settleBatch(=settleTradeBatchWithFallback)는 반환값이 없어 worker가 성공/폴백/실패를
-		// 알 수 없다. 이번 패치는 success만 관측하고, fallback/failed 구분은 결과 전달 경로가
-		// 필요하므로 범위 밖이다(다음 사이클).
 		metrics.SettlementJobSuccess.Observe(time.Since(execStart).Seconds())
-		job.done <- settlementResult{seq: job.seq, messages: messages}
+		job.done <- settlementResult{seq: job.seq, messages: messages, undurableOrderIDs: undurable}
 	}
 }
 
