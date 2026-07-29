@@ -60,7 +60,8 @@
   - `settleBatch func(batch []service.OutboxEvent, collect func(string, []byte)) []uint`
   - `settlementResult{seq uint64; messages []broadcastMessage; undurableOrderIDs []uint}`
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성** (`tradeOutboxEvent`가 이미 다른 시그니처로 존재해
+  `tradeOutboxEventForOrders`로 이름을 바꿔 추가했다 — 아래 완료 보고 참고)
 
 `cmd/settlement_undurable_test.go` 생성:
 
@@ -195,12 +196,12 @@ func matchingExecutionEventWithTrade(trade *model.Trade) matching.ExecutionEvent
 
 (`log`, `io`, `matching` import 추가)
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `go test ./cmd/ -run TestSettleTradeBatchWithFallback -v`
 Expected: FAIL — `settleTradeBatchWithFallback(...) used as value` (현재 반환값 없음)
 
-- [ ] **Step 3: `processSingleOutboxEvent`가 `handled`를 반환하도록 변경**
+- [x] **Step 3: `processSingleOutboxEvent`가 `handled`를 반환하도록 변경**
 
 `cmd/main.go:497-522`:
 
@@ -238,7 +239,7 @@ func processSingleOutboxEvent(
 }
 ```
 
-- [ ] **Step 4: `settleTradeBatchWithFallback`이 undurable 주문 ID를 반환하도록 변경**
+- [x] **Step 4: `settleTradeBatchWithFallback`이 undurable 주문 ID를 반환하도록 변경**
 
 `cmd/main.go:553-588`의 시그니처와 폴백 루프:
 
@@ -291,7 +292,7 @@ func settleTradeBatchWithFallback(
 }
 ```
 
-- [ ] **Step 5: worker가 undurable을 completion으로 전달**
+- [x] **Step 5: worker가 undurable을 completion으로 전달**
 
 `cmd/settlement_pipeline.go:24-49`:
 
@@ -327,25 +328,13 @@ func runSettlementWorker(jobs <-chan settlementJob, settleBatch func(batch []ser
 
 `settlement_pipeline.go:43-45`의 "settleBatch는 반환값이 없어 worker가 성공/폴백/실패를 알 수 없다" 주석은 **삭제한다**(더 이상 사실이 아니다).
 
-- [ ] **Step 6: 호출부 배선**
+- [x] **Step 6: 호출부 배선** (`settlement_pipeline_test.go`의 `okSettleBatch` 클로저도
+  `[]uint` 반환으로 함께 수정 — 시그니처 변경의 직접 파급)
 
 `cmd/main.go`에서 `settleTradeBatchWithFallback`을 `settleBatch`로 넘기는 closure의 반환값을 전달하도록 수정한다(현재 무반환 closure → `[]uint` 반환).
 
-- [ ] **Step 7: 테스트 통과 확인**
-
-Run: `go test ./cmd/ -run TestSettleTradeBatchWithFallback -v`
-Expected: PASS (3 tests)
-
-Run: `go build ./... && go vet ./...`
-Expected: 오류 없음
-
-- [ ] **Step 8: 커밋**
-
-`commit-message` 스킬로 메시지를 생성한 뒤:
-
-```bash
-git add cmd/main.go cmd/settlement_pipeline.go cmd/settlement_undurable_test.go
-```
+- [x] **Step 7: 테스트 통과 확인** (3 tests PASS, build/vet 클린, `-race` 포함 cmd 패키지 전체 그린)
+- [x] **Step 8: 커밋** (`2183db4` — 설계+계획 문서 커밋에 실수로 합쳐짐, 완료 보고에 기록)
 
 ---
 
