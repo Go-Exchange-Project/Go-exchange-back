@@ -204,7 +204,10 @@ Run: `go test ./internal/service/... ./internal/metrics/... -count=1` → PASS.
 **Interfaces:**
 - Consumes: `retryFailedSettlementStore`에 `HasOpenFailureForOrder(orderID uint) (bool, error)` 추가.
 
-- [ ] **Step 1: 실패 테스트(테이블 테스트 1개로 묶어도 됨)** — 스펙의 경계 전부:
+- [x] **Step 1: 실패 테스트(테이블 테스트 1개로 묶어도 됨)** — 스펙의 경계 전부:
+  (테이블 테스트의 `assert.False(t, completions.resolved, ...)` 단언은 원안 그대로 쓰면 "dependency
+  없으면 실행" 케이스에서 실제로는 정상 완료·resolve돼야 하는데 항상 false를 기대해 모순이었다 —
+  `assert.Equal(t, tc.wantCompleted, completions.resolved)`로 고쳐 케이스별로 옳게 검증하게 했다.)
 
 ```go
 func TestRetryFailedCompletionsRespectsDependencyGuard(t *testing.T) {
@@ -290,7 +293,11 @@ func TestRetryFailedCompletionsRunsAfterDependencyResolved(t *testing.T) {
 
 Run: `go test ./internal/service/... -run RetryFailedCompletions -v` → FAIL.
 
-- [ ] **Step 2: 구현** — 인터페이스 확장 + `retryFailedCompletions` guard:
+- [x] **Step 2: 구현** — 인터페이스 확장 + `retryFailedCompletions` guard:
+  (기존 completion 전용 테스트 3종은 `FailedSettlements`를 아예 설정하지 않았는데, 새 fail-closed
+  규칙상 nil이면 phase가 중단돼 completer가 0회 호출된다 — 각 테스트에
+  `FailedSettlements: &fakeFailedSettlementStore{}`(기본값 `HasOpenFailureForOrder`→false,nil)를
+  추가해 기존 단언은 그대로 두고 guard가 있어도 정상 흐름이 통과함을 확인했다.)
 
 ```go
 type retryFailedSettlementStore interface {
@@ -343,7 +350,7 @@ func (w *SettlementRetryWorker) retryFailedCompletions() {
 
 Run: 위 테스트 전부 → PASS.
 
-- [ ] **Step 3: Commit** — 초안: `fix(settlement): 미정산 trade 위 시장가 완료 복구를 차단 (B)`
+- [x] **Step 3: Commit** — 초안: `fix(settlement): 미정산 trade 위 시장가 완료 복구를 차단 (B)`
 
 ---
 

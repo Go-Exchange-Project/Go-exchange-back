@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,6 +66,12 @@ func (s *fakeFailedSettlementStore) ResolveFailure(input ResolveFailureInput) (*
 func (s *fakeFailedSettlementStore) RecordFailure(*model.Trade, error) (*model.FailedSettlement, error) {
 	s.recorded++
 	return &model.FailedSettlement{}, nil
+}
+
+// HasOpenFailureForOrder는 기본적으로 dependency가 없다고 답한다 — 이 fake를 쓰는
+// 기존 정산 재시도 테스트들은 completion guard와 무관하므로 항상 통과시킨다.
+func (s *fakeFailedSettlementStore) HasOpenFailureForOrder(uint) (bool, error) {
+	return false, nil
 }
 
 type fakeFailedCompletionStore struct {
@@ -171,7 +179,8 @@ func TestRetryWorkerRetriesCompletionAndResolves(t *testing.T) {
 		Status:               model.FailedSettlementStatusOpen,
 		RetryCount:           1,
 	}}}
-	worker := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: store, Logger: discardServiceLogger()}
+	worker := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: store,
+		FailedSettlements: &fakeFailedSettlementStore{}, Logger: discardServiceLogger()}
 
 	worker.RunOnce()
 
@@ -191,7 +200,8 @@ func TestRetryWorkerRecordsCompletionFailure(t *testing.T) {
 		Status:     model.FailedSettlementStatusOpen,
 		RetryCount: 1,
 	}}}
-	worker := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: store, Logger: discardServiceLogger()}
+	worker := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: store,
+		FailedSettlements: &fakeFailedSettlementStore{}, Logger: discardServiceLogger()}
 
 	worker.RunOnce()
 
@@ -208,12 +218,148 @@ func TestRetryWorkerSkipsExhaustedCompletionRetryCount(t *testing.T) {
 		Status:     model.FailedSettlementStatusOpen,
 		RetryCount: 5,
 	}}}
-	worker := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: store, Logger: discardServiceLogger()}
+	worker := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: store,
+		FailedSettlements: &fakeFailedSettlementStore{}, Logger: discardServiceLogger()}
 
 	worker.RunOnce()
 
 	assert.Equal(t, 0, completer.calls)
 	assert.Empty(t, store.resolved)
+}
+
+type fakeMarketCompleter struct {
+	called bool
+}
+
+func (f *fakeMarketCompleter) CompleteMarketOrder(CompleteMarketOrderInput) error {
+	f.called = true
+	return nil
+}
+
+type fakeCompletionStore struct {
+	failures        []model.FailedMarketCompletion
+	resolved        bool
+	recordedFailure bool
+}
+
+func (s *fakeCompletionStore) ListOpenFailures(int) ([]model.FailedMarketCompletion, error) {
+	return s.failures, nil
+}
+
+func (s *fakeCompletionStore) ResolveFailure(uint, string) error {
+	s.resolved = true
+	return nil
+}
+
+func (s *fakeCompletionStore) RecordFailure(CompleteMarketOrderInput, string, error) (*model.FailedMarketCompletion, error) {
+	s.recordedFailure = true
+	return &model.FailedMarketCompletion{}, nil
+}
+
+type fakeSettlementStore struct {
+	hasOpen      bool
+	hasOpenErr   error
+	hasOpenCalls int
+}
+
+func (s *fakeSettlementStore) ListOpenFailures(int) ([]model.FailedSettlement, error) {
+	return nil, nil
+}
+
+func (s *fakeSettlementStore) ResolveFailure(ResolveFailureInput) (*model.FailedSettlement, error) {
+	return nil, nil
+}
+
+func (s *fakeSettlementStore) RecordFailure(*model.Trade, error) (*model.FailedSettlement, error) {
+	return nil, nil
+}
+
+func (s *fakeSettlementStore) HasOpenFailureForOrder(uint) (bool, error) {
+	s.hasOpenCalls++
+	return s.hasOpen, s.hasOpenErr
+}
+
+func TestRetryFailedCompletionsRespectsDependencyGuard(t *testing.T) {
+	cases := []struct {
+		name           string
+		hasOpen        bool
+		hasOpenErr     error
+		nilStore       bool
+		wantCompleted  bool // CompleteMarketOrder 호출됐나
+		wantBlockedInc bool // blocked counter 증가했나
+	}{
+		{name: "OPEN dependency면 차단", hasOpen: true, wantCompleted: false, wantBlockedInc: true},
+		{name: "dependency 없으면 실행", hasOpen: false, wantCompleted: true, wantBlockedInc: false},
+		{name: "조회 오류면 fail-closed", hasOpenErr: errors.New("db down"), wantCompleted: false, wantBlockedInc: false},
+		{name: "store가 nil이면 phase 중단", nilStore: true, wantCompleted: false, wantBlockedInc: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			completer := &fakeMarketCompleter{}
+			completions := &fakeCompletionStore{failures: []model.FailedMarketCompletion{
+				{ID: 1, OrderID: 1001, RetryCount: 1, Status: model.FailedSettlementStatusOpen},
+			}}
+			w := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: completions, Logger: discardServiceLogger()}
+			if !tc.nilStore {
+				w.FailedSettlements = &fakeSettlementStore{hasOpen: tc.hasOpen, hasOpenErr: tc.hasOpenErr}
+			}
+			before := testutil.ToFloat64(metrics.SettlementCompletionBlockedTotal)
+
+			w.RunOnce()
+
+			assert.Equal(t, tc.wantCompleted, completer.called)
+			assert.Equal(t, uint(1), completions.failures[0].RetryCount, "차단 시 retry count 미소비")
+			// dependency가 없어 정상 실행된 케이스는 completer가 성공을 반환하므로 resolve된다 —
+			// 나머지(차단·fail-closed) 케이스는 completion 상태를 건드리면 안 된다.
+			assert.Equal(t, tc.wantCompleted, completions.resolved)
+			assert.False(t, completions.recordedFailure, "차단 시 실패 처리 금지")
+			after := testutil.ToFloat64(metrics.SettlementCompletionBlockedTotal)
+			if tc.wantBlockedInc {
+				assert.Equal(t, before+1, after)
+			} else {
+				assert.Equal(t, before, after)
+			}
+		})
+	}
+}
+
+// phase 중단: 첫 조회가 실패하면 뒤 completion도 이번 사이클엔 실행되지 않는다.
+func TestRetryFailedCompletionsAbortsPhaseOnQueryError(t *testing.T) {
+	completer := &fakeMarketCompleter{}
+	completions := &fakeCompletionStore{failures: []model.FailedMarketCompletion{
+		{ID: 1, OrderID: 1001, RetryCount: 1, Status: model.FailedSettlementStatusOpen},
+		{ID: 2, OrderID: 1002, RetryCount: 1, Status: model.FailedSettlementStatusOpen},
+	}}
+	settlements := &fakeSettlementStore{hasOpenErr: errors.New("db down")}
+	w := &SettlementRetryWorker{
+		MarketCompleter:   completer,
+		FailedCompletions: completions,
+		FailedSettlements: settlements,
+		Logger:            discardServiceLogger(),
+	}
+
+	w.RunOnce()
+
+	assert.False(t, completer.called, "첫 조회 실패 시 뒤 completion도 미실행")
+	assert.Equal(t, 1, settlements.hasOpenCalls, "phase 중단이므로 조회도 1회만")
+}
+
+// 해결 후 다음 RunOnce에서 실행된다(핵심 흐름).
+func TestRetryFailedCompletionsRunsAfterDependencyResolved(t *testing.T) {
+	completer := &fakeMarketCompleter{}
+	settlements := &fakeSettlementStore{hasOpen: true}
+	completions := &fakeCompletionStore{failures: []model.FailedMarketCompletion{
+		{ID: 1, OrderID: 1001, RetryCount: 1, Status: model.FailedSettlementStatusOpen},
+	}}
+	w := &SettlementRetryWorker{MarketCompleter: completer, FailedCompletions: completions,
+		FailedSettlements: settlements, Logger: discardServiceLogger()}
+
+	w.RunOnce()
+	require.False(t, completer.called, "dependency OPEN이면 미실행")
+
+	settlements.hasOpen = false // 복구됨
+	w.RunOnce()
+	assert.True(t, completer.called, "해결 후 다음 RunOnce에서 실행")
 }
 
 func TestTradeFromFailedSettlementFallsBackToOccurredAt(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 )
 
@@ -27,6 +28,7 @@ type retryFailedSettlementStore interface {
 	ListOpenFailures(limit int) ([]model.FailedSettlement, error)
 	ResolveFailure(input ResolveFailureInput) (*model.FailedSettlement, error)
 	RecordFailure(trade *model.Trade, settlementErr error) (*model.FailedSettlement, error)
+	HasOpenFailureForOrder(orderID uint) (bool, error)
 }
 
 type retryFailedCompletionStore interface {
@@ -115,6 +117,11 @@ func (w *SettlementRetryWorker) retryFailedCompletions() {
 	if w.MarketCompleter == nil || w.FailedCompletions == nil {
 		return
 	}
+	// fail-closed: dependency를 확인할 수단이 없으면 terminal을 실행하지 않는다.
+	if w.FailedSettlements == nil {
+		w.logf("retry worker: dependency store unavailable, skipping completion phase")
+		return
+	}
 
 	failures, err := w.FailedCompletions.ListOpenFailures(settlementRetryBatchLimit)
 	if err != nil {
@@ -126,6 +133,18 @@ func (w *SettlementRetryWorker) retryFailedCompletions() {
 		failure := &failures[i]
 		if failure.RetryCount >= w.maxRetryCount() {
 			continue
+		}
+
+		// 같은 주문을 참조하는 OPEN 정산 실패가 있으면 terminal을 durable defer 한다.
+		// 조회 오류는 fail-closed — 오류 로그 1회 후 이번 사이클의 completion phase 전체 중단.
+		hasOpen, depErr := w.FailedSettlements.HasOpenFailureForOrder(failure.OrderID)
+		if depErr != nil {
+			w.logf("retry worker: dependency check failed for order %d: %v", failure.OrderID, depErr)
+			return
+		}
+		if hasOpen {
+			metrics.SettlementCompletionBlockedTotal.Inc()
+			continue // 차단은 정상 동작이라 로그를 남기지 않는다
 		}
 
 		input := CompleteMarketOrderInput{
