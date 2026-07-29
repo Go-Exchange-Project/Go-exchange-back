@@ -202,6 +202,22 @@ func TestResolveFailureTrimsAuditFields(t *testing.T) {
 	assert.Equal(t, "no retry", repo.markResolvedNotes)
 }
 
+func TestHasOpenFailureForOrderDelegatesToRepository(t *testing.T) {
+	repo := &fakeFailedSettlementRepository{hasOpen: true}
+	svc := &FailedSettlementService{Repository: repo}
+
+	has, err := svc.HasOpenFailureForOrder(1001)
+	require.NoError(t, err)
+	assert.True(t, has)
+	assert.Equal(t, uint(1001), repo.lastQueriedOrderID)
+}
+
+func TestHasOpenFailureForOrderRequiresRepository(t *testing.T) {
+	svc := &FailedSettlementService{}
+	_, err := svc.HasOpenFailureForOrder(1001)
+	assert.Error(t, err, "repository 없으면 오류 — 호출자가 fail-closed로 처리한다")
+}
+
 type fakeFailedSettlementRepository struct {
 	findOpenLimit          int
 	findByIDResult         *model.FailedSettlement
@@ -210,6 +226,14 @@ type fakeFailedSettlementRepository struct {
 	markResolvedResolution string
 	markResolvedBy         string
 	markResolvedNotes      string
+	hasOpen                bool
+	hasOpenErr             error
+	lastQueriedOrderID     uint
+}
+
+func (r *fakeFailedSettlementRepository) HasOpenFailureForOrder(orderID uint) (bool, error) {
+	r.lastQueriedOrderID = orderID
+	return r.hasOpen, r.hasOpenErr
 }
 
 func (r *fakeFailedSettlementRepository) RecordFailure(failure *model.FailedSettlement) (*model.FailedSettlement, error) {

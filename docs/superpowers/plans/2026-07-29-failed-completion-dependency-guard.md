@@ -39,7 +39,7 @@ store **네 계층에 추가**하고, `retryFailedCompletions`가 completion 실
 **Interfaces:**
 - Produces: `func (r *FailedSettlementRepository) HasOpenFailureForOrder(orderID uint) (bool, error)`
 
-- [ ] **Step 1: 실패 테스트** — 기존 통합 테스트 파일에 추가(기존 시드 헬퍼 재사용):
+- [x] **Step 1: 실패 테스트** — 기존 통합 테스트 파일에 추가(기존 시드 헬퍼 재사용):
 
 ```go
 func TestIntegrationHasOpenFailureForOrderMatchesBuyAndSellSide(t *testing.T) {
@@ -90,7 +90,7 @@ func TestIntegrationHasOpenFailureForOrderIgnoresResolved(t *testing.T) {
 
 Run: `go test ./internal/repository/... -run HasOpenFailureForOrder -v` → FAIL(undefined).
 
-- [ ] **Step 2: 구현** — `failed_settlement_repository.go`(기존 `FindOpen` 스타일 그대로):
+- [x] **Step 2: 구현** — `failed_settlement_repository.go`(기존 `FindOpen` 스타일 그대로):
 
 ```go
 // HasOpenFailureForOrder는 해당 주문을 maker 또는 taker로 참조하는 OPEN 실패가 있는지
@@ -118,7 +118,7 @@ func (r *FailedSettlementRepository) HasOpenFailureForOrder(orderID uint) (bool,
 
 Run: 위 3종 → PASS.
 
-- [ ] **Step 3: Commit** — 초안: `feat(repository): 주문별 OPEN 정산 실패 존재 조회 추가 (B)`
+- [x] **Step 3: Commit** — 초안: `feat(repository): 주문별 OPEN 정산 실패 존재 조회 추가 (B)` (커밋 `3ec09cd`)
 
 ---
 
@@ -134,7 +134,9 @@ Run: 위 3종 → PASS.
   `func (s *FailedSettlementService) HasOpenFailureForOrder(orderID uint) (bool, error)`,
   `metrics.SettlementCompletionBlockedTotal prometheus.Counter`
 
-- [ ] **Step 1: 실패 테스트** — service가 repository로 위임하고, nil repo는 오류:
+- [x] **Step 1: 실패 테스트** — service가 repository로 위임하고, nil repo는 오류:
+  (`fakeFailedSettlementRepo`가 아닌 기존 `fakeFailedSettlementRepository`를 확장해 재사용 — 같은 패키지에
+  구조적으로 동일한 fake가 중복 생기는 것을 피함)
 
 ```go
 func TestHasOpenFailureForOrderDelegatesToRepository(t *testing.T) {
@@ -156,7 +158,7 @@ func TestHasOpenFailureForOrderRequiresRepository(t *testing.T) {
 
 Run: `go test ./internal/service/... -run HasOpenFailureForOrder -v` → FAIL.
 
-- [ ] **Step 2: 구현** — 인터페이스에 메서드 추가 + 서비스 위임(기존 `ListOpenFailures` 패턴):
+- [x] **Step 2: 구현** — 인터페이스에 메서드 추가 + 서비스 위임(기존 `ListOpenFailures` 패턴):
 
 ```go
 type failedSettlementRepository interface {
@@ -189,7 +191,7 @@ func (s *FailedSettlementService) HasOpenFailureForOrder(orderID uint) (bool, er
 
 Run: `go test ./internal/service/... ./internal/metrics/... -count=1` → PASS.
 
-- [ ] **Step 3: Commit** — 초안: `feat(settlement): dependency 조회 서비스 계층과 차단 카운터 추가 (B)`
+- [x] **Step 3: Commit** — 초안: `feat(settlement): dependency 조회 서비스 계층과 차단 카운터 추가 (B)`
 
 ---
 

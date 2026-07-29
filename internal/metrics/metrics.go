@@ -95,6 +95,12 @@ var (
 		Help: "Total orders fast-rejected by admission control (503), labeled by shedding stage.",
 	}, []string{"stage"})
 
+	// 차단된 polling "횟수"다 — 현재 차단된 주문 수가 아니다(rate/increase로 지속 차단 탐지).
+	SettlementCompletionBlockedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "settlement_completion_blocked_total",
+		Help: "Times a market-completion retry was skipped due to an OPEN failed settlement dependency.",
+	})
+
 	// 4차 축 1 관측성: DB 호출 1회(트랜잭션 시도) 단위. 기존 order_settlement_duration_seconds
 	// (논리적 단건 정산 전체)와는 의미가 다른 별도 메트릭이다 — 기존 것은 그대로 보존한다.
 	SettlementAttemptDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{

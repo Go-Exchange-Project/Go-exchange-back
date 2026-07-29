@@ -52,6 +52,7 @@ type failedSettlementRepository interface {
 	FindOpen(limit int) ([]model.FailedSettlement, error)
 	FindByID(id uint) (*model.FailedSettlement, error)
 	MarkResolved(id uint, resolution string, resolvedBy string, notes string) error
+	HasOpenFailureForOrder(orderID uint) (bool, error)
 }
 
 type FailedSettlementService struct {
@@ -79,6 +80,13 @@ func (s *FailedSettlementService) ListOpenFailures(limit int) ([]model.FailedSet
 		return nil, fmt.Errorf("failed settlement repository is required")
 	}
 	return s.Repository.FindOpen(repository.NormalizeFailedSettlementListLimit(limit))
+}
+
+func (s *FailedSettlementService) HasOpenFailureForOrder(orderID uint) (bool, error) {
+	if s == nil || s.Repository == nil {
+		return false, fmt.Errorf("failed settlement repository is required")
+	}
+	return s.Repository.HasOpenFailureForOrder(orderID)
 }
 
 func (s *FailedSettlementService) ResolveFailure(input ResolveFailureInput) (*model.FailedSettlement, error) {
