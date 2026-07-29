@@ -124,6 +124,28 @@ func (r *FailedSettlementRepository) MarkResolved(id uint, resolution string, re
 	return nil
 }
 
+// HasOpenFailureForOrder는 해당 주문을 maker 또는 taker로 참조하는 OPEN 실패가 있는지
+// DB에서 EXISTS로 판정한다. ListOpenFailures(limit) 결과를 메모리에서 검색하면 batch
+// limit 밖의 dependency를 놓쳐 fail-open이 되므로 반드시 이 경로를 쓴다.
+func (r *FailedSettlementRepository) HasOpenFailureForOrder(orderID uint) (bool, error) {
+	if r == nil || r.DB == nil {
+		return false, fmt.Errorf("failed settlement repository DB is required")
+	}
+	if orderID == 0 {
+		return false, fmt.Errorf("order id is required")
+	}
+
+	var exists bool
+	err := r.DB.Raw(
+		`SELECT EXISTS (
+			SELECT 1 FROM failed_settlements
+			WHERE status = ? AND (buy_order_id = ? OR sell_order_id = ?)
+		)`,
+		model.FailedSettlementStatusOpen, orderID, orderID,
+	).Scan(&exists).Error
+	return exists, err
+}
+
 func NormalizeFailedSettlementListLimit(limit int) int {
 	if limit <= 0 {
 		return DefaultFailedSettlementListLimit

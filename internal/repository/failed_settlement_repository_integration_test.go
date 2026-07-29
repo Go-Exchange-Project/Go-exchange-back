@@ -225,6 +225,75 @@ func TestIntegrationMarkResolvedMissingIDReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestIntegrationHasOpenFailureForOrderMatchesBuyAndSellSide(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewFailedSettlementRepository(db)
+	// buy_order_id = 1001, sell_order_id = 2001인 OPEN 실패 1건 시드
+	seedOpenFailedSettlement(t, db, 1001, 2001)
+
+	has, err := repo.HasOpenFailureForOrder(1001) // maker 측
+	require.NoError(t, err)
+	assert.True(t, has, "buy_order_id 매칭")
+
+	has, err = repo.HasOpenFailureForOrder(2001) // taker 측
+	require.NoError(t, err)
+	assert.True(t, has, "sell_order_id 매칭")
+
+	has, err = repo.HasOpenFailureForOrder(9999) // unrelated
+	require.NoError(t, err)
+	assert.False(t, has)
+}
+
+// batch limit 회귀 고정: 앞쪽에 unrelated OPEN 50건 이상을 깔아도 찾아야 한다.
+func TestIntegrationHasOpenFailureForOrderIgnoresListLimit(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewFailedSettlementRepository(db)
+	for i := 0; i < 60; i++ { // unrelated 60건 먼저
+		seedOpenFailedSettlement(t, db, uint(3000+i), uint(4000+i))
+	}
+	seedOpenFailedSettlement(t, db, 7001, 7002) // 그 뒤에 대상
+
+	has, err := repo.HasOpenFailureForOrder(7001)
+	require.NoError(t, err)
+	assert.True(t, has, "ListOpenFailures(50) 메모리 검색이면 여기서 false가 된다")
+}
+
+// RESOLVED는 dependency가 아니다.
+func TestIntegrationHasOpenFailureForOrderIgnoresResolved(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewFailedSettlementRepository(db)
+	f := seedOpenFailedSettlement(t, db, 5001, 5002)
+	require.NoError(t, repo.MarkResolved(f.ID, "manual", "test", ""))
+
+	has, err := repo.HasOpenFailureForOrder(5001)
+	require.NoError(t, err)
+	assert.False(t, has)
+}
+
+// seedOpenFailedSettlement는 지정된 buy/sell order ID를 참조하는 OPEN failed
+// settlement 1건을 만들고 테스트 종료 시 정리한다.
+func seedOpenFailedSettlement(t *testing.T, db *gorm.DB, buyOrderID, sellOrderID uint) model.FailedSettlement {
+	t.Helper()
+	key := fmt.Sprintf("repo-dependency-guard-%d-%d-%d", buyOrderID, sellOrderID, time.Now().UnixNano())
+	failure := model.FailedSettlement{
+		TradeIdempotencyKey: key,
+		CoinSymbol:          "BTC",
+		BuyOrderID:          buyOrderID,
+		SellOrderID:         sellOrderID,
+		Price:               decimal.NewFromInt(90),
+		Quantity:            decimal.NewFromInt(5),
+		ErrorMessage:        "dependency guard test",
+		Status:              model.FailedSettlementStatusOpen,
+		RetryCount:          1,
+		OccurredAt:          time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(&failure).Error)
+	t.Cleanup(func() {
+		db.Where("trade_idempotency_key = ?", key).Delete(&model.FailedSettlement{})
+	})
+	return failure
+}
+
 func failedSettlementFixture(key string, message string) model.FailedSettlement {
 	return model.FailedSettlement{
 		TradeIdempotencyKey: key,
