@@ -356,14 +356,16 @@ Run: 위 테스트 전부 → PASS.
 
 ### Task 4: 전체 검증 + 문서
 
-- [ ] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0,
+- [x] **Step 1: 전체 검증** — `go build ./...` + `go vet` + `go test ./... -count=1`(통합 SKIP 0,
   DSN 55432) + `go test ./internal/service/... ./internal/repository/... ./cmd/... -race -count=1`.
   **기존 워커·정산·복구 테스트가 무수정 그린**이어야 한다(동작 축소가 아니라 가드 추가임의 증거).
-- [ ] **Step 2: 완료 문서** — `docs/refactor/21_시장가완료_dependency_guard_완료.md`:
+  (completion 전용 3종은 새 fail-closed 규칙상 `FailedSettlements` 필드 추가가 필요해 그 한 줄만
+  보강 — 기존 단언은 무수정.)
+- [x] **Step 2: 완료 문서** — `docs/refactor/21_시장가완료_dependency_guard_완료.md`:
   왜(현재 fail-open 구멍 — 비-transient·retry 소진이 `OPEN`으로 남는데 completion은 실행됨) /
   어떻게(EXISTS 조회, 네 계층 통과, phase 단위 fail-closed, counter) / 결과(테스트·회귀 그린) /
   **범위 밖**(A 런타임 fence·C 취소 durable defer) 명기.
-- [ ] **Step 3: README** — 4차 축 1 현재 단계에 "B 완료 → 다음 A+C" 반영.
+- [x] **Step 3: README** — 4차 축 1 현재 단계에 "B 완료 → 다음 A+C" 반영.
 - [ ] **Step 4: Commit + 푸시 + CI** — `gh run watch` 그린.
 
 ---
