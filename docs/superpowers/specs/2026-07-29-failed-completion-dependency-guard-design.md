@@ -52,6 +52,59 @@ query error:
   다음 RunOnce에서 재확인
 ```
 
+### 인터페이스 계약 — `HasOpenFailureForOrder`
+
+```go
+HasOpenFailureForOrder(orderID uint) (bool, error)
+```
+
+**다음 네 계층을 모두 통과해야 한다**(이름은 현재 코드와 일치):
+
+- `FailedSettlementRepository`(repository)
+- `failedSettlementRepository`(service 인터페이스, failed_settlement_service.go:50)
+- `FailedSettlementService`
+- `retryFailedSettlementStore`(워커가 보는 인터페이스, settlement_retry_worker.go:26)
+
+SQL 의미는 **DB에서 EXISTS로 판정**한다:
+
+```sql
+SELECT EXISTS (
+    SELECT 1
+    FROM failed_settlements
+    WHERE status = 'OPEN'
+      AND (buy_order_id = $1 OR sell_order_id = $1)
+)
+```
+
+**`ListOpenFailures(50)` 결과를 메모리에서 검색하는 방식은 금지한다.** batch limit(50) 밖에 있는
+dependency를 놓쳐 **fail-open**이 되기 때문이다. repository 테스트에는 **앞쪽에 unrelated `OPEN`
+실패를 50건 이상 넣고 그 뒤에 같은 주문의 실패를 넣어도 `true`**가 나오는 케이스를 포함해 이
+회귀를 고정한다.
+
+### fail-closed 흐름 (phase 단위)
+
+```
+dependency store == nil
+  → completion phase 전체 중단
+  → terminal 실행 금지
+
+dependency query error
+  → 오류 로그 1회
+  → completion phase 전체 중단
+  → 이후 completion도 이번 RunOnce에서는 실행하지 않음
+
+dependency exists
+  → blocked counter +1
+  → 해당 completion만 건너뛰고 다음 completion 검사
+
+dependency absent
+  → 기존 completion 복구 실행
+```
+
+조회 오류에서 **phase 전체를 중단**하면 정상 completion도 최대 10초(다음 `RunOnce`) 늦어지지만,
+**DB 상태를 신뢰할 수 없는 상황에서 일부만 실행하는 것보다 안전**하고 **최대 50회의 동일 오류
+로그**도 막는다.
+
 ### 차단 상태에서 금지되는 것
 
 - `CompleteMarketOrder`를 **호출하지 않는다**
@@ -112,8 +165,19 @@ RunOnce에서 OPEN dependency 때문에 completion 실행을 건너뛸 때마다
 9. **dependency 조회가 오류를 반환하면** terminal을 실행하지 않고 **completion 상태와 retry count를
    그대로 유지**(fail-closed 회귀 방지 — 이 테스트가 없으면 가장 위험한 fail-open이 남는다)
 
-repository 단위 테스트만이 아니라 **`RunOnce()` 통합 흐름**으로
-**"trade 복구 전 terminal 미실행 → trade 복구 후 terminal 실행"**을 고정한다(7번).
+**fail-closed 경계 2종 추가:**
+
+10. **dependency store가 nil이면** completer **미호출**(phase 전체 중단)
+11. **첫 dependency 조회가 실패하면 뒤에 있는 completion도 이번 사이클에는 미실행**(phase 중단)
+
+**batch limit 회귀 고정(repository 단위):**
+
+12. 앞쪽에 **unrelated `OPEN` 실패 50건 이상**을 넣고 그 뒤에 같은 주문의 실패를 넣어도
+    `HasOpenFailureForOrder` = `true`
+
+**테스트 개수를 고정할 필요는 없다** — 위 항목들을 하나의 테이블 테스트로 묶어도 된다. 핵심은
+**각 경계가 실제로 고정되는 것**이다. 다만 repository 단위 테스트만이 아니라 **`RunOnce()` 통합
+흐름**으로 **"trade 복구 전 terminal 미실행 → trade 복구 후 terminal 실행"**을 고정한다(7번).
 
 ## 범위 밖
 
