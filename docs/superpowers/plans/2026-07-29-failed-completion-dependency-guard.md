@@ -366,7 +366,7 @@ Run: 위 테스트 전부 → PASS.
   어떻게(EXISTS 조회, 네 계층 통과, phase 단위 fail-closed, counter) / 결과(테스트·회귀 그린) /
   **범위 밖**(A 런타임 fence·C 취소 durable defer) 명기.
 - [x] **Step 3: README** — 4차 축 1 현재 단계에 "B 완료 → 다음 A+C" 반영.
-- [ ] **Step 4: Commit + 푸시 + CI** — `gh run watch` 그린.
+- [x] **Step 4: Commit + 푸시 + CI** — `gh run watch` 그린.
 
 ---
 
