@@ -1385,7 +1385,7 @@ func (d *dependencyTracker) outstanding() int
 func (d *dependencyTracker) quarantinedCount() int
 ```
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `cmd/settlement_dependency_test.go`:
 
@@ -1454,12 +1454,12 @@ func TestReadyIsTrueForUntouchedOrder(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `go test ./cmd/ -run TestTouchedOrderIDs -v`
 Expected: FAIL — `newDependencyTracker undefined`
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 `cmd/settlement_dependency.go`:
 
@@ -1557,12 +1557,23 @@ func (d *dependencyTracker) outstanding() int { return d.jobs }
 func (d *dependencyTracker) quarantinedCount() int { return len(d.unsafeOrders) }
 ```
 
-- [ ] **Step 4: 테스트 통과 확인**
+- [x] **Step 4: 테스트 통과 확인**
 
 Run: `go test ./cmd/ -race -run 'TestTouchedOrderIDs|TestRegisterAndRetire|TestRetire|TestQuarantine|TestReady' -v`
 Expected: PASS (6 tests)
 
-- [ ] **Step 5: 커밋** (`commit-message` 스킬)
+메모: 계획의 테스트 코드가 `tradeOutboxEvent(1, 10, 20)`(outboxID, buyOrderID,
+sellOrderID 3-인자 형태)를 호출하지만, `cmd/main_test.go`에 이미 있는
+`tradeOutboxEvent(outboxID uint64, engineSequence int64)`는 시그니처가 다르고
+BuyOrderID/SellOrderID를 설정하지 않는다(Task 1에서 겪은 것과 동일한 충돌).
+Task 1에서 이미 만들어 둔 `tradeOutboxEventForOrders(outboxID, buyOrderID,
+sellOrderID)` 헬퍼가 정확히 이 시그니처이므로 새로 만들지 않고 그대로
+재사용했다. `go test ./cmd/ -race -run '...' -v`(6개 전부 PASS), `go test
+./... -count=1 -race`(전체) 모두 통과했다. `dependencyTracker`는 아직
+production 코드 어디에도 배선되지 않은 순수 상태 기계다(계획대로 — Task 7이
+dispatcher에 연결한다).
+
+- [x] **Step 5: 커밋** (`commit-message` 스킬)
 
 ---
 
