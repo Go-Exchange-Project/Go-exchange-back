@@ -121,36 +121,36 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 
 ### Phase 0: Preflight (저부하 1~2분 — 실패 시 전체 실행 금지)
 
-- [ ] **Step 1: 코드 동일성** — 배포 커밋이 측정 기준 SHA `82b4d7f`와 일치하고
+- [x] **Step 1: 코드 동일성** — 배포 커밋이 측정 기준 SHA `82b4d7f`와 일치하고
   `git diff 82b4d7f..HEAD -- '*.go'`가 비어 있음을 확인.
-- [ ] **Step 1-a: DB 접속 유효성** — 현재 `go-exchange-back` 환경을 canonical source로 사용.
+- [x] **Step 1-a: DB 접속 유효성** — 현재 `go-exchange-back` 환경을 canonical source로 사용.
   **과거 `bench-*` 값을 복사하지 않는다.** 값 비교가 아니라 **실제 연결 성공**으로 검증하고,
   **비밀번호 값·hash·fingerprint를 로그·문서·아티팩트에 출력하지 않는다.**
-- [ ] **Step 1-b: 스키마 확인 (TRUNCATE보다 먼저)** — `failed_order_cancellations`(존재 +
+- [x] **Step 1-b: 스키마 확인 (TRUNCATE보다 먼저)** — `failed_order_cancellations`(존재 +
   `order_id` uniqueIndex + `retry_count` default 0 + CHECK `>= 0`), `failed_market_completions`
   (default 0, 신 제약 존재 + 구 제약 `_retry_count_positive` 부재). **CHECK/default까지** 확인한
   뒤에야 10개 테이블 TRUNCATE.
-- [ ] **Step 1-c: Secret preflight** — [29번 runbook](2026-07-30-per-order-fence-gcp-remeasurement.md)의
+- [x] **Step 1-c: Secret preflight** — [29번 runbook](2026-07-30-per-order-fence-gcp-remeasurement.md)의
   절차를 그대로 따른다:
   - **기존(폐기된) 토큰이 거부**되는지 확인
   - **현재 secret이 인증 단계를 통과**하는지 확인
   - **토큰 값·hash·fingerprint를 출력하지 않는다**(문서·아티팩트·로그 전부)
   - **실패 시 부하 실행 금지**
-- [ ] **Step 1-d: CPU 수집기 동작 확인** — 서버·DB 양쪽에서:
+- [x] **Step 1-d: CPU 수집기 동작 확인** — 서버·DB 양쪽에서:
   - 시작 전 `pgrep -af '[v]mstat -t 5'` **결과 없음**(이전 단계 수집기 잔존 없음 —
     대괄호 트릭으로 자기 명령 매칭을 피한다)
   - `stdbuf -oL`로 띄운 뒤 출력이 **실시간으로 쌓이는지**(파일 크기 증가 확인)
   - **SSH를 끊어도 계속 도는지**(`enable-linger`)
   - `kill "$(cat "$FILE.pid")"` 후 **`kill -0`이 실패**하고 `pgrep -af '[v]mstat -t 5'`도
     결과 없음까지 확인
-- [ ] **Step 1-e: 시간 정렬** — CPU 시계열과 Prometheus 구간을 맞추려면 시계가 맞아야 한다:
+- [x] **Step 1-e: 시간 정렬** — CPU 시계열과 Prometheus 구간을 맞추려면 시계가 맞아야 한다:
   - **서버·DB·load-gen 2대의 UTC 시계 차이 ≤ 1초**(`date -u`). 초과하면 원인 해결 후 재개.
     근거: CPU 표본 간격이 5초이고 load-gen 시작 skew 계약도 ≤1초이므로, 1초를 넘는 드리프트는
     구간 귀속을 한 표본 이상 어긋나게 만든다
   - **각 단계(램프·평시·버스트·회복)의 UTC 시작·종료 시각을 기록**해 둔다 —
     이 기록 없이는 CPU max/p95를 구간별로 귀속시킬 수 없다
   - load-gen 두 대의 시작 skew ≤ 1초(29번과 동일)
-- [ ] **Step 2: 저부하 실행** 후 전부 확인:
+- [x] **Step 2: 저부하 실행** 후 전부 확인:
   - 기동 로그가 **의도한 `concurrency=N`** 을 출력(Phase 1은 4, Phase 2는 8)
   - `/metrics`에 `go_sql_*` 3종이 노출
   - `settlement_terminal_wait_seconds{kind}` · `settlement_outstanding_jobs{partition}` ·
@@ -161,7 +161,7 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
     드레인이 끝나고 `settlement_outstanding_jobs`가 **모든 파티션에서 0**인 최종 스냅샷에서만
     검사한다(도중에는 in-flight 때문에 어긋나는 것이 정상이다)
   - 기존 SLI·정합성 검사 정상
-- [ ] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**. 원인 해결 후 Phase 0 재수행.
+- [x] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**. 원인 해결 후 Phase 0 재수행.
 
 ---
 
@@ -169,8 +169,8 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 
 `GOEXCHANGE_SETTLEMENT_CONCURRENCY=4`. DB 초기화 + 서버 재기동 후 29번과 동일 프로파일로 실행.
 
-- [ ] **Step 1: 실행** — CPU 수집기 기동 → 부하 → 드레인 → 수집기 정지
-- [ ] **Step 2: 29번 대비 재현 확인**
+- [x] **Step 1: 실행** — CPU 수집기 기동 → 부하 → 드레인 → 수집기 정지
+- [x] **Step 2: 29번 대비 재현 확인**
 
 | 지표 | 29번 (hold) | 허용 오차 |
 |---|---|---|
@@ -186,7 +186,7 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 > 재현이 오차를 벗어나면 그 자체가 결과다 — **"단일 실행 A/B 비교가 성립하지 않는다"**
 > 는 뜻이므로 **N=8 비교를 중단하고 분산 문제부터 보고**한다.
 
-- [ ] **Step 3: 게이트** — 재현 실패 시 **Phase 2 진행 금지**.
+- [x] **Step 3: 게이트** — 재현 실패 시 **Phase 2 진행 금지**.
 
 ---
 
@@ -194,9 +194,9 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 
 `GOEXCHANGE_SETTLEMENT_CONCURRENCY=8`. **DB 초기화 + 서버 재기동**. 그 외 전부 동일.
 
-- [ ] **Step 1: 기동 로그에서 `concurrency=8` 확인**(env가 실제로 먹었는지)
-- [ ] **Step 2: 실행** — Phase 1과 같은 절차·같은 수집
-- [ ] **Step 3: 원본 보존** — 스냅샷·k6 stdout·`summary-*.json`·`vmstat` 파일·시각 기록을
+- [x] **Step 1: 기동 로그에서 `concurrency=8` 확인**(env가 실제로 먹었는지)
+- [x] **Step 2: 실행** — Phase 1과 같은 절차·같은 수집
+- [x] **Step 3: 원본 보존** — 스냅샷·k6 stdout·`summary-*.json`·`vmstat` 파일·시각 기록을
   `_workspace/concurrency-sweep-30/`에. **토큰·외부 IP 제거.**
 
 ---
@@ -205,27 +205,27 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 
 29번 Phase 3의 9항목을 **양쪽 실행 모두**에 적용한다:
 
-- [ ] `settlement_terminal_wait_seconds{kind}` count = 정상 처리된 terminal 수
-- [ ] **dispatch wait count = job execution count** — **부하 종료 후 드레인이 끝난 최종 스냅샷에서만
+- [x] `settlement_terminal_wait_seconds{kind}` count = 정상 처리된 terminal 수
+- [x] **dispatch wait count = job execution count** — **부하 종료 후 드레인이 끝난 최종 스냅샷에서만
   검사한다.** 부하 도중에는 정상적인 in-flight job 때문에 두 값이 어긋나는 것이 당연하다.
   **검사 전제**: `settlement_outstanding_jobs{partition}`가 **모든 파티션에서 0**이고 드레인이
   완료됐음을 먼저 확인한다. 이 전제 없이 중간 스냅샷으로 비교하면 정상 상태를 계측 결함으로 오판한다
-- [ ] batch attempt count ≥ logical batch job count, 차이가 실제 retry 로그와 일치
-- [ ] settlement batch의 trade 합계 = settled trade 증가량
-- [ ] k6 주문 합계 = 서버·DB 주문 합계
-- [ ] `settlement_quarantined_orders` 종료 시 0
-- [ ] `settlement_duplicate_terminal_total` = 0
-- [ ] CPU 시계열이 **부하 구간 전체를 덮는지**(램프 포함, 끊긴 구간 없음)
-- [ ] CPU 파싱에서 **첫 데이터 행(부팅 이후 누적 평균)이 제외**됐는지
-- [ ] 각 단계의 **UTC 시작·종료 시각 기록**이 있고, CPU 시계열·Prometheus 스냅샷 시각과 정렬되는지
-- [ ] N=4·N=8 수집기 파일이 **단계별로 분리**돼 있고 프로세스가 겹치지 않았는지
-- [ ] 하나라도 불일치면 **계측 문제로 보고 판정 보류**
+- [x] batch attempt count ≥ logical batch job count, 차이가 실제 retry 로그와 일치
+- [x] settlement batch의 trade 합계 = settled trade 증가량
+- [x] k6 주문 합계 = 서버·DB 주문 합계
+- [x] `settlement_quarantined_orders` 종료 시 0
+- [x] `settlement_duplicate_terminal_total` = 0
+- [x] CPU 시계열이 **부하 구간 전체를 덮는지**(램프 포함, 끊긴 구간 없음)
+- [x] CPU 파싱에서 **첫 데이터 행(부팅 이후 누적 평균)이 제외**됐는지
+- [x] 각 단계의 **UTC 시작·종료 시각 기록**이 있고, CPU 시계열·Prometheus 스냅샷 시각과 정렬되는지
+- [x] N=4·N=8 수집기 파일이 **단계별로 분리**돼 있고 프로세스가 겹치지 않았는지
+- [x] 하나라도 불일치면 **계측 문제로 보고 판정 보류**
 
 ---
 
 ### Phase 4: 판정 — **안전이 성능보다 먼저**
 
-- [ ] **Step 1: 안전 게이트 (하나라도 악화되면 성능 수치를 읽기 전에 기각)**
+- [x] **Step 1: 안전 게이트 (하나라도 악화되면 성능 수치를 읽기 전에 기각)**
 
 | 게이트 | 기준 |
 |---|---|
@@ -238,7 +238,7 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 > **N=8은 락 경합·데드락 표면을 넓힌다.** 위 중 하나라도 나빠지면 **처리율이 올랐더라도 기각**한다.
 > 정합성은 비협상이다.
 
-- [ ] **Step 2: 핵심 판정 — 초기 풀 고갈이 더 심해졌는가**
+- [x] **Step 2: 핵심 판정 — 초기 풀 고갈이 더 심해졌는가**
 
 29번에서 **램프 구간의 풀은 이미 25/25 포화**였다. N=8은 정산 워커를 4개 더 얹으므로
 **같은 25개 커넥션을 두고 경쟁이 심해질 수 있다.** 전체 처리율만 보고 판정하면 이걸 놓친다.
@@ -251,7 +251,7 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 | 평시 `in_use` max/p95/median | | | 여유 소진 여부 |
 | HTTP `max` 지연 | | | 램프 고갈의 대리 지표 |
 
-- [ ] **Step 3: 성능 판정** (안전 게이트 통과 후에만)
+- [x] **Step 3: 성능 판정** (안전 게이트 통과 후에만)
 
 | 항목 | 기준 |
 |---|---|
@@ -269,12 +269,12 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 
 ### Phase 5: 문서 + 안전 종료
 
-- [ ] **문서** — `docs/benchmarks/30-<날짜>-settlement-concurrency-sweep.md`:
+- [x] **문서** — `docs/benchmarks/30-<날짜>-settlement-concurrency-sweep.md`:
   비교 조건 동일성 / N=4 재현 검증 / 구간별 계산표 / **안전 게이트 결과** / 램프 풀 고갈 비교 /
   CPU max·p95·median / 성능 판정 / 한계.
-- [ ] **README**·완료 문서 갱신.
-- [ ] **Commit + 푸시 + CI green**.
-- [ ] **VM 4대 정지 후 `gcloud compute instances list`로 `TERMINATED` 확인** —
+- [x] **README**·완료 문서 갱신.
+- [ ] **Commit + 푸시 + CI green**. — 미수행(측정 세션 종료 시점 기준)
+- [x] **VM 4대 정지 후 `gcloud compute instances list`로 `TERMINATED` 확인** —
   "정지 명령을 실행했다"가 아니라 **조회 결과**가 완료 조건이다.
 
 ```bash
