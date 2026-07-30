@@ -1595,7 +1595,7 @@ dispatcher에 연결한다).
   - `func runSettlementWorker(jobs <-chan settlementJob, settleBatch func([]service.OutboxEvent, func(string, []byte)) []uint, settleTerminal func(service.OutboxEvent))`
   - `func terminalOrderID(event service.OutboxEvent) (uint, string)`
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `cmd/settlement_pipeline_test.go`에 추가:
 
@@ -1683,12 +1683,12 @@ func TestDispatcherSkipsTerminalForQuarantinedOrder(t *testing.T) {
 | `TestDispatcherDuplicateTerminalIsInvariantViolation` | cancel(10) 2건 | 두 번째는 waiting에 **추가되지 않고**(terminal job이 1개만 나온다) 첫 번째를 덮어쓰지 않는다 |
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `go test ./cmd/ -run TestDispatcher -v`
 Expected: FAIL — 현재 dispatcher는 배리어에서 정지하므로 3번 배치가 dispatch되지 않는다
 
-- [ ] **Step 3: 메트릭 교체**
+- [x] **Step 3: 메트릭 교체**
 
 `internal/metrics/metrics.go`에서 `SettlementBarriersTotal` / `SettlementBarrierWait` / `SettlementBarrierInflight`와 사전 resolve 핸들 6개(`SettlementBarrierMarketDone`·`SettlementBarrierCancel`·`SettlementBarrierWaitDone`·`SettlementBarrierWaitCancel`·`SettlementBarrierInflightDone`·`SettlementBarrierInflightCancel`)를 **삭제**하고 다음을 추가한다. 배리어가 사라졌으므로 같은 이름으로 다른 의미를 잇지 않는다.
 
@@ -1722,7 +1722,7 @@ Expected: FAIL — 현재 dispatcher는 배리어에서 정지하므로 3번 배
 
 `internal/metrics/settlement_observability_test.go:18-28`의 `TestSettlementBarrierCollectorsArePreResolvedPerType`을 삭제하고, 신규 지표의 라벨 고정 테스트로 대체한다.
 
-- [ ] **Step 4: dispatcher 구현**
+- [x] **Step 4: dispatcher 구현**
 
 `cmd/settlement_pipeline.go`. job 타입에 kind와 dispatcher-고유 ID를 넣고, 배리어를 제거한다.
 
@@ -1961,7 +1961,7 @@ func terminalOrderID(event service.OutboxEvent) (uint, string) {
 `flushBroadcasts`의 순번에 구멍이 생기지 않는다. terminal은 WS 메시지를 만들지 않으므로
 reorder coordinator를 막을 수 없다.
 
-- [ ] **Step 5: worker에 terminal 분기 추가**
+- [x] **Step 5: worker에 terminal 분기 추가**
 
 ```go
 func runSettlementWorker(
@@ -1992,7 +1992,7 @@ func runSettlementWorker(
 }
 ```
 
-- [ ] **Step 6: 테스트 통과 확인**
+- [x] **Step 6: 테스트 통과 확인**
 
 Run: `go test ./cmd/ -race -v`
 Expected: PASS
@@ -2000,7 +2000,22 @@ Expected: PASS
 Run: `go test ./... -race`
 Expected: PASS
 
-- [ ] **Step 7: 커밋** (`commit-message` 스킬)
+메모: `TestPartitionDispatcherProcessesTerminalEventAfterPrecedingBatches`와
+`TestDispatcherRecordsBarrierMetricsPerTerminalType`은 새 계약 하에서 사실이 아닌
+것을 단언하므로(배리어가 파티션 전체를 막는다는 전제) 삭제했다 — 전자의 의도는
+새 `TestDispatcherHoldsTerminalUntilSameOrderBatchesRetire`(같은 주문만
+막는다는 수정된 계약으로)가, 후자는 배리어 지표 자체가 폐기되며 대체
+지표(`TestSettlementTerminalWaitHasKindLabel` 등)로 흡수했다. 나머지 3개
+기존 테스트(`TestPartitionDispatcherBroadcastsInDispatchOrder`,
+`TestDispatcherAndWorkerRecordJobTimingMetrics`,
+`TestPartitionDispatcherDrainsOnQueueClose`)는 새 시그니처(partition 인자,
+kind/id 필드)에 맞춰 수정해 그대로 유지했다. `tradeOutboxEvent(1,10,20)`
+3-인자 호출은 Task 1·6과 동일한 이유로 `tradeOutboxEventForOrders`를
+재사용했다. `go test ./cmd/ -race -v`(47개 전부 PASS, 신규 7개 포함),
+`go test ./... -count=1 -race`(전체) 모두 통과했고 `git grep -n
+"SettlementBarrier" -- '*.go'`는 결과 없음을 확인했다.
+
+- [x] **Step 7: 커밋** (`commit-message` 스킬)
 
 ---
 
