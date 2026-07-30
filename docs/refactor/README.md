@@ -114,8 +114,9 @@ ms p95) ② 취소 무실패 ③ 정합성 위반 0**을 급등 스파이크 주
 - 정합성 위반 및 `settlement_batch_fallbacks_total` 0
 - 회복 성능 악화 없음
 
-**현재 단계**: ✅ **B(시장가 완료 복구 dependency guard) 완료** →
-[21번](21_시장가완료_dependency_guard_완료.md) — 다음은 **A(런타임 fence)+C(취소 durable defer)**.
+**현재 단계**: ✅ **A+C(per-order 런타임 fence + terminal durable defer) 완료** →
+[22번](22_4차_축1_per-order_fence_완료.md) — 다음은 **29번 GCP 재측정**(실행은 별도 세션)과
+**축 2(매칭 quantum)**.
 
 - 28번(GCP 스케일 관측성 재측정)이 27번의 정산 큐 포화(`worker="8"`=256 cap)를 정확히 재현하고
   **파티션 전체 fence가 지배적**이라고 판정(hold 구간 `market_done` 배리어 wait duty 52.3%, 배리어
@@ -128,8 +129,16 @@ ms p95) ② 취소 무실패 ③ 정합성 위반 0**을 급등 스파이크 주
   참조하는 `OPEN` failed settlement가 있으면 시장가 완료 terminal을 durable defer한다. dependency
   store가 nil이거나 조회 오류면 phase 단위 fail-closed(이번 사이클 completion 전체 중단). 차단은
   `settlement_completion_blocked_total` 카운터로만 관측(로그 없음).
-- 다음: **A(파티션 전체 배리어 → 주문별 dependency fence)** + **C(cancel terminal의 durable defer
-  계약)**를 B의 전제 위에서 하나의 스펙으로 설계.
+- **A+C 완료**: dispatcher의 파티션 전체 배리어를 `dependencyTracker`(주문ID→미retire 배치 수) 기반
+  주문 단위 fence로 축소 — 28번이 실측한 "무관한 주문의 배치까지 막히는" 문제를 직접 해소했다.
+  취소 terminal에도 시장가 완료와 동형의 durable defer 계약(`FailedOrderCancellation`,
+  `RecordFailure`/`EnsureDeferred` 구분, `retry_count=0` 시작)을 갖췄다. 배리어 지표
+  (`settlement_barriers_total` 등)를 제거하고 `settlement_terminal_wait_seconds`/
+  `settlement_outstanding_jobs`/`settlement_quarantined_orders`/
+  `settlement_dependency_record_failed_total`로 교체. 자세한 내용과 대화 중 정정된 사항은
+  [22번 완료 문서](22_4차_축1_per-order_fence_완료.md) 참고. GCP 실측(29번)은
+  [runbook](../superpowers/plans/2026-07-30-per-order-fence-gcp-remeasurement.md)만 작성했고
+  별도 측정 세션에서 실행한다.
 
 ## 백로그 (순서 미정, 조건 충족 시 승격)
 
