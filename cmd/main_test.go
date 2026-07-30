@@ -244,13 +244,21 @@ func (f *fakeMarketCompleter) CompleteMarketOrder(service.CompleteMarketOrderInp
 }
 
 type fakeCompletionFailureRecorder struct {
-	calls  int
-	inputs []service.CompleteMarketOrderInput
+	calls        int
+	inputs       []service.CompleteMarketOrderInput
+	ensureCalls  int
+	ensureInputs []service.CompleteMarketOrderInput
 }
 
 func (f *fakeCompletionFailureRecorder) RecordFailure(input service.CompleteMarketOrderInput, _ string, _ error) (*model.FailedMarketCompletion, error) {
 	f.calls++
 	f.inputs = append(f.inputs, input)
+	return &model.FailedMarketCompletion{ID: 1}, nil
+}
+
+func (f *fakeCompletionFailureRecorder) EnsureDeferred(input service.CompleteMarketOrderInput, _ string, _ error) (*model.FailedMarketCompletion, error) {
+	f.ensureCalls++
+	f.ensureInputs = append(f.ensureInputs, input)
 	return &model.FailedMarketCompletion{ID: 1}, nil
 }
 
@@ -272,7 +280,7 @@ func TestProcessMarketOrderDoneRetriesConflictThenSucceeds(t *testing.T) {
 	completer := &fakeMarketCompleter{errs: []error{conflict, conflict, nil}}
 	recorder := &fakeCompletionFailureRecorder{}
 
-	processMarketOrderDone(testMarketOrderDone(), completer, recorder, discardLogger())
+	processMarketOrderDone(testMarketOrderDone(), completer, &fakeDependencyGuard{}, recorder, discardLogger())
 
 	assert.Equal(t, 3, completer.calls)
 	assert.Equal(t, 0, recorder.calls, "성공했으므로 실패 기록이 없어야 한다")
@@ -284,7 +292,7 @@ func TestProcessMarketOrderDoneRecordsFailureAfterRetriesExhausted(t *testing.T)
 	completer := &fakeMarketCompleter{err: service.NewConflictErrorf("market order 42 settlement is not complete")}
 	recorder := &fakeCompletionFailureRecorder{}
 
-	processMarketOrderDone(testMarketOrderDone(), completer, recorder, discardLogger())
+	processMarketOrderDone(testMarketOrderDone(), completer, &fakeDependencyGuard{}, recorder, discardLogger())
 
 	assert.Equal(t, 1+len(transientRetryDelays), completer.calls)
 	require.Equal(t, 1, recorder.calls, "재시도 소진 후 내구 기록이 남아야 한다")
@@ -298,7 +306,7 @@ func TestProcessMarketOrderDoneDoesNotRetryValidationError(t *testing.T) {
 	completer := &fakeMarketCompleter{err: service.NewValidationErrorf("order 42 is not a market order")}
 	recorder := &fakeCompletionFailureRecorder{}
 
-	processMarketOrderDone(testMarketOrderDone(), completer, recorder, discardLogger())
+	processMarketOrderDone(testMarketOrderDone(), completer, &fakeDependencyGuard{}, recorder, discardLogger())
 
 	assert.Equal(t, 1, completer.calls)
 	assert.Equal(t, 1, recorder.calls)
@@ -347,7 +355,7 @@ func TestSettleTradeBatchWithFallbackFallsBackToPerTradeOnBatchError(t *testing.
 	before := counterValue(t, metrics.SettlementBatchFallbacksTotal)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, nil, func(string, []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, nil, nil, nil, func(string, []byte) {
 		broadcasts++
 	}, marker, discardLogger())
 
@@ -370,7 +378,7 @@ func TestSettleTradeBatchWithFallbackBroadcastsOnlyAppliedOnSuccess(t *testing.T
 	before := histogramSampleCount(t, metrics.SettlementBatchSize)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil, func(_ string, msg []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil, nil, nil, func(_ string, msg []byte) {
 		broadcasts++
 		lastPayload = msg
 	}, marker, discardLogger())

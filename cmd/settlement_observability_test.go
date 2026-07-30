@@ -28,7 +28,7 @@ func TestSettleTradeBatchObservesOneAttemptSample(t *testing.T) {
 	marker := &fakeOutboxMarker{}
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1)}
 
-	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil,
+	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil, nil, nil,
 		func(string, []byte) {}, marker, discardLogger())
 
 	after := histogramVecSampleCount(t, metrics.SettlementAttemptDuration, "batch")

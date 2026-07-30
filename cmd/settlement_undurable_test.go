@@ -75,7 +75,7 @@ func TestSettleTradeBatchWithFallbackReportsUndurableOrders(t *testing.T) {
 		stubBatchSettler{err: errors.New("batch boom")},
 		stubSettler{err: errors.New("single boom")},
 		stubFailureRecorder{recordErr: errors.New("record boom")},
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 		func(string, []byte) {},
 		stubOutboxMarker{},
 		discardLogger(),
@@ -92,7 +92,7 @@ func TestSettleTradeBatchWithFallbackNoUndurableWhenFailureRecorded(t *testing.T
 		stubBatchSettler{err: errors.New("batch boom")},
 		stubSettler{err: errors.New("single boom")},
 		stubFailureRecorder{}, // 기록은 성공 → durable
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 		func(string, []byte) {},
 		stubOutboxMarker{},
 		discardLogger(),
@@ -110,7 +110,7 @@ func TestSettleTradeBatchWithFallbackMarkProcessedFailureIsNotUndurable(t *testi
 		stubBatchSettler{err: errors.New("batch boom")},
 		stubSettler{}, // 정산 성공
 		stubFailureRecorder{},
-		nil, nil, nil,
+		nil, nil, nil, nil, nil,
 		func(string, []byte) {},
 		stubOutboxMarker{markErr: errors.New("mark boom")},
 		discardLogger(),

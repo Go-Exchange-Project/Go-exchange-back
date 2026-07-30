@@ -101,6 +101,19 @@ var (
 		Help: "Times a market-completion retry was skipped due to an OPEN failed settlement dependency.",
 	})
 
+	// terminal이 실행되지 않고 내구 defer된 횟수. reason=dependency_open|quarantine.
+	SettlementTerminalDeferred = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "settlement_terminal_deferred_total",
+		Help: "Terminal events durably deferred instead of executed.",
+	}, []string{"kind", "reason"})
+
+	// defer 기록 자체가 최종 실패한 횟수 — 온라인 복구가 부팅 replay로 강등된다.
+	// trade의 실패 기록 실패(settlement_dependency_record_failed_total)와는 의미가 다르다.
+	SettlementTerminalDeferRecordFailed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "settlement_terminal_defer_record_failed_total",
+		Help: "Terminal defer records that could not be persisted (online recovery degraded).",
+	}, []string{"kind"})
+
 	// 4차 축 1 관측성: DB 호출 1회(트랜잭션 시도) 단위. 기존 order_settlement_duration_seconds
 	// (논리적 단건 정산 전체)와는 의미가 다른 별도 메트릭이다 — 기존 것은 그대로 보존한다.
 	SettlementAttemptDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
