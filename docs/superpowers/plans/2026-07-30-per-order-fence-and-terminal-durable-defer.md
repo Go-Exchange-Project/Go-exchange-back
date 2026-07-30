@@ -845,7 +845,7 @@ type retryFailedCancellationStore interface {
   - `SettlementRetryWorker`에 필드 2개 추가: `CancelProcessor retryOrderCancellationProcessor`, `FailedCancellations retryFailedCancellationStore`
   - `func orderCancelledFromFailure(failure *model.FailedOrderCancellation) matching.OrderCancelled` — 저장된 필드에서 이벤트를 복원한다(`tradeFromFailedSettlement`와 같은 역할)
 
-- [ ] **Step 1: 모델 실패 테스트 작성**
+- [x] **Step 1: 모델 실패 테스트 작성**
 
 `internal/repository/failed_order_cancellation_repository_integration_test.go` 생성:
 
@@ -890,12 +890,12 @@ func TestIntegrationFailedOrderCancellationEnsureDeferredAndRecordFailure(t *tes
 }
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `GOEXCHANGE_TEST_DATABASE_DSN=<dsn> go test ./internal/repository/ -run TestIntegrationFailedOrderCancellation -v`
 Expected: FAIL — `model.FailedOrderCancellation undefined`
 
-- [ ] **Step 3: 모델 작성**
+- [x] **Step 3: 모델 작성**
 
 `internal/model/failed_order_cancellation.go`:
 
@@ -931,7 +931,7 @@ type FailedOrderCancellation struct {
 }
 ```
 
-- [ ] **Step 4: repository 작성**
+- [x] **Step 4: repository 작성**
 
 `internal/repository/failed_order_cancellation_repository.go` — `FailedMarketCompletionRepository`와 **동형**으로 `RecordFailure`(`DoUpdates` + `retry_count + 1`), `EnsureDeferred`(`DoNothing` + 조회), `FindOpen`(`occurred_at ASC, id ASC`, `NormalizeFailedSettlementListLimit`), `MarkResolved`(`status = OPEN`인 행만, `RowsAffected == 0`이면 오류)를 구현한다. 충돌 컬럼은 `order_id`.
 
@@ -991,7 +991,7 @@ func (r *FailedOrderCancellationRepository) EnsureDeferred(failure *model.Failed
 }
 ```
 
-- [ ] **Step 5: 마이그레이션·AutoMigrate 배선**
+- [x] **Step 5: 마이그레이션·AutoMigrate 배선**
 
 `migrations/005_terminal_durable_defer.sql`의 `Up` 끝에 신규 테이블 제약을 **`IF NOT EXISTS` 가드로** 추가한다(테이블 자체는 `AutoMigrate`가 만든다 — 001의 방침과 동일):
 
@@ -1009,11 +1009,11 @@ END $$;
 
 `cmd/main.go:53`의 `AutoMigrate` 목록과 `internal/testdb/integration.go:31`에 `&model.FailedOrderCancellation{}`를 추가한다.
 
-- [ ] **Step 6: service 작성**
+- [x] **Step 6: service 작성**
 
 `internal/service/failed_order_cancellation_service.go` — `matching.OrderCancelled`(`OrderID`/`CoinSymbol`/`Side`/`EngineEventID`, engine.go:112-117)에서 모델을 조립하는 헬퍼를 공유하고, `RecordFailure`는 `RetryCount: 1`, `EnsureDeferred`는 `RetryCount: 0`으로 둔다. 오류 메시지는 `settlementErrorMessage`와 동일하게 길이를 자르고 빈 문자열을 대체한다(CHECK 제약 위반 방지).
 
-- [ ] **Step 7: worker cancel phase 실패 테스트 작성**
+- [x] **Step 7: worker cancel phase 실패 테스트 작성**
 
 `internal/service/settlement_retry_worker_test.go`에 추가:
 
@@ -1048,7 +1048,7 @@ func TestRetryWorkerCancelPhaseFailsClosedWithoutDependencyStore(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: worker cancel phase 구현**
+- [x] **Step 8: worker cancel phase 구현**
 
 `internal/service/settlement_retry_worker.go` — `retryFailedCompletions()`와 **동일한 구조**로 `retryFailedCancellations()`를 추가하고 `RunOnce()`에 세 번째 phase로 붙인다:
 
@@ -1109,7 +1109,7 @@ func (w *SettlementRetryWorker) retryFailedCancellations() {
 }
 ```
 
-- [ ] **Step 9: 테스트 통과 확인**
+- [x] **Step 9: 테스트 통과 확인**
 
 Run: `go test ./internal/service/ -run TestRetryWorker -v`
 Expected: PASS
@@ -1117,7 +1117,23 @@ Expected: PASS
 Run: `GOEXCHANGE_TEST_DATABASE_DSN=<dsn> go test ./internal/repository/ -run TestIntegrationFailedOrderCancellation -v`
 Expected: PASS
 
-- [ ] **Step 10: 커밋**
+메모: 계획의 파일 목록에는 없었지만 `cmd/main.go`도 함께 수정했다 — Step 8이
+`SettlementRetryWorker`에 `CancelProcessor`/`FailedCancellations` 필드를
+추가했는데, `main()`에서 실제 구현체를 채워 넣지 않으면 이번에 만든 취소
+재시도 phase 전체가 프로덕션에서 항상 조용히 no-op이 된다(두 필드 중 하나라도
+nil이면 `retryFailedCancellations()`가 즉시 return). 기존
+`MarketCompleter`/`FailedCompletions` 배선과 동일한 패턴으로
+`NewFailedOrderCancellationService`를 생성해 연결했다. 또한 Step 1의 테스트
+스니펫에는 없지만 `FindOpen`/`MarkResolved` 경로가 미검증 상태로 남는 것을
+막기 위해 `TestIntegrationFailedOrderCancellationFindOpenAndResolve`를
+추가했다(FailedMarketCompletion 쪽은 이전 사이클의 사전 존재 테스트가 이미
+커버하고 있었지만, 이 테이블은 이번에 신설돼 그런 커버리지가 없었다).
+`go test ./internal/repository/... ./internal/service/... -count=1`(DSN
+설정)과 `go test ./... -race`(DSN 미설정) 모두 통과했고, 마이그레이션을 실제
+로컬 postgres에 적용해 `\d failed_order_cancellations`로 CHECK 제약·default
+값을 직접 확인했다.
+
+- [x] **Step 10: 커밋**
 
 `commit-message` 스킬 사용 후 신규·수정 파일을 모두 스테이지.
 
