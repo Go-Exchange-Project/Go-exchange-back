@@ -29,8 +29,21 @@ per-order fence + terminal durable defer(A+C, 이번 구현)가 실제로 그 �
 - `--summary-export` 유지
 - **애플리케이션 차이는 이번 A+C 구현(per-order fence + terminal durable defer)뿐**
 
+### 측정 기준 SHA (고정)
+
+```
+82b4d7f6383676b11951fb81e8bea5e24eb73f59
+```
+
+- 원격 `origin/main`에 존재함을 확인함(2026-07-30)
+- Backend CI 4개 job 전부 green(run `30532255904`) — Docker build / Postgres integration
+  tests / Unit tests and vet / Docker publish to GHCR
+- **측정 바이너리는 이 SHA에서만 빌드한다.** 로컬 전용 커밋이나 미푸시 변경으로 측정하지
+  않는다 — "어떤 코드로 측정했는가"가 사후에 불명확해지면 재현성과 감사 가능성이 사라진다.
+- 결과 문서(`docs/benchmarks/29-*.md`)에 이 SHA를 그대로 기록한다.
+
 **사전 확인(2026-07-30 시점, 실행 전 반드시 재확인)**:
-`git diff --stat 8685923..HEAD -- '*.go'` → 26개 파일, +1886/-301. 이 범위는 B(dependency
+`git diff --stat 8685923..82b4d7f -- '*.go'` → 26개 파일, +1886/-301. 이 범위는 B(dependency
 guard)와 A+C(per-order fence + terminal durable defer) 전체를 포함하며, 정산 경로 외의
 기능 변경은 없다. **실행 시점에 이 diff를 다시 확인**하고, 무관한 변경이 섞였으면 직접
 비교가 약해짐을 문서에 명시한다.
@@ -54,7 +67,21 @@ guard)와 A+C(per-order fence + terminal durable defer) 전체를 포함하며, 
 
 ### Phase 0: Preflight (낮은 VU 1~2분 — 실패 시 전체 실행 금지)
 
-- [ ] **Step 1: 코드 동일성** — 위 `git diff --stat` 재확인(A+C 구현 외 Go 변경 없음).
+- [ ] **Step 1: 코드 동일성** — 배포된 커밋이 **측정 기준 SHA `82b4d7f`와 일치**함을 확인하고,
+  위 `git diff --stat 8685923..82b4d7f` 재확인(A+C 구현 외 Go 변경 없음).
+- [ ] **Step 1-a: DB 접속 유효성** — 배포 원본은 **현재 `go-exchange-back` 환경을 canonical
+  source로** 삼는다. **과거 `bench-*` 값을 복사해 오지 않는다.** 검증은 값 비교가 아니라
+  **실제 연결 성공**으로 한다. **비밀번호 값이나 그 hash·fingerprint를 로그·문서·아티팩트에
+  출력하지 않는다.**
+- [ ] **Step 1-b: 스키마 적용 확인 (TRUNCATE보다 먼저)** — 테이블 존재만으로 판단하지 않는다:
+  - `failed_order_cancellations` 테이블 존재 **및** `order_id` uniqueIndex
+  - `failed_order_cancellations.retry_count` — **default 0**, CHECK `retry_count >= 0`
+  - `failed_market_completions.retry_count` — **default 0**, CHECK
+    `ck_failed_market_completions_retry_count_non_negative`가 존재하고
+    구 제약 `..._retry_count_positive`는 **없음**(migration 005 적용 확인)
+  - 위가 모두 통과한 뒤에야 **10개 테이블 TRUNCATE**를 수행한다. 스키마가 구버전이면
+    `retry_count = 1`로 defer record가 생성돼 "차단은 retry budget을 소비하지 않는다"는
+    계약이 깨진 상태로 측정하게 된다.
 - [ ] **Step 2: 저부하 1~2분 실행** 후 다음을 **전부** 확인:
   - 신규 메트릭이 `/metrics`에 노출: `settlement_terminal_wait_seconds{kind}`,
     `settlement_outstanding_jobs{partition}`, `settlement_quarantined_orders{partition}`,
@@ -121,6 +148,13 @@ dispatch wait 평균         = Δdispatch_wait_sum / Δdispatch_wait_count
 - [ ] **`settlement_duplicate_terminal_total` = 0 (비협상)** — 주문당 terminal 1개는 엔진
   불변식이다. 0이 아니면 **엔진이나 outbox 경로가 불변식을 깬 것**이므로 성능 수치를 읽지 않고
   원인을 먼저 규명한다. 종류는 `duplicate terminal for order` 오류 로그로 식별한다.
+
+  **결과 문서에는 이 지표의 범위를 반드시 함께 적는다:**
+  > `settlement_duplicate_terminal_total = 0`은 **dispatcher waiting 상태에서 관측 가능한**
+  > 중복 terminal이 없었다는 뜻이며, **저장소 수준의 전역 중복 부재를 증명하지 않는다.**
+
+  (첫 terminal이 이미 dispatch된 뒤 도착하는 중복은 waiting이 비어 있어 이 counter에 잡히지
+  않는다. 저장소 수준 탐지는 설계 스펙의 범위 밖이다.)
 - [ ] **하나라도 불일치면 계측 문제로 보고 판정을 보류**하고 원인부터 규명한다.
 
 ---
