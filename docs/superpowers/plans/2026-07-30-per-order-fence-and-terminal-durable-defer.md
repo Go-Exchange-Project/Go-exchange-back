@@ -2031,7 +2031,7 @@ kind/id 필드)에 맞춰 수정해 그대로 유지했다. `tradeOutboxEvent(1,
 - Consumes: Task 1-7 전부
 - Produces: 없음(문서·검증)
 
-- [ ] **Step 1: 전체 검증 실행**
+- [x] **Step 1: 전체 검증 실행**
 
 ```bash
 go build ./... && go vet ./... && go test ./... -race
@@ -2043,7 +2043,7 @@ GOEXCHANGE_TEST_DATABASE_DSN=<dsn> go test ./internal/repository/ ./internal/ser
 ```
 Expected: 통합 테스트 통과(마이그레이션 적용 후)
 
-- [ ] **Step 2: 폐기 지표 확인**
+- [x] **Step 2: 폐기 지표 확인**
 
 ```bash
 git grep -n "SettlementBarrier" -- '*.go'
@@ -2055,7 +2055,7 @@ git grep -n "order_settlement_duration_seconds" -- '*.go'
 ```
 Expected: `metrics.go` 정의와 `main.go:696` 호출만 — **의미가 바뀌지 않았음을 확인**
 
-- [ ] **Step 3: corrupted outbox 수동 복구 runbook 작성**
+- [x] **Step 3: corrupted outbox 수동 복구 runbook 작성**
 
 `docs/runbooks/corrupted-outbox-recovery.md`. 자동 격리를 제거했으므로 **사람의 결정**이 그 자리를 대체한다:
 
@@ -2066,23 +2066,30 @@ Expected: `metrics.go` 정의와 `main.go:696` 호출만 — **의미가 바뀌�
 
 `Process=false`(DB 이상)로 인한 부팅 실패는 **crash loop가 정상 동작**임을 함께 적는다 — DB 회복 전까지 서버가 뜨지 않는 것이 계약이다.
 
-- [ ] **Step 4: 29번 재측정 runbook 작성**
+- [x] **Step 4: 29번 재측정 runbook 작성**
 
 26번과 동일 조건 same-session A/B(e2-highcpu-4 server+DB, e2-standard-8 load-gen 수평 증설, `LOAD_START_AT_MS` 배리어, `--summary-export`, 단계별 스냅샷). 판정표는 스펙의 "실측 (29번)" 절을 그대로 옮긴다.
 
 **무결성 검사를 먼저 통과시킨다 — 통과 전 성능 수치는 읽지 않는다.**
 
-- [ ] **Step 5: 완료 문서·README 갱신**
+- [x] **Step 5: 완료 문서·README 갱신**
 
 `docs/refactor/22_4차_축1_per-order_fence_완료.md`에 **왜 필요했는지(28번 판정) → 왜 이 선택인지(A/C 계약과 대안 기각 사유) → 결과**를 적는다. 대화 중 정정된 사항(happens-before의 조건부 성립, `OrderID` unique가 중복 terminal을 탐지하지 않는다는 점, retry_count 1 시작이 실제 예산 손실이라는 점)을 함께 남긴다.
 
-- [ ] **Step 6: 관련 없는 변경 없음 확인**
+- [x] **Step 6: 관련 없는 변경 없음 확인**
 
 ```bash
 git diff --stat main...HEAD
 ```
 각 파일이 이 계획의 태스크와 연결되는지 확인한다. 무관한 리팩터링·포맷팅이 있으면 되돌린다.
 
-- [ ] **Step 7: 커밋** (`commit-message` 스킬)
+메모: 이 저장소는 이번 축 전체를 별도 feature 브랜치가 아니라 `main`에 직접 순차
+커밋했으므로(이전 B·28번 등 사이클과 동일한 이 저장소의 관례) `git diff --stat
+main...HEAD`는 항상 빈 결과다. 대신 `git diff --stat 8685923..HEAD -- '*.go'`
+(B 완료 시점부터 이번 커밋 직전까지)로 확인했다 — 29개 파일, +1886/-301, 전부
+`cmd/`·`internal/metrics`·`internal/model`·`internal/repository`·`internal/service`·
+`internal/testdb`·`migrations/`의 이번 축 관련 파일이며 무관한 변경은 없었다.
+
+- [x] **Step 7: 커밋** (`commit-message` 스킬)
 
 **29번 GCP 실행은 별도 측정 세션에서 수행한다** — 구현 커밋과 분리해 runbook과 로컬 검증을 먼저 닫는다.
