@@ -122,22 +122,31 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"path"})
 
-	SettlementBarriersTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "settlement_barriers_total",
-		Help: "Terminal-event barrier entries in the partition dispatcher.",
-	}, []string{"type"})
-
-	SettlementBarrierWait = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "settlement_barrier_wait_seconds",
-		Help:    "Time a terminal event waited for preceding in-flight batches.",
+	// terminal 도착부터 worker 송신까지 — 배리어 대기의 대체 지표다.
+	SettlementTerminalWait = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "settlement_terminal_wait_seconds",
+		Help:    "From terminal event arrival to job dispatch (per-order fence wait).",
 		Buckets: prometheus.DefBuckets,
-	}, []string{"type"})
+	}, []string{"kind"})
 
-	SettlementBarrierInflight = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "settlement_barrier_inflight_batches",
-		Help:    "In-flight batch count at barrier entry.",
-		Buckets: []float64{0, 1, 2, 4, 8, 16},
-	}, []string{"type"})
+	// 현재 outstanding job 수. "2N에 상시 붙어 있는가"를 판정해야 하므로 Gauge다
+	// (dispatch 순간의 분포로는 유지 시간을 알 수 없다).
+	SettlementOutstandingJobs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "settlement_outstanding_jobs",
+		Help: "Jobs sent to workers but not yet retired by the dispatcher.",
+	}, []string{"partition"})
+
+	// 내구 기록조차 실패해 terminal 실행이 금지된 주문 수. 무한 증가 감시용.
+	SettlementQuarantinedOrders = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "settlement_quarantined_orders",
+		Help: "Orders whose terminal is blocked because a trade failure could not be recorded.",
+	}, []string{"partition"})
+
+	// trade 정산 실패의 내구 기록 자체가 실패한 횟수(= quarantine 등록).
+	SettlementDependencyRecordFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "settlement_dependency_record_failed_total",
+		Help: "Trade settlement failures that could not be durably recorded.",
+	})
 
 	// dispatcher가 job 송신을 "시도한" 시점부터 worker 실행 시작까지 — 채널 송신 대기·
 	// 채널 내부 대기·worker 스케줄링 대기를 의도적으로 모두 포함한다.
@@ -156,17 +165,11 @@ var (
 
 // hot path에서 라벨 map 조회를 피하기 위해 초기화 시 1회 resolve한다.
 var (
-	SettlementAttemptBatch          = SettlementAttemptDuration.WithLabelValues("batch")
-	SettlementAttemptSingle         = SettlementAttemptDuration.WithLabelValues("single")
-	SettlementBarrierMarketDone     = SettlementBarriersTotal.WithLabelValues("market_done")
-	SettlementBarrierCancel         = SettlementBarriersTotal.WithLabelValues("cancel")
-	SettlementBarrierWaitDone       = SettlementBarrierWait.WithLabelValues("market_done")
-	SettlementBarrierWaitCancel     = SettlementBarrierWait.WithLabelValues("cancel")
-	SettlementBarrierInflightDone   = SettlementBarrierInflight.WithLabelValues("market_done")
-	SettlementBarrierInflightCancel = SettlementBarrierInflight.WithLabelValues("cancel")
-	SettlementJobSuccess            = SettlementJobExecution.WithLabelValues("success")
-	SettlementJobFallback           = SettlementJobExecution.WithLabelValues("fallback")
-	SettlementJobFailed             = SettlementJobExecution.WithLabelValues("failed")
+	SettlementAttemptBatch  = SettlementAttemptDuration.WithLabelValues("batch")
+	SettlementAttemptSingle = SettlementAttemptDuration.WithLabelValues("single")
+	SettlementJobSuccess    = SettlementJobExecution.WithLabelValues("success")
+	SettlementJobFallback   = SettlementJobExecution.WithLabelValues("fallback")
+	SettlementJobFailed     = SettlementJobExecution.WithLabelValues("failed")
 )
 
 // RegisterSettlementWorkerQueueGauges는 심볼 파티셔닝된 정산 워커 큐의 적체를

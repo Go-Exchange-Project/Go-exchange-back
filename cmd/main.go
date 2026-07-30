@@ -11,6 +11,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -187,23 +188,22 @@ func main() {
 				return settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService,
 					orderService, failedMarketCompletionService, orderService, failedSettlementService, failedOrderCancellationService,
 					collect, outboxRepo, log.Default())
+			}, func(event service.OutboxEvent) {
+				processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService,
+					failedMarketCompletionService, orderService, failedSettlementService, failedOrderCancellationService,
+					func(string, []byte) {}, outboxRepo, log.Default())
 			})
 		}()
 	}
 	log.Printf("settlement partitions=%d concurrency=%d", len(settlementQueues), concurrency)
 
 	var settlementWg sync.WaitGroup
-	for _, queue := range settlementQueues {
+	for i, queue := range settlementQueues {
 		settlementWg.Add(1)
-		go func(queue chan service.OutboxEvent) {
+		go func(partition string, queue chan service.OutboxEvent) {
 			defer settlementWg.Done()
-			runPartitionDispatcher(queue, settlementJobs, concurrency, settlementBatchMaxSize,
-				func(event service.OutboxEvent, collect func(string, []byte)) {
-					processSingleOutboxEvent(event, settlementService, failedSettlementService, orderService,
-						failedMarketCompletionService, orderService, failedSettlementService, failedOrderCancellationService,
-						collect, outboxRepo, log.Default())
-				}, broadcast)
-		}(queue)
+			runPartitionDispatcher(partition, queue, settlementJobs, concurrency, settlementBatchMaxSize, broadcast)
+		}(strconv.Itoa(i), queue)
 	}
 
 	// OutboxWriter는 ExecutionCh의 유일한 소비자: 배치 커밋(group commit) 후에만
