@@ -10,6 +10,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -344,6 +345,9 @@ func TestDispatcherDuplicateTerminalIsInvariantViolation(t *testing.T) {
 	queue <- cancelOutboxEvent(3, 10) // 엔진 불변식 위반 — waiting에 이미 order10이 있으므로 무시된다
 	close(queue)
 
+	// 전역 counter라 절대값이 아니라 delta를 본다(다른 테스트가 먼저 증가시킬 수 있다).
+	duplicatesBefore := testutil.ToFloat64(metrics.SettlementDuplicateTerminalTotal)
+
 	done := make(chan struct{})
 	go func() {
 		runPartitionDispatcher("0", queue, jobs, 4, 32, func(string, []byte) {})
@@ -365,4 +369,7 @@ func TestDispatcherDuplicateTerminalIsInvariantViolation(t *testing.T) {
 	case <-done:
 		// 정상 종료 — terminal job은 1개만 나왔다
 	}
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.SettlementDuplicateTerminalTotal)-duplicatesBefore,
+		"불변식 위반은 로그뿐 아니라 counter로도 드러나야 한다(29번 무결성 게이트)")
 }

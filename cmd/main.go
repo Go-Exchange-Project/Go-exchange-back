@@ -734,10 +734,10 @@ func deferMarketOrderDone(
 }
 
 // processOrderCancellationEvent는 OrderCancelled 실행 이벤트를 ProcessOrderCancellation으로
-// 확정한다. 실패 시 전용 실패 테이블은 두지 않는다 — 멱등이라(이미 CANCELLED/FILLED면
-// no-op) outbox 행을 PENDING으로 남겨 다음 부팅 리플레이가 재시도하는 것으로 충분하고,
-// processMarketOrderDone과 달리 재시도가 늦어져도 주문이 영구 동결되지 않는다(hold는
-// 여전히 유지된 상태라 안전).
+// 확정한다. 취소 terminal 실패 또는 dependency 차단은 failed_order_cancellations에
+// 내구적으로 인계한다. 인계가 성공하면 원본 outbox를 PROCESSED로 마킹하고
+// SettlementRetryWorker가 온라인으로 복구한다. 실패 기록까지 실패한 경우에만
+// outbox PENDING 부팅 backstop으로 강등된다.
 func processOrderCancellationEvent(
 	cancelled *matching.OrderCancelled,
 	sourceOutboxID uint64,

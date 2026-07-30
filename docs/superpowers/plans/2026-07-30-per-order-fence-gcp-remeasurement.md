@@ -58,7 +58,7 @@ guard)와 A+C(per-order fence + terminal durable defer) 전체를 포함하며, 
 - [ ] **Step 2: 저부하 1~2분 실행** 후 다음을 **전부** 확인:
   - 신규 메트릭이 `/metrics`에 노출: `settlement_terminal_wait_seconds{kind}`,
     `settlement_outstanding_jobs{partition}`, `settlement_quarantined_orders{partition}`,
-    `settlement_dependency_record_failed_total`
+    `settlement_dependency_record_failed_total`, `settlement_duplicate_terminal_total`
   - `settlement_barriers_total`/`settlement_barrier_wait_seconds`/
     `settlement_barrier_inflight_batches`가 **더 이상 노출되지 않음**(폐기 확인)
   - histogram의 `_bucket`·`_sum`·`_count` 모두 수집됨
@@ -118,6 +118,9 @@ dispatch wait 평균         = Δdispatch_wait_sum / Δdispatch_wait_count
 - [ ] k6 주문 합계 = 서버·DB 주문 합계
 - [ ] `settlement_quarantined_orders`가 실행 종료 시점에 **0**(0이 아니면 미해결 quarantine —
   원인 규명 전까지 판정 보류)
+- [ ] **`settlement_duplicate_terminal_total` = 0 (비협상)** — 주문당 terminal 1개는 엔진
+  불변식이다. 0이 아니면 **엔진이나 outbox 경로가 불변식을 깬 것**이므로 성능 수치를 읽지 않고
+  원인을 먼저 규명한다. 종류는 `duplicate terminal for order` 오류 로그로 식별한다.
 - [ ] **하나라도 불일치면 계측 문제로 보고 판정을 보류**하고 원인부터 규명한다.
 
 ---
@@ -144,7 +147,7 @@ dispatch wait 평균         = Δdispatch_wait_sum / Δdispatch_wait_count
 
 - [ ] **성능 결과는 다음이 모두 만족될 때만 유효**: 응답 가용성 유지 · 취소 인프라 실패율 0% ·
   정합성 위반 0 · fallback 0 · 회복 성능 악화 없음 · load-gen 완주 및 시작 skew 충족 ·
-  **계측 내부 무결성 충족**(Phase 3) · quarantine 잔존 0.
+  **계측 내부 무결성 충족**(Phase 3) · quarantine 잔존 0 · **중복 terminal 0**.
 - [ ] **문서** — `docs/benchmarks/29-<날짜>-per-order-fence-gcp-remeasurement.md`:
   비교 조건 동일성(diff 확인 포함) / 구간별 계산표 / 무결성 검증 결과 / **판정(주 가설·처리량·
   부작용)** / 28번 대비(배리어 대기 제거 여부) / 한계.

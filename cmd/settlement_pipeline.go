@@ -167,7 +167,9 @@ func runPartitionDispatcher(
 		for _, w := range waiting {
 			if w.orderID == orderID {
 				// 주문당 terminal 1개는 엔진 불변식이다 — 조용히 덮어쓰지 않는다.
+				// 두 번째 이벤트는 성공 처리도 마킹도 하지 않는다(outbox PENDING 유지).
 				log.Printf("settlement dispatcher: duplicate terminal for order %d (engine invariant violation)", orderID)
+				metrics.SettlementDuplicateTerminalTotal.Inc()
 				return
 			}
 		}

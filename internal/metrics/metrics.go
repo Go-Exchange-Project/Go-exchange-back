@@ -148,6 +148,14 @@ var (
 		Help: "Trade settlement failures that could not be durably recorded.",
 	})
 
+	// 같은 주문의 두 번째 terminal을 거부한 횟수. 주문당 terminal 1개는 엔진
+	// 불변식이므로 정상값은 항상 0이다 — 실측의 비협상 무결성 게이트로 쓴다.
+	// 종류는 오류 로그로 식별할 수 있어 라벨을 두지 않는다.
+	SettlementDuplicateTerminalTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "settlement_duplicate_terminal_total",
+		Help: "Second terminal events rejected for an order that already has one waiting (engine invariant violation).",
+	})
+
 	// dispatcher가 job 송신을 "시도한" 시점부터 worker 실행 시작까지 — 채널 송신 대기·
 	// 채널 내부 대기·worker 스케줄링 대기를 의도적으로 모두 포함한다.
 	SettlementJobDispatchWait = promauto.NewHistogram(prometheus.HistogramOpts{
