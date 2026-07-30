@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -360,6 +361,105 @@ func TestRetryFailedCompletionsRunsAfterDependencyResolved(t *testing.T) {
 	settlements.hasOpen = false // 복구됨
 	w.RunOnce()
 	assert.True(t, completer.called, "해결 후 다음 RunOnce에서 실행")
+}
+
+type fakeCancelProcessor struct {
+	err   error
+	calls int
+	last  matching.OrderCancelled
+}
+
+func (f *fakeCancelProcessor) ProcessOrderCancellation(event matching.OrderCancelled) error {
+	f.calls++
+	f.last = event
+	if f.err != nil {
+		return f.err
+	}
+	return nil
+}
+
+type fakeFailedCancellationStore struct {
+	open        []model.FailedOrderCancellation
+	resolved    []uint
+	recordCalls int
+	ensureCalls int
+}
+
+func (s *fakeFailedCancellationStore) ListOpenFailures(int) ([]model.FailedOrderCancellation, error) {
+	return s.open, nil
+}
+
+func (s *fakeFailedCancellationStore) ResolveFailure(id uint, _ string) error {
+	s.resolved = append(s.resolved, id)
+	return nil
+}
+
+func (s *fakeFailedCancellationStore) RecordFailure(matching.OrderCancelled, uint64, error) (*model.FailedOrderCancellation, error) {
+	s.recordCalls++
+	return &model.FailedOrderCancellation{}, nil
+}
+
+func (s *fakeFailedCancellationStore) EnsureDeferred(matching.OrderCancelled, uint64, error) (*model.FailedOrderCancellation, error) {
+	s.ensureCalls++
+	return &model.FailedOrderCancellation{}, nil
+}
+
+func TestRetryWorkerCancelPhaseRespectsDependencyAndRetryBudget(t *testing.T) {
+	tests := []struct {
+		name           string
+		hasOpen        bool
+		depErr         error
+		cancelErr      error
+		wantCancelled  bool
+		wantRecordKind string // "" | "record" — 차단은 아무것도 기록하지 않는다
+	}{
+		{name: "OPEN dependency면 취소를 실행하지 않는다", hasOpen: true, wantCancelled: false},
+		{name: "dependency 없으면 실행하고 resolve한다", wantCancelled: true},
+		{name: "dependency 조회 오류는 fail-closed", depErr: errors.New("boom"), wantCancelled: false},
+		{name: "실행 실패는 RecordFailure로 count 증가", cancelErr: errors.New("boom"), wantCancelled: true, wantRecordKind: "record"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			processor := &fakeCancelProcessor{err: tc.cancelErr}
+			cancellations := &fakeFailedCancellationStore{open: []model.FailedOrderCancellation{
+				{ID: 1, OrderID: 1001, OutboxEventID: 55, RetryCount: 1, Status: model.FailedSettlementStatusOpen},
+			}}
+			w := &SettlementRetryWorker{
+				CancelProcessor:     processor,
+				FailedCancellations: cancellations,
+				FailedSettlements:   &fakeSettlementStore{hasOpen: tc.hasOpen, hasOpenErr: tc.depErr},
+				Logger:              discardServiceLogger(),
+			}
+
+			w.RunOnce()
+
+			assert.Equal(t, tc.wantCancelled, processor.calls == 1)
+			if tc.hasOpen {
+				assert.Equal(t, 0, cancellations.recordCalls, "차단은 아무것도 기록하지 않는다")
+				assert.Equal(t, 0, cancellations.ensureCalls, "차단은 아무것도 기록하지 않는다")
+			}
+			switch tc.wantRecordKind {
+			case "record":
+				assert.Equal(t, 1, cancellations.recordCalls)
+				assert.Empty(t, cancellations.resolved)
+			default:
+				if tc.wantCancelled && tc.cancelErr == nil {
+					assert.Equal(t, []uint{1}, cancellations.resolved)
+				}
+			}
+		})
+	}
+}
+
+func TestRetryWorkerCancelPhaseFailsClosedWithoutDependencyStore(t *testing.T) {
+	w := &SettlementRetryWorker{
+		CancelProcessor:     &fakeCancelProcessor{},
+		FailedCancellations: &fakeFailedCancellationStore{open: []model.FailedOrderCancellation{{OrderID: 1}}},
+		FailedSettlements:   nil, // dependency 확인 수단 없음
+		Logger:              discardServiceLogger(),
+	}
+	w.RunOnce()
+	assert.Zero(t, w.CancelProcessor.(*fakeCancelProcessor).calls)
 }
 
 func TestTradeFromFailedSettlementFallsBackToOccurredAt(t *testing.T) {

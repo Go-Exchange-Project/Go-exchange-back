@@ -26,6 +26,19 @@ BEGIN
 END $$;
 -- +goose StatementEnd
 
+-- failed_order_cancellations 테이블 자체는 AutoMigrate가 만든다(001의 방침과 동일).
+-- goose를 앱 부팅 경로 밖에서(AutoMigrate 없이) 단독 실행하는 운영 시나리오에
+-- 대비해 테이블 존재를 가드한다.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'failed_order_cancellations') THEN
+        ALTER TABLE failed_order_cancellations
+            ALTER COLUMN retry_count SET DEFAULT 0;
+    END IF;
+END $$;
+-- +goose StatementEnd
+
 -- +goose Down
 -- no-op: retry_count = 0인 행이 존재하면 CHECK를 다시 좁힐 수 없다.
 -- 001_constraints.sql의 방침대로 안전한 Down만 제공한다.

@@ -57,6 +57,7 @@ func main() {
 		&model.Trade{},
 		&model.FailedSettlement{},
 		&model.FailedMarketCompletion{},
+		&model.FailedOrderCancellation{},
 		&model.LedgerEntry{},
 		&model.ReconciliationViolation{},
 		&model.TradeOutboxEvent{},
@@ -111,6 +112,7 @@ func main() {
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
 	failedMarketCompletionService := service.NewFailedMarketCompletionService(repository.NewFailedMarketCompletionRepository(config.DB))
+	failedOrderCancellationService := service.NewFailedOrderCancellationService(repository.NewFailedOrderCancellationRepository(config.DB))
 	authHandler := handler.NewAuthHandler(authService)
 	marketHandler := handler.NewMarketHandler(marketRulesRegistry)
 	orderBookHandler := handler.NewOrderBookHandler(me)
@@ -227,10 +229,12 @@ func main() {
 	defer cancelBackground()
 
 	settlementRetryWorker := &service.SettlementRetryWorker{
-		Settler:           settlementService,
-		MarketCompleter:   orderService,
-		FailedSettlements: failedSettlementService,
-		FailedCompletions: failedMarketCompletionService,
+		Settler:             settlementService,
+		MarketCompleter:     orderService,
+		CancelProcessor:     orderService,
+		FailedSettlements:   failedSettlementService,
+		FailedCompletions:   failedMarketCompletionService,
+		FailedCancellations: failedOrderCancellationService,
 	}
 	go settlementRetryWorker.Run(backgroundCtx)
 
