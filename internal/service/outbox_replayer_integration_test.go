@@ -46,7 +46,7 @@ func TestIntegrationOutboxReplaySettlesPendingTradeExactlyOnce(t *testing.T) {
 	outboxRepo := repository.NewTradeOutboxRepository(db)
 	replayer := &OutboxReplayer{
 		Repo: outboxRepo,
-		Process: func(event matching.ExecutionEvent) bool {
+		Process: func(_ uint64, event matching.ExecutionEvent) bool {
 			_, err := settlementService.SettleTrade(event.Trade, 0)
 			return err == nil
 		},
@@ -138,7 +138,7 @@ func TestIntegrationOutboxReplayFinishesPendingCancelExactlyOnce(t *testing.T) {
 	outboxRepo := repository.NewTradeOutboxRepository(db)
 	replayer := &OutboxReplayer{
 		Repo: outboxRepo,
-		Process: func(event matching.ExecutionEvent) bool {
+		Process: func(_ uint64, event matching.ExecutionEvent) bool {
 			switch {
 			case event.Trade != nil:
 				_, err := settlementService.SettleTrade(event.Trade, 0)

@@ -269,6 +269,16 @@ func TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements(t
 	assert.Equal(t, buyOrder.ID, cancelOutboxEvent.Event.OrderCancelled.OrderID)
 	assert.Less(t, tradeOutboxEvent.OutboxID, cancelOutboxEvent.OutboxID, "outbox ID 순서로도 trade가 cancel보다 먼저 커밋됐어야 한다")
 
+	// 이 테스트는 실제 OutboxWriter로 outbox 행을 커밋하지만 cancel 이벤트는
+	// (trade와 달리) outboxEventID를 넘겨 마킹하는 경로를 거치지 않는다 — 레이스
+	// 재현이 목적이라 PROCESSED 마킹은 범위 밖이다. 마킹 없이 두면 공유 테스트
+	// DB에 PENDING 행이 영구히 남아 이후 OutboxReplayer 통합 테스트(fail-closed
+	// 계약)를 오염시키므로 여기서 직접 정리한다.
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("id IN ?", []uint64{tradeOutboxEvent.OutboxID, cancelOutboxEvent.OutboxID}).
+			Delete(&model.TradeOutboxEvent{}).Error)
+	})
+
 	// 3) 파이프라인이 실제로 처리하는 순서 그대로 확정한다: trade 정산 먼저.
 	// 레이스가 안 닫혔다면(구버전) 여기서 "status CANCELLED cannot be settled"로
 	// 실패했을 지점이다.

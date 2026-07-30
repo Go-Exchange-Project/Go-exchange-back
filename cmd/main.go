@@ -130,10 +130,12 @@ func main() {
 	outboxRepo := repository.NewTradeOutboxRepository(config.DB)
 	replayer := &service.OutboxReplayer{
 		Repo: outboxRepo,
-		// 리플레이는 outboxEventID=0으로 호출해 트랜잭션 흡수 마킹을 끄고, 리플레이어가
-		// 직접 MarkProcessed한다(부팅 경로라 성능 무관, 순차 처리 로직을 단순하게 유지).
-		Process: func(event matching.ExecutionEvent) bool {
-			handled, _ := processExecutionEvent(event, 0, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, log.Default())
+		// 리플레이는 transactionalOutboxID=0으로 호출해 트랜잭션 흡수 마킹을 끄고,
+		// 리플레이어가 직접 MarkProcessed한다(부팅 경로라 성능 무관, 순차 처리 로직을
+		// 단순하게 유지). sourceOutboxID는 실제 행 ID를 그대로 넘겨 실패 기록의
+		// provenance로 쓴다.
+		Process: func(sourceOutboxID uint64, event matching.ExecutionEvent) bool {
+			handled, _ := processExecutionEvent(event, 0, sourceOutboxID, settlementService, failedSettlementService, orderService, failedMarketCompletionService, orderService, broadcast, log.Default())
 			return handled
 		},
 	}
@@ -467,11 +469,16 @@ func settlementQueueLenFns(queues []chan service.OutboxEvent) []func() int {
 //
 // markedInTx: 정산과 같은 트랜잭션에서 outbox 행이 이미 PROCESSED로 마킹됐는지.
 //
-//	true면 호출자는 별도 MarkProcessed를 하지 않는다(왕복 절약). outboxEventID>0인
-//	trade 성공 경로에서만 true다 — 리플레이(id=0)·실패기록·시장가 완료는 false.
+//	true면 호출자는 별도 MarkProcessed를 하지 않는다(왕복 절약). transactionalOutboxID>0인
+//	trade 성공 경로에서만 true다 — 리플레이(0)·실패기록·시장가 완료는 false.
+//
+// transactionalOutboxID는 정산 트랜잭션 안에서 PROCESSED 마킹할 ID(live: 행 ID,
+// replay: 0 — 리플레이어가 직접 마킹한다). sourceOutboxID는 원본 이벤트 provenance로,
+// live 경로는 둘이 같고 replay는 항상 실제 행 ID다 — 실패 기록의 출처 추적에 쓴다.
 func processExecutionEvent(
 	event matching.ExecutionEvent,
-	outboxEventID uint64,
+	transactionalOutboxID uint64,
+	sourceOutboxID uint64,
 	settler tradeSettler,
 	failureRecorder settlementFailureRecorder,
 	marketCompleter marketOrderCompleter,
@@ -481,7 +488,7 @@ func processExecutionEvent(
 	logger *log.Logger,
 ) (handled bool, markedInTx bool) {
 	if event.Trade != nil {
-		return processTradeSettlement(event.Trade, outboxEventID, settler, failureRecorder, broadcast, logger)
+		return processTradeSettlement(event.Trade, transactionalOutboxID, settler, failureRecorder, broadcast, logger)
 	}
 	if event.MarketOrderDone != nil {
 		return processMarketOrderDone(event.MarketOrderDone, marketCompleter, completionFailureRecorder, logger), false
@@ -506,7 +513,7 @@ func processSingleOutboxEvent(
 	outboxRepo outboxMarker,
 	logger *log.Logger,
 ) bool {
-	handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, logger)
+	handled, markedInTx := processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, outboxEvent.OutboxID, settler, failureRecorder, marketCompleter, completionFailureRecorder, cancelProcessor, broadcast, logger)
 	if !handled {
 		// 내구 확정 실패(정산 실패의 기록조차 실패) — PENDING으로 남겨
 		// 다음 부팅 리플레이가 재시도한다.

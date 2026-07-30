@@ -48,6 +48,10 @@ func pendingOutboxRow(t *testing.T, id uint64, sequence int64) model.TradeOutbox
 	return *row
 }
 
+func corruptedOutboxRow(id uint64) model.TradeOutboxEvent {
+	return model.TradeOutboxEvent{ID: id, EventType: "BOGUS", Payload: []byte("{}"), Status: model.TradeOutboxStatusPending}
+}
+
 func TestOutboxReplayerProcessesInOrderAndMarks(t *testing.T) {
 	source := &fakeOutboxReplaySource{rows: []model.TradeOutboxEvent{
 		pendingOutboxRow(t, 1, 10),
@@ -57,7 +61,7 @@ func TestOutboxReplayerProcessesInOrderAndMarks(t *testing.T) {
 	var processedSequences []int64
 	replayer := &OutboxReplayer{
 		Repo: source,
-		Process: func(event matching.ExecutionEvent) bool {
+		Process: func(sourceOutboxID uint64, event matching.ExecutionEvent) bool {
 			processedSequences = append(processedSequences, event.Trade.EngineSequence)
 			return true
 		},
@@ -71,61 +75,98 @@ func TestOutboxReplayerProcessesInOrderAndMarks(t *testing.T) {
 	assert.Equal(t, []uint64{1, 2, 3}, source.markedIDs)
 }
 
-func TestOutboxReplayerLeavesNonDurableEventsPending(t *testing.T) {
+// 핵심 회귀: 내구 확정 실패(Process==false)는 replay를 즉시 중단해야 한다 —
+// 뒤 이벤트를 계속 처리하면 미정산 trade 위에서 terminal이 실행될 수 있다.
+func TestReplayStopsOnUndurableEvent(t *testing.T) {
 	source := &fakeOutboxReplaySource{rows: []model.TradeOutboxEvent{
 		pendingOutboxRow(t, 1, 10),
 		pendingOutboxRow(t, 2, 11),
+		pendingOutboxRow(t, 3, 12),
 	}}
+	var seen []uint64
 	replayer := &OutboxReplayer{
 		Repo: source,
-		Process: func(event matching.ExecutionEvent) bool {
-			return event.Trade.EngineSequence != 10 // 첫 이벤트만 내구 확정 실패
+		Process: func(sourceOutboxID uint64, event matching.ExecutionEvent) bool {
+			seen = append(seen, sourceOutboxID)
+			return sourceOutboxID != 2 // 2번에서 내구 확정 실패
 		},
 		Logger: discardServiceLogger(),
 	}
 
 	result, err := replayer.Replay()
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.Replayed)
-	assert.Equal(t, 1, result.Deferred)
-	assert.Equal(t, []uint64{2}, source.markedIDs, "내구 확정 실패 이벤트는 PENDING으로 남아야 한다")
+
+	require.Error(t, err)
+	assert.Equal(t, []uint64{1, 2}, seen, "3번은 처리되면 안 된다")
+	assert.Equal(t, 1, result.Undurable)
+	assert.NotContains(t, source.markedIDs, uint64(2), "undurable 행은 PENDING으로 남아야 한다")
 }
 
-func TestOutboxReplayerIsolatesCorruptedRows(t *testing.T) {
-	corrupted := model.TradeOutboxEvent{ID: 1, EventType: "BOGUS", Payload: []byte("{}"), Status: model.TradeOutboxStatusPending}
+// 핵심 회귀: corrupted 행을 PROCESSED로 마킹하면 처리되지 않은 금융 이벤트가
+// 영구 소실된다 — 마킹하지 않고 replay를 중단해야 한다.
+func TestReplayStopsOnCorruptedEventWithoutMarking(t *testing.T) {
 	source := &fakeOutboxReplaySource{rows: []model.TradeOutboxEvent{
-		corrupted,
-		pendingOutboxRow(t, 2, 11),
+		pendingOutboxRow(t, 1, 10),
+		corruptedOutboxRow(2),
+		pendingOutboxRow(t, 3, 12),
 	}}
-	processed := 0
+	var seen []uint64
 	replayer := &OutboxReplayer{
-		Repo:    source,
-		Process: func(matching.ExecutionEvent) bool { processed++; return true },
-		Logger:  discardServiceLogger(),
+		Repo: source,
+		Process: func(sourceOutboxID uint64, event matching.ExecutionEvent) bool {
+			seen = append(seen, sourceOutboxID)
+			return true
+		},
+		Logger: discardServiceLogger(),
 	}
 
 	result, err := replayer.Replay()
-	require.NoError(t, err)
+
+	require.Error(t, err)
+	assert.Equal(t, []uint64{1}, seen)
 	assert.Equal(t, 1, result.Corrupted)
-	assert.Equal(t, 1, result.Replayed)
-	assert.Equal(t, 1, processed, "손상 행은 Process에 전달되지 않아야 한다")
-	assert.Equal(t, []uint64{1, 2}, source.markedIDs, "손상 행은 마킹으로 격리돼야 매 부팅 재시도를 막는다")
+	assert.NotContains(t, source.markedIDs, uint64(2),
+		"corrupted 행을 PROCESSED로 마킹하면 처리되지 않은 금융 이벤트가 영구 소실된다")
 }
 
-func TestOutboxReplayerCountsMarkFailuresAsDeferred(t *testing.T) {
+func TestReplayContinuesWhenOnlyMarkProcessedFails(t *testing.T) {
 	source := &fakeOutboxReplaySource{
-		rows:          []model.TradeOutboxEvent{pendingOutboxRow(t, 1, 10)},
+		rows:          []model.TradeOutboxEvent{pendingOutboxRow(t, 1, 10), pendingOutboxRow(t, 2, 11)},
 		markErrsForID: map[uint64]error{1: errors.New("db hiccup")},
 	}
+	var seen []uint64
 	replayer := &OutboxReplayer{
-		Repo:    source,
-		Process: func(matching.ExecutionEvent) bool { return true },
-		Logger:  discardServiceLogger(),
+		Repo: source,
+		Process: func(sourceOutboxID uint64, event matching.ExecutionEvent) bool {
+			seen = append(seen, sourceOutboxID)
+			return true
+		},
+		Logger: discardServiceLogger(),
 	}
 
 	result, err := replayer.Replay()
+
 	require.NoError(t, err)
-	assert.Equal(t, OutboxReplayResult{Deferred: 1}, result)
+	assert.Equal(t, []uint64{1, 2}, seen, "정산은 커밋됐으므로 계속 진행해야 한다")
+	assert.Equal(t, 1, result.Deferred)
+	assert.Equal(t, 1, result.Replayed)
+}
+
+func TestReplayPassesSourceOutboxIDToProcess(t *testing.T) {
+	source := &fakeOutboxReplaySource{rows: []model.TradeOutboxEvent{pendingOutboxRow(t, 7, 1)}}
+	var got uint64
+	replayer := &OutboxReplayer{
+		Repo: source,
+		Process: func(sourceOutboxID uint64, event matching.ExecutionEvent) bool {
+			got = sourceOutboxID
+			return true
+		},
+		Logger: discardServiceLogger(),
+	}
+
+	_, err := replayer.Replay()
+
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), got)
 }
 
 func TestOutboxReplayerPaginatesWithKeyset(t *testing.T) {
@@ -136,7 +177,7 @@ func TestOutboxReplayerPaginatesWithKeyset(t *testing.T) {
 	}}
 	replayer := &OutboxReplayer{
 		Repo:     source,
-		Process:  func(matching.ExecutionEvent) bool { return true },
+		Process:  func(uint64, matching.ExecutionEvent) bool { return true },
 		PageSize: 2,
 		Logger:   discardServiceLogger(),
 	}
@@ -151,7 +192,7 @@ func TestOutboxReplayerPropagatesQueryError(t *testing.T) {
 	source := &fakeOutboxReplaySource{findErr: errors.New("db unavailable")}
 	replayer := &OutboxReplayer{
 		Repo:    source,
-		Process: func(matching.ExecutionEvent) bool { return true },
+		Process: func(uint64, matching.ExecutionEvent) bool { return true },
 		Logger:  discardServiceLogger(),
 	}
 

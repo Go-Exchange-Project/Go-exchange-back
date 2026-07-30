@@ -23,16 +23,19 @@ type OutboxReplayer struct {
 	Repo OutboxReplaySource
 	// Process는 이벤트를 정산 파이프라인과 동일한 로직으로 처리하고,
 	// 처리 결과가 내구적으로 확정됐는지(정산 성공/멱등 no-op/실패의 내구 기록)를
-	// 반환합니다. false면 PENDING으로 남겨 다음 부팅이 다시 시도합니다.
-	Process  func(event matching.ExecutionEvent) bool
+	// 반환합니다. false면 PENDING으로 남기고 이번 부팅의 replay를 즉시 중단합니다 —
+	// 뒤 이벤트를 계속 처리하면 미정산 trade 위에서 terminal이 실행될 수 있습니다.
+	// sourceOutboxID는 원본 행 ID로, 실패 기록의 provenance에 쓰입니다.
+	Process  func(sourceOutboxID uint64, event matching.ExecutionEvent) bool
 	PageSize int
 	Logger   *log.Logger
 }
 
 type OutboxReplayResult struct {
 	Replayed  int // 처리 후 PROCESSED 마킹까지 끝난 이벤트
-	Deferred  int // 내구 확정 실패로 PENDING 유지(다음 부팅 재시도)
-	Corrupted int // 역직렬화 불가 — PROCESSED 마킹으로 격리(행은 포렌식용으로 남음)
+	Deferred  int // 도메인 처리는 확정됐으나 MarkProcessed만 실패(다음 부팅이 멱등 재처리)
+	Undurable int // 내구 확정 실패 — PENDING 유지, replay 중단
+	Corrupted int // 역직렬화 불가 — PENDING 유지, replay 중단(마킹하지 않는다)
 }
 
 func (r *OutboxReplayer) Replay() (OutboxReplayResult, error) {
@@ -55,26 +58,24 @@ func (r *OutboxReplayer) Replay() (OutboxReplayResult, error) {
 
 			event, err := ExecutionEventFromOutbox(row)
 			if err != nil {
-				// 처리 불가능한 행을 PENDING으로 두면 매 부팅이 같은 곳에서 막힌다.
-				// 마킹으로 격리하되 크게 남긴다 — 이 로그는 조사 대상이다.
-				r.logf("outbox replay: CORRUPTED event %d isolated: %v", row.ID, err)
+				// 처리할 수 없는 금융 이벤트를 PROCESSED로 선언하지 않는다 —
+				// 마킹하면 이벤트가 영구 소실되고 뒤 terminal이 그 위에서 실행된다.
+				// 부팅을 막고 운영자가 복구하게 한다(runbook 참조).
+				r.logf("outbox replay: CORRUPTED event %d, replay aborted: %v", row.ID, err)
 				result.Corrupted++
-				if markErr := r.Repo.MarkProcessed(row.ID); markErr != nil {
-					return result, fmt.Errorf("mark corrupted outbox event %d: %w", row.ID, markErr)
-				}
-				continue
+				return result, fmt.Errorf("corrupted outbox event %d: %w", row.ID, err)
 			}
 
-			if !r.Process(event) {
-				// 정산 실패의 내구 기록조차 실패한 경우(DB 이상 등). PENDING으로 남겨
-				// 다음 부팅이 재시도한다. 정산은 멱등·가환이라 뒤 이벤트를 계속
-				// 처리해도 안전하다(A-1/A-2에서 확립된 재시도 순서 논거와 동일).
-				r.logf("outbox replay: event %d not durably handled, left PENDING", row.ID)
-				result.Deferred++
-				continue
+			if !r.Process(row.ID, event) {
+				// 내구 확정 실패(정산 실패의 기록조차 실패). 뒤 이벤트를 계속 처리하면
+				// 미정산 trade 위에서 terminal이 실행될 수 있으므로 즉시 중단한다.
+				r.logf("outbox replay: event %d not durably handled, replay aborted", row.ID)
+				result.Undurable++
+				return result, fmt.Errorf("outbox event %d not durably handled", row.ID)
 			}
 			if err := r.Repo.MarkProcessed(row.ID); err != nil {
-				// 마킹 실패는 유실이 아니라 다음 리플레이의 중복 처리(멱등 no-op)일 뿐.
+				// 정산은 커밋됐다 — dependency는 충족이므로 계속 진행한다.
+				// 다음 리플레이가 멱등 재처리한다.
 				r.logf("outbox replay: mark event %d processed failed: %v", row.ID, err)
 				result.Deferred++
 				continue
