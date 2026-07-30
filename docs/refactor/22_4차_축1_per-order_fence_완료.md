@@ -161,3 +161,30 @@ Task 1~7을 TDD로 순차 구현(RED→GREEN 확인 후 커밋):
   order_cancellation 두 테이블만 다룬다).
 - **29번 GCP 재측정 실행** — [runbook](../superpowers/plans/2026-07-30-per-order-fence-gcp-remeasurement.md)
   만 작성했고, 실행은 별도 측정 세션에서 수행한다.
+
+## GCP 스케일 최종 판정 (29번, 2026-07-30)
+
+[29번 결과 문서](../benchmarks/29-2026-07-30-per-order-fence-gcp-remeasurement.md) — 측정 기준 SHA
+`82b4d7f`, 26·28번과 동일 규모·프로파일.
+
+- **파티션 전체 fence는 제거됐다.** worker busy **13.13% → 99.95%**, DB attempt 빈도
+  **39.05 → 133.64 /s**, 정산 처리율 **≈109 → ≈372 trades/s**(hold 구간). 바인딩 링크가
+  fence 대기에서 **정산 워커·DB 처리 용량(N=4)** 으로 이동했다.
+- **정합성·무결성 전항목 통과**: 계측 내부 무결성 9항목 오차 0, `settlement_duplicate_terminal_total`
+  0, quarantine 잔존 0, fallback 0, `failed_order_cancellations` 0, 취소 인프라 실패 0건,
+  응답 가용성·취소 성공률 100% 유지.
+- **주의 1 — 주 가설은 사전 기준상 미충족이다.** 사후 검토에서 기존 partition-wide blocking 시간과
+  신규 per-order dependency wait를 직접 비교한 **기준 자체가 의미적으로 부적절했음**이 확인됐다.
+  **이를 통과로 재분류하지 않으며**, 처리량·worker busy·batch size 결과는 각각 독립적으로 보고한다.
+  28번의 barrier wait은 dispatcher가 멈춘 시간이고 29번의 `settlement_terminal_wait_seconds`는
+  dispatcher를 막지 않는 주문별 대기다. `market_done` p50은 19.25ms로 28번 평균 13.48ms보다 오히려
+  큰데, 워커가 100% 포화됐기 때문이며 그 대기가 더 이상 파이프라인을 막지 않는다. `cancel` 쪽은
+  평균 0.31ms → 3.9µs로 사실상 사라졌다.
+- **주의 2 — 28번의 인과 주장 하나는 반증됐다.** "배리어가 배치 누적을 구조적으로 가로막는다"는
+  설명과 달리, fence를 없애고 처리량이 3.4배가 된 뒤에도 **평균 배치는 2.80 → 2.781로 무변화**다.
+  대신 **terminal 경계가 batch run length를 제한한다**는 새 가설이 수치상 강하게 지지된다
+  (`collectTradeBatch`가 비-trade에서 배치를 끊고 terminal이 이벤트의 31.9%). **가설이지 확정된
+  인과가 아니며, 이 가설의 수정은 축 1 후속 사이클에서 별도로 검증한다** — 실제 run-length 분포와
+  job 종류별 실행 시간을 먼저 계측해야 한다.
+- **부작용**: `settlement_outstanding_jobs`가 hold·burst의 2초 샘플 100%에서 `2N`(=8)에 붙어 있었다.
+  다만 같은 구간 worker busy가 99.95%이므로 **dispatcher가 아니라 워커·DB 용량이 제약**이다.

@@ -114,9 +114,25 @@ ms p95) ② 취소 무실패 ③ 정합성 위반 0**을 급등 스파이크 주
 - 정합성 위반 및 `settlement_batch_fallbacks_total` 0
 - 회복 성능 악화 없음
 
-**현재 단계**: ✅ **A+C(per-order 런타임 fence + terminal durable defer) 완료** →
-[22번](22_4차_축1_per-order_fence_완료.md) — 다음은 **29번 GCP 재측정**(실행은 별도 세션)과
-**축 2(매칭 quantum)**.
+**현재 단계**: ✅ **A+C 완료 + 29번 GCP 재측정으로 최종 판정 완료** →
+[29번 GCP 스케일 최종 판정](../benchmarks/29-2026-07-30-per-order-fence-gcp-remeasurement.md).
+**파티션 전체 fence는 제거됐고 바인딩 링크가 "fence 대기"에서 "정산 워커·DB 처리 용량(N=4)"으로
+이동했다** — worker busy 13.1%→99.95%, 정산 처리율 ≈109→≈372 trades/s, 업무 성공률
+10.82%(26번)→22.70%. 정합성·무결성 전항목 통과, 가용성·취소 하드 보장 유지.
+**단, 28번이 "배리어가 배치 누적을 가로막는다"고 설명한 평균 배치 2.8은 fence 제거 후에도 2.78로
+그대로여서 그 인과 주장은 반증됐다.** 대신 **terminal 경계가 batch run length를 제한한다는 새 가설**이
+수치상 강하게 지지된다(`collectTradeBatch`가 비-trade 이벤트에서 배치를 끊고, terminal이 전체 이벤트의
+31.9%다 — 독립 혼합 가정 아래 근사 `1/0.319≈3.13` vs 관측 2.78~2.83). **가설이지 확정된 인과가 아니며,
+실제 연속 trade run-length 분포를 다음 측정에서 직접 계측해 확인해야 한다.**
+
+**남은 것은 축 2뿐이 아니다.** 다음 두 갈래를 **병렬이 아니라 독립 순서로** 관리한다 —
+서로 판정을 섞지 않는다:
+
+1. **축 1 후속 — terminal 경계 배치 파편화 진단**(진단 선행: run-length 분포, job 종류별 실행 시간
+   분리, terminal의 DB transaction 비중). `N=4` 상향 실험도 이 갈래에 속한다.
+2. **축 2 — 매칭 quantum**(최악 fan-out에서의 진행성, 계약 6개 선결)
+
+**어느 쪽을 먼저 할지는 29번의 업무 성공률 개선폭(10.82%→22.70%)까지 포함해 결정한다.**
 
 - 28번(GCP 스케일 관측성 재측정)이 27번의 정산 큐 포화(`worker="8"`=256 cap)를 정확히 재현하고
   **파티션 전체 fence가 지배적**이라고 판정(hold 구간 `market_done` 배리어 wait duty 52.3%, 배리어
@@ -136,9 +152,13 @@ ms p95) ② 취소 무실패 ③ 정합성 위반 0**을 급등 스파이크 주
   (`settlement_barriers_total` 등)를 제거하고 `settlement_terminal_wait_seconds`/
   `settlement_outstanding_jobs`/`settlement_quarantined_orders`/
   `settlement_dependency_record_failed_total`로 교체. 자세한 내용과 대화 중 정정된 사항은
-  [22번 완료 문서](22_4차_축1_per-order_fence_완료.md) 참고. GCP 실측(29번)은
-  [runbook](../superpowers/plans/2026-07-30-per-order-fence-gcp-remeasurement.md)만 작성했고
-  별도 측정 세션에서 실행한다.
+  [22번 완료 문서](22_4차_축1_per-order_fence_완료.md) 참고.
+- **29번 GCP 실측 완료**(측정 기준 SHA `82b4d7f`,
+  [runbook](../superpowers/plans/2026-07-30-per-order-fence-gcp-remeasurement.md) →
+  [결과](../benchmarks/29-2026-07-30-per-order-fence-gcp-remeasurement.md)): 폐기한 배리어 지표가
+  실제로 사라지고 신규 5종이 정상 동작함을 확인, 계측 내부 무결성 9항목이 오차 0으로 일치했다.
+  주의: runbook의 주 가설 기준("terminal wait p50 감소")은 **28번 barrier wait과 측정 대상이 달라
+  직접 비교가 성립하지 않는다** — fence 제거 판정은 처리량 지표를 근거로 했다.
 
 ## 백로그 (순서 미정, 조건 충족 시 승격)
 

@@ -67,13 +67,13 @@ guard)와 A+C(per-order fence + terminal durable defer) 전체를 포함하며, 
 
 ### Phase 0: Preflight (낮은 VU 1~2분 — 실패 시 전체 실행 금지)
 
-- [ ] **Step 1: 코드 동일성** — 배포된 커밋이 **측정 기준 SHA `82b4d7f`와 일치**함을 확인하고,
+- [x] **Step 1: 코드 동일성** — 배포된 커밋이 **측정 기준 SHA `82b4d7f`와 일치**함을 확인하고,
   위 `git diff --stat 8685923..82b4d7f` 재확인(A+C 구현 외 Go 변경 없음).
-- [ ] **Step 1-a: DB 접속 유효성** — 배포 원본은 **현재 `go-exchange-back` 환경을 canonical
+- [x] **Step 1-a: DB 접속 유효성** — 배포 원본은 **현재 `go-exchange-back` 환경을 canonical
   source로** 삼는다. **과거 `bench-*` 값을 복사해 오지 않는다.** 검증은 값 비교가 아니라
   **실제 연결 성공**으로 한다. **비밀번호 값이나 그 hash·fingerprint를 로그·문서·아티팩트에
   출력하지 않는다.**
-- [ ] **Step 1-b: 스키마 적용 확인 (TRUNCATE보다 먼저)** — 테이블 존재만으로 판단하지 않는다:
+- [x] **Step 1-b: 스키마 적용 확인 (TRUNCATE보다 먼저)** — 테이블 존재만으로 판단하지 않는다:
   - `failed_order_cancellations` 테이블 존재 **및** `order_id` uniqueIndex
   - `failed_order_cancellations.retry_count` — **default 0**, CHECK `retry_count >= 0`
   - `failed_market_completions.retry_count` — **default 0**, CHECK
@@ -82,7 +82,7 @@ guard)와 A+C(per-order fence + terminal durable defer) 전체를 포함하며, 
   - 위가 모두 통과한 뒤에야 **10개 테이블 TRUNCATE**를 수행한다. 스키마가 구버전이면
     `retry_count = 1`로 defer record가 생성돼 "차단은 retry budget을 소비하지 않는다"는
     계약이 깨진 상태로 측정하게 된다.
-- [ ] **Step 2: 저부하 1~2분 실행** 후 다음을 **전부** 확인:
+- [x] **Step 2: 저부하 1~2분 실행** 후 다음을 **전부** 확인:
   - 신규 메트릭이 `/metrics`에 노출: `settlement_terminal_wait_seconds{kind}`,
     `settlement_outstanding_jobs{partition}`, `settlement_quarantined_orders{partition}`,
     `settlement_dependency_record_failed_total`, `settlement_duplicate_terminal_total`
@@ -94,21 +94,21 @@ guard)와 A+C(per-order fence + terminal durable defer) 전체를 포함하며, 
   - `settlement_terminal_wait_seconds{kind}` count = 정상 처리된 terminal(cancel+market_done) 수
   - dispatch wait count = execution count = 완료 job 수
   - 기존 SLI·정합성 검사 정상
-- [ ] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**. 원인 해결 후 Phase 0 재수행.
+- [x] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**. 원인 해결 후 Phase 0 재수행.
 
 ---
 
 ### Phase 1: 26번·28번 동일 규모 재현
 
-- [ ] **Step 1: 리셋 + 기동** — 9(+2)테이블 TRUNCATE + `bootstrap loaded=0` + 기동 로그
+- [x] **Step 1: 리셋 + 기동** — 9(+2)테이블 TRUNCATE + `bootstrap loaded=0` + 기동 로그
   `settlement partitions=.. concurrency=4` 확인. `GOEXCHANGE_ENABLE_PPROF=true`.
   (테이블 수는 이번 구현이 추가한 `failed_order_cancellations`를 포함해 기존 9개에서 갱신)
-- [ ] **Step 2: 부하** — 26번·28번과 동일 프로파일·분할·배리어(`LOAD_START_AT_MS`). 실제
+- [x] **Step 2: 부하** — 26번·28번과 동일 프로파일·분할·배리어(`LOAD_START_AT_MS`). 실제
   시나리오 시작 시각을 양쪽 k6 로그에서 확인·기록(skew ≤1초 목표, 2초 초과 시 폐기·재실행).
-- [ ] **Step 3: 구간별 스냅샷** — **hold·burst·recovery 각 구간의 최소 시작·종료 스냅샷**을
+- [x] **Step 3: 구간별 스냅샷** — **hold·burst·recovery 각 구간의 최소 시작·종료 스냅샷**을
   남긴다. **최종 누적값만으로 판정하지 않는다.** 각 스냅샷의 캡처 시각을 함께 기록.
-- [ ] **Step 4: 드레인 + 정합성 5검사 + fallback** — 26번·28번과 동일.
-- [ ] **Step 5: 원본 보존** — 스냅샷·k6 stdout·`summary-*.json`·시각 기록을 `_workspace/`에.
+- [x] **Step 4: 드레인 + 정합성 5검사 + fallback** — 26번·28번과 동일.
+- [x] **Step 5: 원본 보존** — 스냅샷·k6 stdout·`summary-*.json`·시각 기록을 `_workspace/`에.
   **토큰·외부 IP 제거.**
 
 ---
@@ -136,16 +136,16 @@ dispatch wait 평균         = Δdispatch_wait_sum / Δdispatch_wait_count
 
 ### Phase 3: 계측 내부 무결성 (결과 해석 **전에** 검증)
 
-- [ ] `settlement_terminal_wait_seconds{cancel}` count = 정상 처리된 cancel terminal 수
-- [ ] `settlement_terminal_wait_seconds{market_done}` count = market done 수
-- [ ] dispatch wait count = job execution count
-- [ ] batch attempt count **≥** logical batch job count
-- [ ] 그 차이가 **실제 retry 로그와 일치**
-- [ ] settlement batch의 trade 합계 = settled trade 증가량
-- [ ] k6 주문 합계 = 서버·DB 주문 합계
-- [ ] `settlement_quarantined_orders`가 실행 종료 시점에 **0**(0이 아니면 미해결 quarantine —
+- [x] `settlement_terminal_wait_seconds{cancel}` count = 정상 처리된 cancel terminal 수
+- [x] `settlement_terminal_wait_seconds{market_done}` count = market done 수
+- [x] dispatch wait count = job execution count
+- [x] batch attempt count **≥** logical batch job count
+- [x] 그 차이가 **실제 retry 로그와 일치**
+- [x] settlement batch의 trade 합계 = settled trade 증가량
+- [x] k6 주문 합계 = 서버·DB 주문 합계
+- [x] `settlement_quarantined_orders`가 실행 종료 시점에 **0**(0이 아니면 미해결 quarantine —
   원인 규명 전까지 판정 보류)
-- [ ] **`settlement_duplicate_terminal_total` = 0 (비협상)** — 주문당 terminal 1개는 엔진
+- [x] **`settlement_duplicate_terminal_total` = 0 (비협상)** — 주문당 terminal 1개는 엔진
   불변식이다. 0이 아니면 **엔진이나 outbox 경로가 불변식을 깬 것**이므로 성능 수치를 읽지 않고
   원인을 먼저 규명한다. 종류는 `duplicate terminal for order` 오류 로그로 식별한다.
 
@@ -155,7 +155,7 @@ dispatch wait 평균         = Δdispatch_wait_sum / Δdispatch_wait_count
 
   (첫 terminal이 이미 dispatch된 뒤 도착하는 중복은 waiting이 비어 있어 이 counter에 잡히지
   않는다. 저장소 수준 탐지는 설계 스펙의 범위 밖이다.)
-- [ ] **하나라도 불일치면 계측 문제로 보고 판정을 보류**하고 원인부터 규명한다.
+- [x] **하나라도 불일치면 계측 문제로 보고 판정을 보류**하고 원인부터 규명한다.
 
 ---
 
@@ -173,20 +173,21 @@ dispatch wait 평균         = Δdispatch_wait_sum / Δdispatch_wait_count
 
 **해석 전 무결성 검사를 먼저 통과시킨다.** 통과 전 성능 수치는 읽지 않는다.
 
-- [ ] 판정 수행 및 기록.
+- [x] 판정 수행 및 기록.
 
 ---
 
 ### Phase 5: 안전 게이트 + 문서
 
-- [ ] **성능 결과는 다음이 모두 만족될 때만 유효**: 응답 가용성 유지 · 취소 인프라 실패율 0% ·
+- [x] **성능 결과는 다음이 모두 만족될 때만 유효**: 응답 가용성 유지 · 취소 인프라 실패율 0% ·
   정합성 위반 0 · fallback 0 · 회복 성능 악화 없음 · load-gen 완주 및 시작 skew 충족 ·
   **계측 내부 무결성 충족**(Phase 3) · quarantine 잔존 0 · **중복 terminal 0**.
-- [ ] **문서** — `docs/benchmarks/29-<날짜>-per-order-fence-gcp-remeasurement.md`:
+- [x] **문서** — `docs/benchmarks/29-<날짜>-per-order-fence-gcp-remeasurement.md`:
   비교 조건 동일성(diff 확인 포함) / 구간별 계산표 / 무결성 검증 결과 / **판정(주 가설·처리량·
   부작용)** / 28번 대비(배리어 대기 제거 여부) / 한계.
-- [ ] **README** 4차 현재 단계 갱신, 완료 문서에 "GCP 스케일 최종 판정" 링크 추가.
-- [ ] **Commit + 푸시 + CI**, **모든 VM stop**(load-gen 2대 포함).
+- [x] **README** 4차 현재 단계 갱신, 완료 문서에 "GCP 스케일 최종 판정" 링크 추가.
+- [ ] **Commit + 푸시 + CI** — 미수행(측정 세션 종료 시점 기준).
+- [x] **모든 VM stop**(load-gen 2대 포함) — 4대 전부 `TERMINATED` 조회로 확인(2026-07-30).
 
 ---
 
