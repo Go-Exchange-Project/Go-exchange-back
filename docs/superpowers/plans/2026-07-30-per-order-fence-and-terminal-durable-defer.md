@@ -1173,7 +1173,7 @@ var errDependencyOpen = errors.New("terminal deferred: preceding settlement is s
   기존 `marketCompletionFailureRecorder`에는 `EnsureDeferred(input service.CompleteMarketOrderInput, coinSymbol string, reason error) (*model.FailedMarketCompletion, error)`를 추가한다.
   `dependencyBlocked(guard, orderID)`는 `guard == nil`이면 `(false, errNoDependencyGuard)`를 돌려주는 얇은 헬퍼다 — **guard가 없으면 실행하지 않는다**(fail-closed).
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `cmd/terminal_defer_test.go`:
 
@@ -1215,12 +1215,12 @@ func TestProcessOrderCancellationFailsClosedOnGuardError()      // 실행 금지
 func TestProcessMarketOrderDoneDefersWhenDependencyOpen()       // market done 동일 계약
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `go test ./cmd/ -run TestProcessOrderCancellation -v`
 Expected: FAIL — 인자 개수 불일치 컴파일 오류
 
-- [ ] **Step 3: 메트릭 추가**
+- [x] **Step 3: 메트릭 추가**
 
 `internal/metrics/metrics.go`에 추가:
 
@@ -1239,7 +1239,7 @@ Expected: FAIL — 인자 개수 불일치 컴파일 오류
 	}, []string{"kind"})
 ```
 
-- [ ] **Step 4: terminal 처리 구현**
+- [x] **Step 4: terminal 처리 구현**
 
 `processOrderCancellationEvent`에 dependency guard와 durable defer를 넣는다. `processMarketOrderDone`도 **같은 순서**(guard → 실행 → 실패 시 `RecordFailure`)로 바꾸되, 차단 시에는 `EnsureDeferred`를 쓴다.
 
@@ -1337,12 +1337,26 @@ func retryTransient(fn func() error) error {
 
 `processExecutionEvent`에서 두 terminal 분기에 `sourceOutboxID`·`guard`·`deferStore`를 전달한다.
 
-- [ ] **Step 5: 테스트 통과 확인**
+- [x] **Step 5: 테스트 통과 확인**
 
 Run: `go test ./cmd/ -race -v`
 Expected: PASS
 
-- [ ] **Step 6: 커밋** (`commit-message` 스킬)
+메모: `processExecutionEvent`/`processSingleOutboxEvent`/`settleTradeBatchWithFallback`
+시그니처에 `guard`·`cancelDeferStore`를 추가로 꿰어야 두 terminal 분기까지
+실제로 전달됐다(계획 문서엔 "processExecutionEvent에서 두 terminal 분기에
+전달한다"고만 적혀 있었지만, 그 앞단의 세 함수도 같은 파라미터를 릴레이해야
+컴파일이 성립해 기계적으로 확장했다). `processMarketOrderDone`은 사양대로
+`sourceOutboxID`를 받지 않는다 — `marketCompletionFailureRecorder.RecordFailure/
+EnsureDeferred`가 애초에 그 값을 받는 시그니처가 아니고(Task 3에서 확정),
+설계 문서도 "저장하지 않고 provenance로만 쓴다"고 명시했으므로 쓸 곳 없는
+파라미터를 새로 추가하지 않았다. 계획에는 없던 `main()`의 실제 배선(guard=
+`failedSettlementService`, cancelDeferStore=`failedOrderCancellationService`)도
+이 Step에서 함께 했다 — 안 그러면 새 defer 경로가 프로덕션에서 죽은 코드로
+남는다. `go test ./cmd/ -race -v`(45개 테스트, 신규 5개 포함) 전부 PASS,
+`go test ./... -count=1 -race` 전체도 PASS.
+
+- [x] **Step 6: 커밋** (`commit-message` 스킬)
 
 ---
 
