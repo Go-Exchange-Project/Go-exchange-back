@@ -616,7 +616,7 @@ dependency 차단이 retry budget을 소비하지 않도록 저장소 API를 두
   - `func (r *FailedMarketCompletionRepository) EnsureDeferred(failure *model.FailedMarketCompletion) (*model.FailedMarketCompletion, error)`
   - `func (s *FailedMarketCompletionService) EnsureDeferred(input CompleteMarketOrderInput, coinSymbol string, reason error) (*model.FailedMarketCompletion, error)`
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `internal/repository/failed_market_completion_repository_integration_test.go`에 추가:
 
@@ -668,12 +668,12 @@ func TestIntegrationFailedMarketCompletionEnsureDeferredDoesNotReopenResolved(t 
 }
 ```
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `GOEXCHANGE_TEST_DATABASE_DSN=<dsn> go test ./internal/repository/ -run TestIntegrationFailedMarketCompletionEnsureDeferred -v`
 Expected: FAIL — `repo.EnsureDeferred undefined`
 
-- [ ] **Step 3: 모델의 default 태그를 0으로 변경**
+- [x] **Step 3: 모델의 default 태그를 0으로 변경**
 
 `internal/model/failed_market_completion.go:21`:
 
@@ -684,7 +684,7 @@ Expected: FAIL — `repo.EnsureDeferred undefined`
 	RetryCount           uint                   `gorm:"not null;default:0;check:ck_failed_market_completions_retry_count_non_negative,retry_count >= 0"`
 ```
 
-- [ ] **Step 4: 마이그레이션 작성**
+- [x] **Step 4: 마이그레이션 작성**
 
 `migrations/005_terminal_durable_defer.sql`:
 
@@ -723,7 +723,7 @@ END $$;
 SELECT 1;
 ```
 
-- [ ] **Step 5: repository `EnsureDeferred` 구현**
+- [x] **Step 5: repository `EnsureDeferred` 구현**
 
 `internal/repository/failed_market_completion_repository.go`에 추가:
 
@@ -756,7 +756,7 @@ func (r *FailedMarketCompletionRepository) EnsureDeferred(failure *model.FailedM
 }
 ```
 
-- [ ] **Step 6: service `EnsureDeferred` 구현**
+- [x] **Step 6: service `EnsureDeferred` 구현**
 
 `internal/service/failed_market_completion_service.go`에 추가(기존 `RecordFailure`가 만드는 모델 조립 로직을 헬퍼로 공유하고, `EnsureDeferred`만 `RetryCount: 0`으로 둔다):
 
@@ -778,7 +778,7 @@ func (s *FailedMarketCompletionService) EnsureDeferred(input CompleteMarketOrder
 
 `failedMarketCompletionRepository` 서비스 인터페이스에 `EnsureDeferred(failure *model.FailedMarketCompletion) (*model.FailedMarketCompletion, error)`를 추가한다.
 
-- [ ] **Step 7: 테스트 통과 확인**
+- [x] **Step 7: 테스트 통과 확인**
 
 Run: `GOEXCHANGE_TEST_DATABASE_DSN=<dsn> go test ./internal/repository/ -run TestIntegrationFailedMarketCompletion -v`
 Expected: PASS — 기존 `retry_count` 1→2 테스트도 그대로 통과(실제 실패 경로는 의미가 바뀌지 않았다)
@@ -786,7 +786,17 @@ Expected: PASS — 기존 `retry_count` 1→2 테스트도 그대로 통과(실�
 Run: `go test ./... -race`
 Expected: PASS
 
-- [ ] **Step 8: 커밋**
+메모: 마이그레이션을 로컬 docker-compose 테스트 postgres(실제 DB)에 적용해
+`005_terminal_durable_defer.sql` 성공(goose: successfully migrated to version 5)을
+확인했다. 계획의 테스트 코드는 `failedMarketCompletionFixture`를 고정 주문 ID
+(9001/9002)로 호출하지만, 이 파일의 기존 테스트(`TestIntegrationFailedMarketCompletionRecordFindResolve`)가
+이미 `time.Now().UnixNano()` 기반 동적 orderID + `t.Cleanup` 삭제 패턴을 쓰고 있어
+(order_id에 uniqueIndex가 걸려 있어 고정값은 반복 실행 시 공유 테스트 DB에 잔재를
+남긴다 — AC-Task2에서 겪은 것과 같은 문제), 새 테스트 2개도 동일하게 동적 ID +
+cleanup으로 작성했다. `go test ./internal/repository/... ./internal/service/... -count=1`
+(DSN 설정)과 `go test ./... -race`(DSN 미설정, 통합 테스트 스킵) 모두 통과했다.
+
+- [x] **Step 8: 커밋**
 
 `commit-message` 스킬 사용 후:
 
