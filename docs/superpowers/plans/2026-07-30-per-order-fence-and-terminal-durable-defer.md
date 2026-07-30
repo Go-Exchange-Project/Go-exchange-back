@@ -354,7 +354,7 @@ boot replay가 앞 이벤트 실패에서 멈추게 하고, corrupted 행의 파
   - `OutboxReplayer.Process func(sourceOutboxID uint64, event matching.ExecutionEvent) bool`
   - `OutboxReplayResult{Replayed, Deferred, Undurable, Corrupted int}`
 
-- [ ] **Step 1: 실패 테스트 작성**
+- [x] **Step 1: 실패 테스트 작성**
 
 `internal/service/outbox_replayer_test.go`에 추가:
 
@@ -444,12 +444,12 @@ func TestReplayPassesSourceOutboxIDToProcess(t *testing.T) {
 
 기존 `fakeOutboxReplaySource`에 `marked []uint64`, `markFails map[uint64]bool` 필드를 추가하고 `MarkProcessed`가 이를 반영하게 한다. `tradeOutboxRow(id)`는 정상 역직렬화되는 행을, `corruptedOutboxRow(id)`는 payload를 깨뜨린 행을 만드는 헬퍼다.
 
-- [ ] **Step 2: 테스트 실패 확인**
+- [x] **Step 2: 테스트 실패 확인**
 
 Run: `go test ./internal/service/ -run TestReplay -v`
 Expected: FAIL — `Process` 시그니처 불일치 컴파일 오류, `result.Undurable` 미정의
 
-- [ ] **Step 3: `OutboxReplayer` 구현**
+- [x] **Step 3: `OutboxReplayer` 구현**
 
 `internal/service/outbox_replayer.go`:
 
@@ -524,7 +524,7 @@ func (r *OutboxReplayer) Replay() (OutboxReplayResult, error) {
 }
 ```
 
-- [ ] **Step 4: `processExecutionEvent`에 `sourceOutboxID` 추가**
+- [x] **Step 4: `processExecutionEvent`에 `sourceOutboxID` 추가**
 
 `cmd/main.go:472-493`. **`transactionalOutboxID`는 기존 `outboxEventID`의 이름 변경이며 의미는 그대로다**(정산 트랜잭션 안에서 마킹할 ID, replay에서는 0). `sourceOutboxID`는 이번 태스크에서 아직 소비되지 않지만 시그니처에 넣어 Task 5가 바로 쓸 수 있게 한다.
 
@@ -556,7 +556,7 @@ func processExecutionEvent(
 
 `processSingleOutboxEvent`의 호출을 `processExecutionEvent(outboxEvent.Event, outboxEvent.OutboxID, outboxEvent.OutboxID, ...)`로 바꾼다(live 경로는 두 ID가 동일).
 
-- [ ] **Step 5: 배선 수정**
+- [x] **Step 5: 배선 수정**
 
 `cmd/main.go:135-138`:
 
@@ -571,7 +571,7 @@ func processExecutionEvent(
 		},
 ```
 
-- [ ] **Step 6: 테스트 통과 확인**
+- [x] **Step 6: 테스트 통과 확인**
 
 Run: `go test ./internal/service/ -run TestReplay -v`
 Expected: PASS (4 tests + 기존 테스트)
@@ -579,7 +579,17 @@ Expected: PASS (4 tests + 기존 테스트)
 Run: `go build ./... && go vet ./...`
 Expected: 오류 없음
 
-- [ ] **Step 7: 커밋**
+메모: 계획에는 없던 사전 존재 통합 테스트 위생 버그를 검증 과정에서 발견·수정했다
+(`internal/service/order_cancellation_integration_test.go`의
+`TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements`가 실제
+`OutboxWriter`로 커밋한 `ORDER_CANCELLED` outbox 행을 PROCESSED로 마킹하지 않고 끝나
+공유 테스트 DB에 PENDING 행이 영구히 남던 문제). 옛 관대한 리플레이어는 이를
+조용히 허용했지만 이번 fail-closed 계약 하에서 이후 `OutboxReplayer` 통합 테스트를
+실패시켜, `t.Cleanup`으로 해당 행을 직접 삭제하도록 수정했다. `go test
+./internal/repository/... ./internal/service/... -count=1`(DSN 설정, 완전히 새로
+초기화한 DB)를 연속 2회 실행해 PENDING 잔재 없이 통과함을 확인했다.
+
+- [x] **Step 7: 커밋**
 
 `commit-message` 스킬 사용 후:
 
