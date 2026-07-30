@@ -11,6 +11,78 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// failedMarketCompletionFixture는 orderID에 대한 최소 유효 FailedMarketCompletion을
+// 만든다. RetryCount는 호출자가 시나리오에 맞게 덮어쓴다.
+func failedMarketCompletionFixture(orderID uint, errorMessage string) *model.FailedMarketCompletion {
+	return &model.FailedMarketCompletion{
+		OrderID:              orderID,
+		CoinSymbol:           "BTC",
+		FilledAmount:         decimal.NewFromInt(1),
+		FilledQuoteAmount:    decimal.NewFromInt(100),
+		RemainingQuoteAmount: decimal.NewFromInt(5),
+		ErrorMessage:         errorMessage,
+		Status:               model.FailedSettlementStatusOpen,
+		RetryCount:           1,
+		OccurredAt:           time.Now().UTC(),
+	}
+}
+
+func TestIntegrationFailedMarketCompletionEnsureDeferredDoesNotConsumeRetryBudget(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	repo := NewFailedMarketCompletionRepository(db)
+
+	orderID := uint(time.Now().UnixNano() % 1_000_000_000)
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("order_id = ?", orderID).Delete(&model.FailedMarketCompletion{}).Error)
+	})
+
+	deferred := failedMarketCompletionFixture(orderID, "blocked by open failed settlement")
+	deferred.RetryCount = 0
+
+	first, err := repo.EnsureDeferred(deferred)
+	require.NoError(t, err)
+	assert.Equal(t, uint(0), first.RetryCount, "차단은 시도가 아니므로 0에서 시작한다")
+
+	// 같은 주문에 반복 호출해도 증가하지 않는다(crash replay 멱등).
+	again := *deferred
+	again.ID = 0
+	second, err := repo.EnsureDeferred(&again)
+	require.NoError(t, err)
+	assert.Equal(t, uint(0), second.RetryCount)
+
+	// 실제 실행 실패는 RecordFailure로 0 → 1.
+	actual := *deferred
+	actual.ID = 0
+	actual.ErrorMessage = "completion actually failed"
+	third, err := repo.RecordFailure(&actual)
+	require.NoError(t, err)
+	assert.Equal(t, uint(1), third.RetryCount)
+}
+
+func TestIntegrationFailedMarketCompletionEnsureDeferredDoesNotReopenResolved(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	repo := NewFailedMarketCompletionRepository(db)
+
+	orderID := uint(time.Now().UnixNano()%1_000_000_000) + 1
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("order_id = ?", orderID).Delete(&model.FailedMarketCompletion{}).Error)
+	})
+
+	failure := failedMarketCompletionFixture(orderID, "completion failed")
+	persisted, err := repo.RecordFailure(failure)
+	require.NoError(t, err)
+	require.NoError(t, repo.MarkResolved(persisted.ID, "resolved by retry worker"))
+
+	reopen := *failure
+	reopen.ID = 0
+	got, err := repo.EnsureDeferred(&reopen)
+	require.NoError(t, err)
+
+	assert.Equal(t, model.FailedSettlementStatusResolved, got.Status,
+		"이미 실행된 terminal을 재실행 대상으로 되살리면 안 된다")
+	assert.Equal(t, uint(1), got.RetryCount)
+}
+
 func TestIntegrationFailedMarketCompletionRecordFindResolve(t *testing.T) {
 	db := testdb.OpenIntegrationDB(t)
 	repo := NewFailedMarketCompletionRepository(db)

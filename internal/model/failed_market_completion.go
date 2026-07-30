@@ -18,10 +18,13 @@ type FailedMarketCompletion struct {
 	RemainingQuoteAmount decimal.Decimal        `gorm:"type:numeric;not null;check:ck_failed_market_completions_remaining_quote_non_negative,remaining_quote_amount >= 0"`
 	ErrorMessage         string                 `gorm:"type:text;not null;check:ck_failed_market_completions_error_message_not_empty,length(btrim(error_message)) > 0"`
 	Status               FailedSettlementStatus `gorm:"not null;default:OPEN;check:ck_failed_market_completions_status_valid,status IN ('OPEN', 'RESOLVED')"`
-	RetryCount           uint                   `gorm:"not null;default:1;check:ck_failed_market_completions_retry_count_positive,retry_count > 0"`
-	OccurredAt           time.Time              `gorm:"not null"`
-	Resolution           string                 `gorm:"type:text"`
-	ResolvedAt           *time.Time
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	// dependency 차단으로 생성된 record는 시도 0회이므로 0에서 시작한다.
+	// GORM에 default:1이 남아 있으면 Go의 0이 zero value로 INSERT에서 생략돼
+	// DB default가 적용된다 — 모델과 DB를 모두 0으로 맞춰야 한다.
+	RetryCount uint      `gorm:"not null;default:0;check:ck_failed_market_completions_retry_count_non_negative,retry_count >= 0"`
+	OccurredAt time.Time `gorm:"not null"`
+	Resolution string    `gorm:"type:text"`
+	ResolvedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }

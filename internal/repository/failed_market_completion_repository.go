@@ -48,6 +48,33 @@ func (r *FailedMarketCompletionRepository) RecordFailure(failure *model.FailedMa
 	return &persisted, nil
 }
 
+// EnsureDeferred는 terminal을 실행하지 않고 내구적으로 미룰 때 쓴다.
+// RecordFailure와 달리 ON CONFLICT DO NOTHING 의미론이라 기존 행의 status·
+// resolved_at·retry_count를 건드리지 않는다 — 특히 RESOLVED를 OPEN으로 되돌리지
+// 않는다(이미 실행된 terminal을 재실행 대상으로 되살리게 된다).
+func (r *FailedMarketCompletionRepository) EnsureDeferred(failure *model.FailedMarketCompletion) (*model.FailedMarketCompletion, error) {
+	if failure == nil {
+		return nil, fmt.Errorf("failed market completion is required")
+	}
+	if r == nil || r.DB == nil {
+		return nil, fmt.Errorf("failed market completion repository DB is required")
+	}
+
+	if err := r.DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "order_id"}},
+		DoNothing: true,
+	}).Create(failure).Error; err != nil {
+		return nil, err
+	}
+
+	// DoNothing은 기존 행을 돌려주지 않으므로 조회가 필요하다.
+	var persisted model.FailedMarketCompletion
+	if err := r.DB.Where("order_id = ?", failure.OrderID).First(&persisted).Error; err != nil {
+		return nil, err
+	}
+	return &persisted, nil
+}
+
 func (r *FailedMarketCompletionRepository) FindOpen(limit int) ([]model.FailedMarketCompletion, error) {
 	if r == nil || r.DB == nil {
 		return nil, fmt.Errorf("failed market completion repository DB is required")
