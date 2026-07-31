@@ -13,6 +13,9 @@
 !*.tfvars.example
 *.tfplan
 **/tfplan
+# tfplan-26처럼 접미사가 붙은 plan 파일은 위 두 패턴에 걸리지 않는다.
+# plan 파일은 변수에 secret이 담길 수 있으므로 접두사 기준으로 막는다.
+infra/terraform/**/tfplan*
 crash.log
 crash.*.log
 
