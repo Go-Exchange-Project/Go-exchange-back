@@ -3,6 +3,7 @@ import { check, sleep } from 'k6';
 import exec from 'k6/execution';
 import { Counter, Rate } from 'k6/metrics';
 import { classifyOrderResponse, classifyCancelResponse } from './sli-classify.js';
+import { buildLevelPlan, levelForElapsed } from './level-classify.js';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const DEV_TOOLS_TOKEN = __ENV.DEV_TOOLS_TOKEN;
@@ -47,6 +48,11 @@ const orderResponseAvailability = new Rate('sli_order_response_availability');
 const orderBusinessSuccess = new Rate('sli_order_business_success');
 const cancelSuccessSli = new Rate('sli_cancel_success');
 
+// 32번: 1초 계약 초과 "건수"를 판정값으로 쓰므로 전용 Counter가 필요하다.
+// sli_order_response_availability의 fail에는 느린 응답뿐 아니라 status 0·예상 밖
+// 상태도 섞이므로 그 지표로는 duration > SLO 건수를 셀 수 없다.
+const orderResponseOverSlo = new Counter('sli_order_response_over_slo_total');
+
 const orderSuccess = new Counter('custom_order_success');
 const orderFail = new Counter('custom_order_fail');
 const marketSuccess = new Counter('custom_market_success');
@@ -69,6 +75,46 @@ const SPIKE_STAGES = [
   { duration: __ENV.STAGE6_DURATION || '2m', target: parseInt(__ENV.STAGE6_VUS || '300', 10) },
 ];
 
+// 32번(용량 경계 탐색) 전용 프로파일. PROFILE=capacity 일 때만 활성화되며,
+// 기존 스파이크 프로파일은 그대로 둔다 — 26~31번 재현성을 깨지 않기 위해서다.
+//
+// CAPACITY_LEVELS는 **load-gen 1대 기준 VU**다(기존 STAGEn_VUS와 같은 단위).
+// vu_level 라벨과 판정표는 **합산 VU**이므로 VU_LEVEL_SCALE(load-gen 대수)을 곱한다.
+// 기본값 250/500/1,000/2,000(대당) = 합산 500/1,000/2,000/4,000.
+const PROFILE = __ENV.PROFILE || 'spike';
+const VU_LEVEL_SCALE = parseInt(__ENV.VU_LEVEL_SCALE || '2', 10);
+const CAPACITY_LEVELS = (__ENV.CAPACITY_LEVELS || '250,500,1000,2000')
+  .split(',')
+  .map((value) => parseInt(value.trim(), 10))
+  .filter((value) => value > 0);
+const CAPACITY_RAMP = __ENV.CAPACITY_RAMP || '30s';
+const CAPACITY_HOLD = __ENV.CAPACITY_HOLD || '3m';
+
+// 계단마다 (ramp, hold) 두 stage — 6개 고정인 SPIKE_STAGES로는 표현할 수 없다.
+const CAPACITY_STAGES = [];
+for (const level of CAPACITY_LEVELS) {
+  CAPACITY_STAGES.push({ duration: CAPACITY_RAMP, target: level });
+  CAPACITY_STAGES.push({ duration: CAPACITY_HOLD, target: level });
+}
+
+const IS_CAPACITY = PROFILE === 'capacity';
+const ACTIVE_STAGES = IS_CAPACITY ? CAPACITY_STAGES : SPIKE_STAGES;
+const LEVEL_PLAN = IS_CAPACITY ? buildLevelPlan(CAPACITY_STAGES, 0, VU_LEVEL_SCALE) : null;
+
+// 태그를 달아도 threshold 선언이 없으면 서브메트릭이 summary에 나타나지 않는다.
+// 판정은 사람이 하므로 항상 통과하는 형태로 둔다(런을 중단시키지 않는다).
+function capacityThresholds() {
+  const thresholds = {};
+  for (const level of CAPACITY_LEVELS) {
+    const label = String(level * VU_LEVEL_SCALE);
+    thresholds[`sli_order_response_availability{vu_level:${label}}`] = ['rate>=0'];
+    thresholds[`sli_order_business_success{vu_level:${label}}`] = ['rate>=0'];
+    thresholds[`sli_cancel_success{vu_level:${label}}`] = ['rate>=0'];
+    thresholds[`sli_order_response_over_slo_total{vu_level:${label}}`] = ['count>=0'];
+  }
+  return thresholds;
+}
+
 export const options = {
   setupTimeout: '25m',
   batch: SETUP_BATCH_SIZE,
@@ -77,13 +123,31 @@ export const options = {
     order_spike_availability: {
       executor: 'ramping-vus',
       startVUs: 0,
-      stages: SPIKE_STAGES,
+      stages: ACTIVE_STAGES,
       exec: 'runVU',
     },
   },
-  // 판정 실패로 런을 중단시키지 않는다 — 스파이크 전체를 완주시켜 전부 기록.
-  thresholds: {},
+  // 판정 실패로 런을 중단시키지 않는다 — 프로파일 전체를 완주시켜 전부 기록.
+  thresholds: IS_CAPACITY ? capacityThresholds() : {},
 };
+
+// 시나리오 시작 시각(ms). 배리어가 setup을 붙잡았다 놓으므로 두 VM에서 거의 같다.
+// exec.scenario.startTime을 우선 쓰고, 없으면 배리어 값으로 대체한다.
+function scenarioStartMs() {
+  const started = exec.scenario.startTime;
+  if (typeof started === 'number' && started > 0) return started;
+  return LOAD_START_AT_MS > 0 ? LOAD_START_AT_MS : 0;
+}
+
+// 표본이 속한 계단 라벨. capacity 프로파일이 아니거나 기준 시각이 없으면 태깅하지 않는다.
+// 반드시 **요청 시작 시각**을 넘겨야 한다 — 응답 완료 시각으로 계산하면 hold 종료
+// 직전에 시작해 다음 ramp에서 끝난 요청이 잘못된 계단에 들어간다.
+function levelTags(startedAtMs) {
+  if (!LEVEL_PLAN) return undefined;
+  const base = scenarioStartMs();
+  if (!base) return undefined;
+  return { vu_level: levelForElapsed(startedAtMs - base, LEVEL_PLAN) };
+}
 
 export function setup() {
   if (!DEV_TOOLS_TOKEN) {
@@ -193,6 +257,9 @@ function authHeaders(token) {
 // 60초보다 넉넉히 잡아 진짜 tail latency를 k6 타임아웃이 아니라 서버 응답으로
 // 관측한다.
 function submitOrder(user, body) {
+  // 계단 라벨은 **요청 시작 시각** 기준이다(level-classify.js 주석 참조).
+  const startedAt = Date.now();
+  const tags = levelTags(startedAt);
   const res = http.post(`${BASE_URL}/orders`, JSON.stringify(body), {
     headers: authHeaders(user.token),
     tags: { name: 'create_order' },
@@ -202,8 +269,11 @@ function submitOrder(user, body) {
   // Retry-After sleep 전에 분류·add — sleep은 클라 백오프이지 서버 지연이
   // 아니므로 응답 가용성 시간에 섞이면 안 된다.
   const cls = classifyOrderResponse(res.status, res.timings.duration, RESPONSE_SLO_MS);
-  orderResponseAvailability.add(cls.available);
-  orderBusinessSuccess.add(cls.businessSuccess);
+  orderResponseAvailability.add(cls.available, tags);
+  orderBusinessSuccess.add(cls.businessSuccess, tags);
+  if (res.timings.duration > RESPONSE_SLO_MS) {
+    orderResponseOverSlo.add(1, tags);
+  }
   check(res, {
     'order accepted or gracefully rejected': (r) => r.status === 200 || r.status === 201 || r.status === 503,
   });
@@ -246,6 +316,10 @@ function makerFlow(user) {
   const orderId = res.json('data.order_id');
   sleep(1 + Math.random() * 2);
 
+  // 취소도 요청 시작 시각 기준으로 태깅한다 — 위 sleep(1~3초) 때문에 주문 시점의
+  // 계단과 다를 수 있고, 그 경우 취소가 실제로 발생한 계단에 귀속돼야 한다.
+  const cancelStartedAt = Date.now();
+  const cancelTags = levelTags(cancelStartedAt);
   const cancelRes = http.del(`${BASE_URL}/orders/${orderId}`, null, {
     headers: authHeaders(user.token),
     tags: { name: 'cancel_order' },
@@ -261,8 +335,8 @@ function makerFlow(user) {
 
   // 404/409는 정상 경쟁 결과라 분모에서 자연 제외(add 호출 안 함).
   const cancelClass = classifyCancelResponse(cancelRes.status);
-  if (cancelClass === 'success') cancelSuccessSli.add(true);
-  else if (cancelClass === 'infra_fail') cancelSuccessSli.add(false);
+  if (cancelClass === 'success') cancelSuccessSli.add(true, cancelTags);
+  else if (cancelClass === 'infra_fail') cancelSuccessSli.add(false, cancelTags);
 }
 
 function takerMarketFlow(user) {
