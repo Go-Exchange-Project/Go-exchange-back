@@ -156,23 +156,23 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
 
 ### Phase 0: Preflight (저부하 1~2분 — 실패 시 전체 실행 금지)
 
-- [ ] **Step 1: 코드 동일성** — 배포 커밋 = `82b4d7f`, `git diff 82b4d7f..HEAD -- '*.go'` 비어 있음
-- [ ] **Step 1-a: DB 머신 타입 확인·기록** — `gcloud compute instances describe`로 **변경 후 실제
+- [x] **Step 1: 코드 동일성** — 배포 커밋 = `82b4d7f`, `git diff 82b4d7f..HEAD -- '*.go'` 비어 있음
+- [x] **Step 1-a: DB 머신 타입 확인·기록** — `gcloud compute instances describe`로 **변경 후 실제
   머신 타입·vCPU·RAM**을 확인해 기록. 인스턴스 ID·디스크가 유지됐는지도 확인
-- [ ] **Step 1-b: DB 접속 유효성** — 현재 `go-exchange-back` 환경이 canonical source.
+- [x] **Step 1-b: DB 접속 유효성** — 현재 `go-exchange-back` 환경이 canonical source.
   **과거 `bench-*` 값을 복사하지 않는다.** 값 비교가 아니라 **실제 연결 성공**으로 검증.
   **비밀번호 값·hash·fingerprint를 로그·문서·아티팩트에 출력하지 않는다**
-- [ ] **Step 1-c: 스키마 확인 (TRUNCATE보다 먼저)** — `failed_order_cancellations`(존재 +
+- [x] **Step 1-c: 스키마 확인 (TRUNCATE보다 먼저)** — `failed_order_cancellations`(존재 +
   `order_id` uniqueIndex + `retry_count` default 0 + CHECK `>= 0`), `failed_market_completions`
   (default 0, 신 제약 존재 + 구 제약 `_retry_count_positive` 부재). **CHECK/default까지** 확인
-- [ ] **Step 1-d: Secret preflight** — 기존(폐기) 토큰 **거부** 확인 / 현재 secret **인증 통과** 확인 /
+- [x] **Step 1-d: Secret preflight** — 기존(폐기) 토큰 **거부** 확인 / 현재 secret **인증 통과** 확인 /
   **값·hash·fingerprint 미출력** / 실패 시 **부하 실행 금지**
-- [ ] **Step 1-e: CPU 수집기** — 시작 전 잔존 0개 → `stdbuf -oL` 실시간 기록 → SSH 끊어도 생존 →
+- [x] **Step 1-e: CPU 수집기** — 시작 전 잔존 0개 → `stdbuf -oL` 실시간 기록 → SSH 끊어도 생존 →
   `kill -0` 실패까지 확인
-- [ ] **Step 1-f: 시간 정렬** — **서버·DB·load-gen 2대의 UTC 시계 차이 ≤ 1초**(`date -u`).
+- [x] **Step 1-f: 시간 정렬** — **서버·DB·load-gen 2대의 UTC 시계 차이 ≤ 1초**(`date -u`).
   **각 구간의 UTC 시작·종료 시각을 기록**한다(없으면 CPU를 구간에 귀속시킬 수 없다).
   두 load-gen 시작 skew ≤ 1초
-- [ ] **Step 2: 저부하 실행** 후 전부 확인:
+- [x] **Step 2: 저부하 실행** 후 전부 확인:
   - 기동 로그가 **의도한 `concurrency=N`** 출력
   - `go_sql_*` 3종 · `settlement_terminal_wait_seconds{kind}` · `settlement_outstanding_jobs{partition}` ·
     `settlement_quarantined_orders{partition}` · `settlement_dependency_record_failed_total` ·
@@ -181,7 +181,7 @@ stdbuf -oL vmstat -t 5 > "$FILE" & echo $! > "$FILE.pid"
     `settlement_outstanding_jobs`가 모든 파티션에서 0인 최종 스냅샷에서만** 검사(도중에는
     in-flight 때문에 어긋나는 것이 정상)
   - 기존 SLI·정합성 검사 정상
-- [ ] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**
+- [x] **Step 3: 게이트** — 하나라도 어긋나면 **전체 실행 금지**
 
 ---
 
@@ -199,11 +199,11 @@ DB8/N4 실행 → 드레인 → DB8/N4 무결성·리컨실리에이션 → DB8/
   → (통과한 경우에만) DB 재기동·TRUNCATE → DB8/N8 …
 ```
 
-- [ ] **Step 1: 실행** — 캐시 공정성 절차 1~6(수집기 기동 후 k6 전체 실행)
-- [ ] **Step 2: 종료 순서 8단계** — **"각 실행의 종료 순서"를 그대로 수행**한다.
+- [x] **Step 1: 실행** — 캐시 공정성 절차 1~6(수집기 기동 후 k6 전체 실행)
+- [x] **Step 2: 종료 순서 8단계** — **"각 실행의 종료 순서"를 그대로 수행**한다.
   특히 **재기동 전에 final metrics를 저장**(2번)하고, 아래 "무결성 체크리스트"를 그 저장본 기준으로
   수행(3번)한 뒤에 재기동·리컨실리에이션(4~5번)으로 넘어간다. **TRUNCATE는 8번이다**
-- [ ] **Step 3: 회귀 확인** — 30번 DB4/N4 대비
+- [x] **Step 3: 회귀 확인** — 30번 DB4/N4 대비
 
 | 지표 | 30번 DB4/N4 | 판정 |
 |---|---|---|
@@ -216,9 +216,9 @@ DB8/N4 실행 → 드레인 → DB8/N4 무결성·리컨실리에이션 → DB8/
 > **개선이 작아도 중단하지 않는다.** 이 단계의 목적은 **안전 기준선 확보**이지 성능 증명이 아니다.
 > **회귀가 있으면** 중단하고 원인을 규명한다.
 
-- [ ] **Step 4: 1차 안전 게이트** — 아래 "1차 안전 게이트" 기준을 DB8/N4에 적용해 통과 확인.
+- [x] **Step 4: 1차 안전 게이트** — 아래 "1차 안전 게이트" 기준을 DB8/N4에 적용해 통과 확인.
   **실패 시 Phase 2 진행 금지.**
-- [ ] **Step 5: 원본 보존** — `_workspace/db-scaleup-31/db8n4/`에 스냅샷·k6 stdout·
+- [x] **Step 5: 원본 보존** — `_workspace/db-scaleup-31/db8n4/`에 스냅샷·k6 stdout·
   `summary-*.json`·`vmstat`·구간 UTC 시각·리컨실리에이션 결과. **토큰·외부 IP 제거.**
 
 ---
@@ -229,12 +229,12 @@ DB8/N4 실행 → 드레인 → DB8/N4 무결성·리컨실리에이션 → DB8/
 
 `GOEXCHANGE_SETTLEMENT_CONCURRENCY=8`. **캐시 공정성 절차 1~8을 Phase 1과 동일하게 수행.**
 
-- [ ] **Step 1: 기동 로그에서 `concurrency=8` 확인**
-- [ ] **Step 2: 실행** — Phase 1과 같은 절차·같은 수집
-- [ ] **Step 3: 종료 순서 8단계** — Phase 1 Step 2와 동일. **재기동 전 final metrics 저장 →
+- [x] **Step 1: 기동 로그에서 `concurrency=8` 확인**
+- [x] **Step 2: 실행** — Phase 1과 같은 절차·같은 수집
+- [x] **Step 3: 종료 순서 8단계** — Phase 1 Step 2와 동일. **재기동 전 final metrics 저장 →
   무결성 검사 → 재기동·리컨실리에이션 → 수집기 종료 → TRUNCATE** 순서를 지킨다
-- [ ] **Step 4: 1차 안전 게이트** — DB8/N8에 적용. **실패 시 처리율 수치를 읽기 전에 기각**
-- [ ] **Step 5: 원본 보존** — `_workspace/db-scaleup-31/db8n8/`에 동일 구성
+- [x] **Step 4: 1차 안전 게이트** — DB8/N8에 적용. **실패 시 처리율 수치를 읽기 전에 기각**
+- [x] **Step 5: 원본 보존** — `_workspace/db-scaleup-31/db8n8/`에 동일 구성
 
 ---
 
@@ -244,19 +244,19 @@ DB8/N4 실행 → 드레인 → DB8/N4 무결성·리컨실리에이션 → DB8/
 **workload 항목은 재기동 전에 저장한 final metrics 기준**이고, 리컨실리에이션 항목만 재기동
 이후 값을 쓴다:
 
-- [ ] `settlement_terminal_wait_seconds{kind}` count = 정상 처리된 terminal 수
-- [ ] **dispatch wait count = job execution count** — 드레인 완료·모든 파티션 `outstanding_jobs`=0인
+- [x] `settlement_terminal_wait_seconds{kind}` count = 정상 처리된 terminal 수
+- [x] **dispatch wait count = job execution count** — 드레인 완료·모든 파티션 `outstanding_jobs`=0인
   **최종 스냅샷에서만**
-- [ ] batch attempt count ≥ logical batch job count, 차이가 실제 retry 로그와 일치
-- [ ] settlement batch의 trade 합계 = settled trade 증가량
-- [ ] k6 주문 합계 = 서버·DB 주문 합계
-- [ ] **리컨실리에이션(ledger_wallet·asset_conservation)을 이 실행의 최종 데이터에 대해 완주**시켜
+- [x] batch attempt count ≥ logical batch job count, 차이가 실제 retry 로그와 일치
+- [x] settlement batch의 trade 합계 = settled trade 증가량
+- [x] k6 주문 합계 = 서버·DB 주문 합계
+- [x] **리컨실리에이션(ledger_wallet·asset_conservation)을 이 실행의 최종 데이터에 대해 완주**시켜
   4항목 0 확인. `ReconciliationWorker` 기본 주기가 1시간이므로 재기동으로 1회 강제 실행하되,
   **반드시 TRUNCATE 이전**이어야 한다(30번에서 N=4 쪽을 놓친 원인이 TRUNCATE 후 재기동이었다)
-- [ ] CPU 시계열이 부하 구간 전체를 덮고, **첫 데이터 행이 제외**됐는지
-- [ ] 각 구간의 **UTC 시작·종료 기록**이 CPU·Prometheus 스냅샷과 정렬되는지
-- [ ] 두 실행의 수집기 파일이 **단계별로 분리**됐는지
-- [ ] 하나라도 불일치면 **계측 문제로 보고 판정 보류**
+- [x] CPU 시계열이 부하 구간 전체를 덮고, **첫 데이터 행이 제외**됐는지
+- [x] 각 구간의 **UTC 시작·종료 기록**이 CPU·Prometheus 스냅샷과 정렬되는지
+- [x] 두 실행의 수집기 파일이 **단계별로 분리**됐는지
+- [x] 하나라도 불일치면 **계측 문제로 보고 판정 보류**
 
 ---
 
@@ -279,7 +279,7 @@ DB8/N4 실행 → 드레인 → DB8/N4 무결성·리컨실리에이션 → DB8/
 - **count와 비율을 함께 기록**한다(표본이 약 107만 건으로 거의 고정이므로 비율만으로는 오독하기 쉽다).
 - **하드 계약의 판정값은 0건이다.** 30번의 **568건 → 10건처럼 크게 줄어도 개선은 맞지만 채택은
   실패**다. 부분 개선을 통과로 재분류하지 않는다.
-- [ ] **한 항목이라도 실패하면 처리율 수치를 읽기 전에 기각.**
+- [x] **한 항목이라도 실패하면 처리율 수치를 읽기 전에 기각.**
 
 #### 2차 효과 게이트 (1차 통과 시에만)
 
@@ -316,20 +316,20 @@ DB8/N4 실행 → 드레인 → DB8/N4 무결성·리컨실리에이션 → DB8/
 
 ### Phase 4: 문서 + 안전 종료
 
-- [ ] **문서** — `docs/benchmarks/31-<날짜>-db-instance-scaleup.md`:
+- [x] **문서** — `docs/benchmarks/31-<날짜>-db-instance-scaleup.md`:
   머신 타입·vCPU·**RAM 변화 기록** / 캐시 공정성 절차 준수 여부 / 30번 재사용 기준값 명시 /
   **1차 안전 게이트 결과(count + 비율)** / 2차 효과 게이트 / 구간별 계산표 / CPU max·p95·median /
   한계.
-- [ ] **결론 표현을 "DB 인스턴스 증설 효과"로 한정**(CPU 단독이 아님, RAM 동반 증가).
-- [ ] **README**·완료 문서 갱신, commit + 푸시 + **CI green**.
-- [ ] **VM 4대 정지 후 `gcloud compute instances list`로 `TERMINATED` 확인** —
+- [x] **결론 표현을 "DB 인스턴스 증설 효과"로 한정**(CPU 단독이 아님, RAM 동반 증가).
+- [ ] **README**·완료 문서 갱신, commit + 푸시 + **CI green**. — README 갱신 완료, commit·푸시·CI 미수행
+- [x] **VM 4대 정지 후 `gcloud compute instances list`로 `TERMINATED` 확인** —
   "정지 명령을 실행했다"가 아니라 **조회 결과**가 완료 조건이다.
 
 ```bash
 gcloud compute instances stop goexchange-stress-server goexchange-stress-db goexchange-stress-load-gen goexchange-stress-load-gen-b --zone asia-northeast3-a
 ```
 
-- [ ] **DB 머신 타입을 원상 복구할지 결정** — 채택하면 유지, 기각하면 `e2-highcpu-4`로 되돌린다
+- [x] **DB 머신 타입을 원상 복구할지 결정** — 채택하면 유지, 기각하면 `e2-highcpu-4`로 되돌린다
   (비용). 결정을 문서에 기록한다.
 
 ---
