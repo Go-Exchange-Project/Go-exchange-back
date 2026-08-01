@@ -332,7 +332,7 @@ Phase 1~3을 다 합치면 **6~7회 실행**이라 한 세션에 빠듯하다. �
       `32-2026-08-01-capacity-boundary-session-b.md`(**최종 판정**)
 - [x] **README** 갱신 — `docs/refactor/README.md`의 32번 블록을 32-B 판정으로 교체,
       세션 A의 "N=16이 먼저" 결론 무효화 명시
-- [ ] commit + 푸시 + **CI green** — **미수행**
+- [x] commit + 푸시 + **CI green** — `019687b`, Backend CI 4개 job 전부 success
 - [x] **VM 4대 정지 후 `gcloud compute instances list`로 `TERMINATED` 확인** —
   "정지 명령을 실행했다"가 아니라 **조회 결과**가 완료 조건이다
 
