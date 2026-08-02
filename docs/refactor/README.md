@@ -219,14 +219,27 @@ CPU 단독 효과가 아니다. DB4 기준값은 다른 세션·호스트에서 
 **10분 실행에서 750이 실패하는 시점의 DB CPU median은 85%(p95 92)** 다. **원인이 락이나 WAL이면
 `N=16`은 개선이 아니라 지연 악화를 만들 수 있다.** 따라서 `N=16`도 서버 VM 증설도 다음 후보가 아니다.
 
-**다음은 고정 부하에서 정산 비용이 상승하는 원인 진단이다.** 두 단계로 간다 —
-**(a) 정적 DB 조사**(인덱스 정의·사용량, autovacuum·dead tuple·checkpoint·WAL, 정산 SQL의
-`EXPLAIN (ANALYZE, BUFFERS, WAL)`, `pg_stat_statements` 호출당 시간), **(b) 실제 `SettleTradeBatch`를
-DB 크기 × 동시성(N=1/N=8)으로 스윕**. **N=1부터 느려지면 인덱스·WAL·쓰기 증폭, N=8만 느려지면
-락·동시성 경합, 둘 다 평평하면 오더북·job mix·사용자 상태**로 갈린다.
+**33번 — 정산 비용 상승 원인 진단(완료)**
+([33-B](../benchmarks/33-2026-08-02-settlement-cost-growth-diagnostic.md)): DB 크기 3점 ×
+동시성 2점의 **6셀을 2회 스윕**해(로컬 Postgres, `_test.go` 2개만 추가, 배포 바이너리 무변경)
+크기 축과 동시성 축을 분리했다.
 
-> **⚠ `EXPLAIN`만으로는 닫히지 않는다** — 정산 경로의 중심은 INSERT·UPDATE·행 락·COMMIT·WAL이다.
-> **load-gen 2대와 전체 k6 세션은 필요 없지만, 실제 트랜잭션을 돌리는 통제된 부하는 필요하다.**
+- **결론: `trades.buy_order_id`에 인덱스가 없어 `SumBuyerFeesByBuyOrderID`가 매번 `trades`를
+  전수 스캔한다.** `CompleteMarketOrder`만 이 쿼리를 부른다.
+- **크기 축만 움직였을 때 `market_terminal`만 4.9~6.3배 느려지고 `trade_batch`·`cancel_terminal`은
+  run-to-run 분산(최대 34%) 안에서 평평하다.** `full/N8`에서 이 쿼리 하나가 **DB 실행시간의 86%**다.
+  호출 수는 268로 고정인데 평균이 **0.11ms → 115ms**로 오른다.
+- **N=1에서도 같은 기울기가 나온다 → 행 락·동시성 경합이 아니다.** `pg_locks` NOT granted
+  최댓값 0(N=1)/1(N=8), deadlock 0. N=8은 원인이 아니라 **증폭기**다(21.97 → 115.16ms).
+- 12셀 전부 정합성 위반 0(production `ReconciliationWorker`를 그대로 호출).
+
+> **⚠ 로컬은 선별 실험이다.** 기울기가 나왔으므로 **논리적 데이터 크기·SQL 후보를 강하게 지지**하지만,
+> **WAL·스토리지·autovacuum 원인을 기각하지는 못한다** — 그 최종 판단은 GCP에서만 가능하다.
+> 절대 지연(노트북 Docker)도 GCP로 이식되지 않는다.
+
+**이 결과가 `N=16`을 더 멀리 밀어낸다.** 32-B가 본 DB CPU median 85%가 이 전수 스캔으로 상당 부분
+설명될 수 있다. **수정은 33번 범위 밖**이고, 수정 후에는 32-B와 같은 조건(10분 hold, 500/750 VU)에서
+**GCP 재검증**을 해야 판정이 닫힌다.
 
 증설은 그 뒤에 판단한다. **진단이 동시성 부족을 가리킬 때만** 아래로 간다:
 

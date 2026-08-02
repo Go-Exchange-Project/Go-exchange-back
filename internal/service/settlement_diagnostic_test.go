@@ -995,27 +995,27 @@ func TestSettlementDiagnosticHarnessProducesCellResult(t *testing.T) {
 	admin := diagOpenAdmin(t)
 	diagBuildTemplates(t, admin)
 
-	sizes := diagSizeSet()
-	largest := sizes[len(sizes)-1]
+	// 6셀 = {initial, mid, full} × {N=1, N=8}. 각 셀은 자기 크기의 TEMPLATE 복제본에서
+	// 독립 시작한다 — N=1을 돌린 DB에 이어 N=8을 돌리면 앞 실행의 데이터 증가와 캐시가 섞인다.
+	for _, size := range diagSizeSet() {
+		for _, concurrency := range []int{1, 8} {
+			result := diagRunCell(t, admin, size, concurrency)
+			path := diagWriteResult(t, result)
+			t.Logf("셀 결과 기록: %s", path)
+			t.Logf("%s/N%d 종류별: %+v", size.Name, concurrency, result.Ops)
 
-	// 동시성 축의 **양 끝**을 모두 돌린다. N=1과 N=8은 같은 러너를 쓰지만, 동시 실행 수
-	// 단언과 워커 분배는 두 값에서 각각 확인해야 다음 세션이 6셀을 믿고 돌릴 수 있다.
-	for _, concurrency := range []int{1, 8} {
-		result := diagRunCell(t, admin, largest, concurrency)
-		path := diagWriteResult(t, result)
-		t.Logf("셀 결과 기록: %s", path)
-		t.Logf("N=%d 종류별: %+v", concurrency, result.Ops)
-
-		require.NotEmpty(t, result.Ops, "N=%d 종류별 결과가 비어 있다", concurrency)
-		for kind, st := range result.Ops {
-			require.Positive(t, st.Count, "N=%d %s 표본이 없다", concurrency, kind)
-			if kind == string(diagJobTradeBatch) {
-				require.Equal(t, map[string]int{"3": st.Count}, st.BatchSizes,
-					"N=%d batch 크기가 전부 3이 아니다", concurrency)
+			require.NotEmpty(t, result.Ops, "%s/N%d 종류별 결과가 비어 있다", size.Name, concurrency)
+			for kind, st := range result.Ops {
+				require.Positive(t, st.Count, "%s/N%d %s 표본이 없다", size.Name, concurrency, kind)
+				if kind == string(diagJobTradeBatch) {
+					require.Equal(t, map[string]int{"3": st.Count}, st.BatchSizes,
+						"%s/N%d batch 크기가 전부 3이 아니다", size.Name, concurrency)
+				}
 			}
+			require.EqualValues(t, concurrency, result.Workload.MaxInFlight)
+			require.Positive(t, result.DB.WALBytes,
+				"%s/N%d WAL 증가가 0이다 — 아무것도 쓰지 않았다", size.Name, concurrency)
 		}
-		require.EqualValues(t, concurrency, result.Workload.MaxInFlight)
-		require.Positive(t, result.DB.WALBytes, "N=%d WAL 증가가 0이다 — 아무것도 쓰지 않았다", concurrency)
 	}
 }
 
