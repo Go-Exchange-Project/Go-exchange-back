@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -829,7 +830,10 @@ func diagRunCell(t *testing.T, admin *gorm.DB, size diagSize, concurrency int) d
 		var pgVersion string
 		require.NoError(t, db.Raw(`SELECT version()`).Scan(&pgVersion).Error)
 		result.Env["postgres_version"] = pgVersion
-		result.Env["go_os_arch"] = fmt.Sprintf("%s/%s", os.Getenv("GOOS"), os.Getenv("GOARCH"))
+		// GOOS/GOARCH 환경변수는 런타임에 보통 비어 있다 — runtime 패키지가 실제 값이다.
+		// NumCPU는 N=8 셀의 해석에 직접 걸린다(코어보다 동시성이 크면 경합이 섞인다).
+		result.Env["go_os_arch"] = fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+		result.Env["go_num_cpu"] = fmt.Sprint(runtime.NumCPU())
 		var settings []struct{ Name, Setting string }
 		require.NoError(t, db.Raw(`SELECT name, setting FROM pg_settings WHERE name IN
             ('shared_buffers','work_mem','max_wal_size','checkpoint_timeout','synchronous_commit',
