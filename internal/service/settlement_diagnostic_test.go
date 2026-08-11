@@ -31,7 +31,19 @@ import (
 	"gorm.io/gorm"
 )
 
-const diagResultDir = "../../_workspace/settlement-cost-diagnostic"
+const (
+	// 결과 출력 경로만 실행별로 격리한다. workload·fixture·반복 수는 33번과 동일해야
+	// 크기 축 비교가 성립하므로, 이 override는 경로 선택에만 쓴다.
+	diagResultDirEnv     = "GOEXCHANGE_SETTLEMENT_DIAGNOSTIC_RESULT_DIR"
+	defaultDiagResultDir = "../../_workspace/settlement-cost-diagnostic"
+)
+
+func diagResultDir() string {
+	if dir := strings.TrimSpace(os.Getenv(diagResultDirEnv)); dir != "" {
+		return dir
+	}
+	return defaultDiagResultDir
+}
 
 // ---------------------------------------------------------------------------
 // 결과 스키마
@@ -972,9 +984,10 @@ func diagRebuildJobs(t testing.TB, orderIDs []uint) diagFixture {
 func diagWriteResult(t testing.TB, result diagCellResult) string {
 	t.Helper()
 
-	require.NoError(t, os.MkdirAll(diagResultDir, 0o755))
+	dir := diagResultDir()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
 	name := fmt.Sprintf("cell-%s-n%d.json", result.Size.Name, result.Concurrency)
-	path := filepath.Join(diagResultDir, name)
+	path := filepath.Join(dir, name)
 	data, err := json.MarshalIndent(result, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0o644))
@@ -990,6 +1003,19 @@ func diagWriteResult(t testing.TB, result diagCellResult) string {
 //
 // 가장 큰 크기(32-B 종료 규모) × N=8을 고른다. 여섯 셀 중 가장 무거운 조합이므로,
 // 이것이 통과하면 나머지 다섯도 자원·시간 면에서 통과한다.
+// 출력 경로만 바뀌고 기본값은 33번 위치 그대로여야 한다. 기본값이 바뀌면 기존
+// 산출물과 새 측정이 같은 디렉터리에서 섞인다.
+func TestSettlementDiagnosticResultDirUsesOverride(t *testing.T) {
+	want := t.TempDir()
+	t.Setenv(diagResultDirEnv, want)
+	require.Equal(t, want, diagResultDir())
+}
+
+func TestSettlementDiagnosticResultDirDefaultsToExistingLocation(t *testing.T) {
+	t.Setenv(diagResultDirEnv, "")
+	require.Equal(t, defaultDiagResultDir, diagResultDir())
+}
+
 func TestSettlementDiagnosticHarnessProducesCellResult(t *testing.T) {
 	diagRequireOptIn(t)
 	admin := diagOpenAdmin(t)
