@@ -449,6 +449,11 @@ go test ./internal/service -run '^TestSettlementDiagnosticHarnessProducesCellRes
 
 Expected: 별도 디렉터리에 여섯 JSON 생성.
 
+> **33번과 다른 점 — 결과 문서의 비교 조건에 적는다.** 33번은 두 회차 사이에 postgres를 재기동하지
+> 않았다. 여기서는 재기동해 buffer cache·통계 이월을 끊는다(개선 방향). 판정은 절대 임계값
+> `≤1.40`이라 영향받지 않지만, **33번의 "원시 최대 34%"·"중앙값 평평 밴드 1.33"은 재기동 없는
+> 프로토콜에서 나온 값**이므로 분산을 직접 비교하지 않는다.
+
 - [ ] **Step 4: 로컬 gate를 판정한다**
 
 ```powershell
