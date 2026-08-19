@@ -79,6 +79,11 @@ const defaultSnapshotInterval = 100 * time.Millisecond
 var engineInstanceCounter uint64
 
 type CancelOrderCommand struct {
+	// CommandID는 이 취소를 내구 기록한 cancel_commands 행이다. 엔진은 값을
+	// 해석하지 않고 OrderCancelled에 그대로 실어 보내기만 한다 — outbox가 execution
+	// 행 INSERT와 이 command의 PROCESSED를 한 트랜잭션에 묶을 때 필요하다.
+	// 0이면 command 없이 들어온 취소이며 outbox는 완료 대상에서 제외한다.
+	CommandID  uint64
 	CoinSymbol string
 	OrderID    uint
 	Side       model.OrderSide
@@ -110,6 +115,7 @@ type MarketOrderDone struct {
 // OrderCancelled는 취소로 오더북에서 실제 제거된 주문의 실행 이벤트 페이로드다.
 // ProcessOrderCancellation이 OrderID로 DB에서 주문을 재조회하므로 식별자만 담는다.
 type OrderCancelled struct {
+	CommandID     uint64
 	OrderID       uint
 	CoinSymbol    string
 	Side          model.OrderSide
@@ -607,6 +613,7 @@ func (me *MatchingEngine) emitOrderCancelled(cmd CancelOrderCommand) {
 	_, eventID := me.nextTradeEvent()
 	me.ExecutionCh <- ExecutionEvent{
 		OrderCancelled: &OrderCancelled{
+			CommandID:     cmd.CommandID,
 			OrderID:       cmd.OrderID,
 			CoinSymbol:    cmd.CoinSymbol,
 			Side:          cmd.Side,

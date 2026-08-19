@@ -115,6 +115,7 @@ func TestShardedEngineCancelRoutesToOwningShard(t *testing.T) {
 	require.Len(t, snap.Bids, 1)
 
 	result := se.CancelOrder(CancelOrderCommand{
+		CommandID:  88,
 		CoinSymbol: "BTC",
 		OrderID:    1,
 		Side:       model.OrderSideBuy,
@@ -122,6 +123,16 @@ func TestShardedEngineCancelRoutesToOwningShard(t *testing.T) {
 	})
 	assert.True(t, result.Removed)
 	assert.NoError(t, result.Err)
+
+	// 소유 샤드를 거쳐도 command 식별자가 이벤트까지 살아 있어야 outbox가
+	// 그 command를 같은 트랜잭션에서 완료할 수 있다.
+	select {
+	case event := <-se.ExecutionCh:
+		require.NotNil(t, event.OrderCancelled)
+		assert.Equal(t, uint64(88), event.OrderCancelled.CommandID)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sharded execution event")
+	}
 
 	// 취소는 오더북에 즉시 반영되지만, 캐시는 다음 코얼레싱 티커가 flush해야
 	// 갱신된다 — 그 스냅샷을 기다린 뒤 캐시를 읽는다.

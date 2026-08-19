@@ -693,6 +693,7 @@ func TestCancelOrder_EmitsOrderCancelledEvent(t *testing.T) {
 	submitAndWaitSnapshot(t, me, order)
 
 	result := me.CancelOrder(CancelOrderCommand{
+		CommandID:  77,
 		CoinSymbol: "BTC",
 		OrderID:    order.ID,
 		Side:       order.Side,
@@ -707,6 +708,32 @@ func TestCancelOrder_EmitsOrderCancelledEvent(t *testing.T) {
 	assert.Equal(t, "BTC", event.OrderCancelled.CoinSymbol)
 	assert.Equal(t, model.OrderSideBuy, event.OrderCancelled.Side)
 	assert.NotEmpty(t, event.OrderCancelled.EngineEventID)
+
+	// outbox가 execution 행 INSERT와 command PROCESSED를 한 트랜잭션에 묶으려면
+	// 어떤 이벤트가 어떤 command에서 왔는지 이벤트 자체에 실려 있어야 한다.
+	assert.Equal(t, uint64(77), event.OrderCancelled.CommandID)
+}
+
+// CommandID가 0이면 outbox는 그 이벤트를 command 완료 대상에서 제외한다.
+// 엔진이 값을 지어내면 안 되고, 없는 채로 그대로 흘러야 한다.
+func TestCancelOrder_WithoutCommandID_EmitsZero(t *testing.T) {
+	me := newTestEngine()
+	me.Start()
+
+	order := testOrder(31, "BTC", model.OrderSideBuy, 50000, 2)
+	submitAndWaitSnapshot(t, me, order)
+
+	result := me.CancelOrder(CancelOrderCommand{
+		CoinSymbol: "BTC",
+		OrderID:    order.ID,
+		Side:       order.Side,
+		Price:      order.Price,
+	})
+	require.NoError(t, result.Err)
+
+	event := requireNextExecutionEvent(t, me)
+	require.NotNil(t, event.OrderCancelled)
+	assert.Zero(t, event.OrderCancelled.CommandID)
 }
 
 func TestCancelOrder_NotRemoved_NoOrderCancelledEvent(t *testing.T) {
