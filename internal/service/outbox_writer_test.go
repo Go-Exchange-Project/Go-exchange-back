@@ -14,13 +14,14 @@ import (
 )
 
 type fakeOutboxInserter struct {
-	mu      sync.Mutex
-	batches [][]*model.TradeOutboxEvent
-	errs    []error // 호출마다 하나씩 소비, 소진되면 성공
-	nextID  uint64
+	mu         sync.Mutex
+	batches    [][]*model.TradeOutboxEvent
+	commandIDs [][]uint64 // 배치마다 함께 전달된 취소 command ID
+	errs       []error    // 호출마다 하나씩 소비, 소진되면 성공
+	nextID     uint64
 }
 
-func (f *fakeOutboxInserter) InsertBatch(events []*model.TradeOutboxEvent) error {
+func (f *fakeOutboxInserter) InsertBatchAndMarkCancelCommands(events []*model.TradeOutboxEvent, commandIDs []uint64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.errs) > 0 {
@@ -37,7 +38,19 @@ func (f *fakeOutboxInserter) InsertBatch(events []*model.TradeOutboxEvent) error
 	batch := make([]*model.TradeOutboxEvent, len(events))
 	copy(batch, events)
 	f.batches = append(f.batches, batch)
+	ids := make([]uint64, len(commandIDs))
+	copy(ids, commandIDs)
+	f.commandIDs = append(f.commandIDs, ids)
 	return nil
+}
+
+func (f *fakeOutboxInserter) lastCommandIDs() []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.commandIDs) == 0 {
+		return nil
+	}
+	return f.commandIDs[len(f.commandIDs)-1]
 }
 
 func (f *fakeOutboxInserter) batchSizes() []int {
@@ -334,4 +347,73 @@ func TestOutboxWriterSkipsUnencodableEvent(t *testing.T) {
 
 	assert.Equal(t, []int{1}, repo.batchSizes())
 	require.Len(t, collector.snapshot(), 1)
+}
+
+func outboxTestCancelledWithCommand(commandID uint64, orderID uint) matching.ExecutionEvent {
+	return matching.ExecutionEvent{OrderCancelled: &matching.OrderCancelled{
+		CommandID:     commandID,
+		OrderID:       orderID,
+		CoinSymbol:    "BTC",
+		Side:          model.OrderSideBuy,
+		EngineEventID: "engine-test-outbox-cancel",
+	}}
+}
+
+// 배치에는 여러 주문의 이벤트가 섞인다. command 완료 대상은 취소 이벤트가 실어 온
+// nonzero ID뿐이다.
+func TestOutboxWriterCollectsOnlyNonzeroCancelCommandIDs(t *testing.T) {
+	repo := &fakeOutboxInserter{}
+	source := make(chan matching.ExecutionEvent, 4)
+	writer := &OutboxWriter{Repo: repo, Source: source, BatchSize: 4, FlushInterval: time.Millisecond}
+
+	source <- outboxTestCancelledWithCommand(11, 42)
+	source <- outboxTestTrade("BTC", 1)
+	source <- outboxTestCancelledWithCommand(0, 43) // command 없이 들어온 취소
+	source <- outboxTestCancelledWithCommand(12, 44)
+	close(source)
+	writer.Run()
+
+	require.Len(t, repo.batches, 1)
+	assert.Equal(t, []uint64{11, 12}, repo.lastCommandIDs())
+}
+
+// 직렬화에 실패한 이벤트의 command를 완료시키면 outbox에 없는 취소가 PROCESSED가
+// 된다 — 그 취소는 replay로도 재실행으로도 복구되지 않는다.
+func TestOutboxWriterSkipsCommandIDOfUnencodableEvent(t *testing.T) {
+	repo := &fakeOutboxInserter{}
+	source := make(chan matching.ExecutionEvent, 2)
+	writer := &OutboxWriter{Repo: repo, Source: source, BatchSize: 2, FlushInterval: time.Millisecond}
+
+	source <- matching.ExecutionEvent{} // 어느 필드도 없는 이벤트는 직렬화 불가
+	source <- outboxTestCancelledWithCommand(21, 42)
+	close(source)
+	writer.Run()
+
+	require.Len(t, repo.batches, 1)
+	assert.Len(t, repo.batches[0], 1)
+	assert.Equal(t, []uint64{21}, repo.lastCommandIDs())
+}
+
+// 재시도는 같은 배치와 같은 command ID로 이뤄져야 한다. Forward는 커밋 성공 후
+// 한 번뿐이다.
+func TestOutboxWriterRetriesWithSameCancelCommandIDs(t *testing.T) {
+	repo := &fakeOutboxInserter{errs: []error{errors.New("db down"), errors.New("db down")}}
+	source := make(chan matching.ExecutionEvent, 1)
+	var forwarded int
+	writer := &OutboxWriter{
+		Repo:           repo,
+		Source:         source,
+		BatchSize:      1,
+		FlushInterval:  time.Millisecond,
+		RetryBaseDelay: time.Millisecond,
+		Forward:        func(OutboxEvent) { forwarded++ },
+	}
+
+	source <- outboxTestCancelledWithCommand(31, 42)
+	close(source)
+	writer.Run()
+
+	require.Len(t, repo.batches, 1, "성공한 커밋만 기록된다")
+	assert.Equal(t, []uint64{31}, repo.lastCommandIDs())
+	assert.Equal(t, 1, forwarded)
 }

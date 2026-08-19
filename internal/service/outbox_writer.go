@@ -30,7 +30,7 @@ type OutboxEvent struct {
 }
 
 type outboxBatchInserter interface {
-	InsertBatch(events []*model.TradeOutboxEvent) error
+	InsertBatchAndMarkCancelCommands(events []*model.TradeOutboxEvent, commandIDs []uint64) error
 }
 
 // OutboxWriter는 엔진 ExecutionCh의 유일한 소비자로, 이벤트를 배치로 모아
@@ -87,6 +87,7 @@ func (w *OutboxWriter) collectBatch(batch []matching.ExecutionEvent) ([]matching
 func (w *OutboxWriter) flushAndForward(events []matching.ExecutionEvent) {
 	rows := make([]*model.TradeOutboxEvent, 0, len(events))
 	forwarded := make([]matching.ExecutionEvent, 0, len(events))
+	var commandIDs []uint64
 	for _, event := range events {
 		row, err := NewTradeOutboxEvent(event)
 		if err != nil {
@@ -95,6 +96,11 @@ func (w *OutboxWriter) flushAndForward(events []matching.ExecutionEvent) {
 		}
 		rows = append(rows, row)
 		forwarded = append(forwarded, event)
+		// 직렬화에 성공한 뒤에만 수집한다. 배치 원본에서 먼저 모으면 outbox에
+		// 남지 않은 취소의 command만 PROCESSED가 되는 유실 경로가 열린다.
+		if event.OrderCancelled != nil && event.OrderCancelled.CommandID != 0 {
+			commandIDs = append(commandIDs, event.OrderCancelled.CommandID)
+		}
 	}
 	if len(rows) == 0 {
 		return
@@ -103,7 +109,7 @@ func (w *OutboxWriter) flushAndForward(events []matching.ExecutionEvent) {
 	delay := w.retryBaseDelay()
 	for {
 		start := time.Now()
-		err := w.Repo.InsertBatch(rows)
+		err := w.Repo.InsertBatchAndMarkCancelCommands(rows, commandIDs)
 		if err == nil {
 			metrics.TradeOutboxFlushDuration.Observe(time.Since(start).Seconds())
 			metrics.TradeOutboxFlushBatchSize.Observe(float64(len(rows)))
