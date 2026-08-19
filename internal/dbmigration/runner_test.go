@@ -43,6 +43,35 @@ func TestTradesBuyOrderIDIndexMigrationIsConcurrentAndValidated(t *testing.T) {
 	assert.Contains(t, sql, "DROP INDEX CONCURRENTLY IF EXISTS idx_trades_buy_order_id")
 }
 
+// 007은 AutoMigrate가 먼저 만든 테이블 위에서도 같은 계약을 만들어야 한다. 그래서
+// CREATE TABLE IF NOT EXISTS 뒤에 이름이 고정된 constraint를 보강하는 형태다.
+// UNIQUE는 부분 인덱스가 아니다 — PENDING만 막으면 command가 PROCESSED이고 정산이
+// 아직 안 끝난 창에서 두 번째 command가 생겨 ORDER_RELEASE가 두 번 날 수 있다.
+func TestCancelCommandsMigrationDeclaresDurableContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(migrationsDir(), "007_cancel_commands.sql"))
+	require.NoError(t, err)
+	sql := string(raw)
+
+	assert.Contains(t, sql, "CREATE TABLE IF NOT EXISTS cancel_commands")
+
+	// price가 없으면 worker가 matching.CancelOrderCommand를 복원할 수 없다.
+	assert.Contains(t, sql, "price")
+	assert.Contains(t, sql, "NUMERIC")
+
+	assert.Contains(t, sql, "cancel_commands_order_unique")
+	assert.Contains(t, sql, "UNIQUE (order_id)")
+	assert.NotContains(t, sql, "UNIQUE INDEX cancel_commands_order_unique",
+		"UNIQUE를 부분 인덱스로 만들면 PROCESSED 이후 창이 다시 열린다")
+
+	assert.Contains(t, sql, "cancel_commands_status_check")
+	assert.Contains(t, sql, "'PENDING'")
+	assert.Contains(t, sql, "'PROCESSED'")
+	assert.Contains(t, sql, "'NOOP'")
+
+	assert.Contains(t, sql, "CREATE INDEX IF NOT EXISTS cancel_commands_pending")
+	assert.Contains(t, sql, "WHERE status = 'PENDING'")
+}
+
 func TestSQLDBFromGORMRejectsNil(t *testing.T) {
 	sqlDB, err := sqlDBFromGORM(nil)
 
