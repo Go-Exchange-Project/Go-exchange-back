@@ -2,8 +2,11 @@
 -- 취소 의도를 엔진에 넣기 전에 내구 기록하는 command 테이블이다. 사용자에게 접수를
 -- 알린 뒤 프로세스가 죽어도 재기동한 worker가 이 행을 보고 취소를 다시 실행한다.
 --
--- 앱은 AutoMigrate를 먼저 돌린 뒤 goose를 실행하므로 "테이블이 이미 있음"도 반드시
--- 통과해야 한다. 그래서 CREATE TABLE IF NOT EXISTS 뒤에 이름이 고정된 제약을 보강한다.
+-- 이 테이블의 스키마는 007이 단독으로 소유한다. cancel_commands는 AutoMigrate 목록에
+-- 넣지 않는다 -- 넣으면 GORM이 아래 order_id UNIQUE를 자기 명명규칙 이름
+-- (uni_cancel_commands_order_id)으로 DROP하려 해서 두 번째 부팅부터 실패한다.
+--
+-- IF NOT EXISTS와 조건부 ADD CONSTRAINT는 재실행·부분 적용 상태에 대한 방어다.
 
 CREATE TABLE IF NOT EXISTS cancel_commands (
     id            BIGSERIAL PRIMARY KEY,
@@ -19,8 +22,8 @@ CREATE TABLE IF NOT EXISTS cancel_commands (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- price가 없으면 worker가 matching.CancelOrderCommand를 복원할 수 없다. AutoMigrate가
--- 먼저 만든 컬럼이 nullable로 남아 있을 수 있으므로 여기서 명시적으로 고정한다.
+-- price가 없으면 worker가 matching.CancelOrderCommand를 복원할 수 없다. 이전 부분
+-- 적용으로 컬럼이 nullable로 남아 있을 수 있으므로 여기서 명시적으로 고정한다.
 ALTER TABLE cancel_commands
     ALTER COLUMN price TYPE NUMERIC,
     ALTER COLUMN price SET NOT NULL;

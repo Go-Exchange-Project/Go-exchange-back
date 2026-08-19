@@ -43,8 +43,8 @@ func TestTradesBuyOrderIDIndexMigrationIsConcurrentAndValidated(t *testing.T) {
 	assert.Contains(t, sql, "DROP INDEX CONCURRENTLY IF EXISTS idx_trades_buy_order_id")
 }
 
-// 007은 AutoMigrate가 먼저 만든 테이블 위에서도 같은 계약을 만들어야 한다. 그래서
-// CREATE TABLE IF NOT EXISTS 뒤에 이름이 고정된 constraint를 보강하는 형태다.
+// cancel_commands 스키마는 007이 단독으로 소유한다(AutoMigrate 대상이 아니다).
+// IF NOT EXISTS와 조건부 ADD CONSTRAINT는 재실행·부분 적용 상태에 대한 방어다.
 // UNIQUE는 부분 인덱스가 아니다 — PENDING만 막으면 command가 PROCESSED이고 정산이
 // 아직 안 끝난 창에서 두 번째 command가 생겨 ORDER_RELEASE가 두 번 날 수 있다.
 func TestCancelCommandsMigrationDeclaresDurableContract(t *testing.T) {

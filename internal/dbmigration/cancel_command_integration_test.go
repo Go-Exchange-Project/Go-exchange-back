@@ -11,8 +11,8 @@ import (
 )
 
 // 정적 문자열 검사(runner_test.go)는 migration이 무엇을 쓰려 했는지만 본다.
-// AutoMigrate가 먼저 만든 테이블 위에 007이 실제로 constraint를 보강했는지는
-// 카탈로그로만 확인할 수 있다.
+// 007이 실제로 만든 테이블과 제약이 계획과 같은지는 카탈로그로만 확인할 수 있다.
+// 이 테이블은 AutoMigrate 대상이 아니므로 여기 보이는 것은 전부 007의 결과다.
 func TestCancelCommandsIntegration(t *testing.T) {
 	db := testdb.OpenIntegrationDB(t)
 
