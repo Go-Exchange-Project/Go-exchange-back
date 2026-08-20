@@ -242,3 +242,51 @@ func TestIntegrationCancelAfterOrderTerminalIsRejected(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, ErrorKindConflict, kind)
 }
+
+// 내구 기록에 실패했는데 400을 돌려주면 클라이언트는 "요청이 잘못됐다"로 읽고
+// 재시도하지 않는다. command는 order_id 단위로 멱등하므로 재시도가 안전하며,
+// 그 사실을 알리는 상태 코드는 503이다.
+func TestIntegrationCancelReportsDatabaseFailureAsUnavailable(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(28)
+	defer cleanupServiceUsers(t, db, userID)
+
+	order := seedCancellableBuyOrder(t, db, userID)
+
+	// 이 커넥션은 이 테스트 전용이다(테스트마다 새로 열린다). 닫아서 DB 장애를 만든다.
+	broken := openServiceIntegrationDB(t)
+	sqlDB, err := broken.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	orderService := newIntegrationOrderService(broken, nil)
+	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	kind, ok := DomainErrorKind(err)
+	require.True(t, ok, "DB 장애가 도메인 에러로 감싸지지 않았다: %v", err)
+	assert.Equal(t, ErrorKindUnavailable, kind)
+
+	assertNoCancelCommandForOrder(t, db, order.ID)
+}
+
+// repository 미배선도 요청자 잘못이 아니다.
+func TestIntegrationCancelWithoutCommandRepositoryIsUnavailable(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(29)
+	defer cleanupServiceUsers(t, db, userID)
+
+	order := seedCancellableBuyOrder(t, db, userID)
+
+	orderService := newIntegrationOrderService(db, nil)
+	orderService.CancelCommandRepository = nil
+
+	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	kind, ok := DomainErrorKind(err)
+	require.True(t, ok)
+	assert.Equal(t, ErrorKindUnavailable, kind)
+}

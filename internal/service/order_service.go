@@ -232,13 +232,15 @@ func (s *OrderService) BuildOrder(input CreateOrderInput) (*model.Order, error) 
 	return BuildOrderWithRegistry(input, s.marketRulesRegistry())
 }
 
-// CancelOrder는 DB 상태를 직접 확정하지 않는다(A-4 취소-체결 레이스 수정). 이
-// 함수는 소유권·취소가능 상태·시장가 여부만 검증하고, 실제 취소는 매칭 엔진에
-// 커맨드로 접수한다. 엔진이 Removed=true를 반환하면(=오더북에서 실제 제거)
-// ExecutionCh에 OrderCancelled 이벤트가 방출되고, 같은 주문의 선행 체결들
-// 뒤에 FIFO로 정렬된 그 이벤트를 정산 파이프라인이 ProcessOrderCancellation으로
-// 소비할 때 비로소 hold 해제·CANCELLED 커밋이 일어난다. 즉 이 함수가 반환하는
-// 시점에는 DB가 아직 PENDING/PARTIAL일 수 있다 — 응답은 "확정"이 아니라 "접수"다.
+// CancelOrder는 소유권·취소가능 상태·시장가 여부를 검증한 뒤, 취소 의도를
+// cancel_commands에 내구 기록하는 것으로 끝난다. 매칭 엔진은 여기서 호출하지
+// 않는다 — 엔진 호출은 내구 기록보다 앞설 수 없기 때문이다.
+//
+// 이후 CancelCommandWorker가 그 command를 엔진에 전달하고, 엔진이 방출한
+// OrderCancelled 이벤트를 정산 파이프라인이 ProcessOrderCancellation으로 소비할 때
+// 비로소 hold 해제·CANCELLED 커밋이 일어난다. 즉 이 함수가 반환하는 시점에는
+// 주문이 아직 오더북에 있고 DB도 PENDING/PARTIAL이다 — 응답은 "확정"이 아니라
+// "접수"이고, 그 사이에는 추가 체결 가능 창이 있다.
 func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, error) {
 	if input.UserID == 0 {
 		return nil, NewValidationErrorf("user_id is required")
@@ -248,7 +250,7 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 	}
 
 	if s.CancelCommandRepository == nil {
-		return nil, fmt.Errorf("cancel command repository is not configured")
+		return nil, NewUnavailableErrorf("cancel command repository is not configured")
 	}
 
 	var command *model.CancelCommand
@@ -286,7 +288,17 @@ func (s *OrderService) CancelOrder(input CancelOrderInput) (*CancelOrderResult, 
 		command = persisted
 		return nil
 	}); err != nil {
-		return nil, err
+		// 검증 실패(소유권·상태·시장가)와 주문 없음은 그대로 4xx다. 그 외는 DB가
+		// 취소 의도를 받아주지 못한 인프라 실패이므로 503으로 알린다 — 400으로
+		// 떨어지면 클라이언트가 "요청이 잘못됐다"로 읽고 재시도하지 않는다.
+		// command는 order_id 단위로 멱등하므로 재시도는 안전하다.
+		if _, ok := DomainErrorKind(err); ok {
+			return nil, err
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		return nil, NewUnavailableErrorf("cancel command could not be recorded, please retry: %v", err)
 	}
 
 	// 커밋된 뒤에만 깨운다. 먼저 깨우면 worker가 아직 보이지 않는 행을 찾으러 간다.

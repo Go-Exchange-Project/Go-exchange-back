@@ -737,9 +737,11 @@ func TestIntegrationSettleTradeRejectsCancelledSellOrder(t *testing.T) {
 // (A-4 수정으로 이 테스트가 검증하던 "DB 우선 CANCELLED 커밋 → 뒤늦은 체결
 // 거부"는 더 이상 CancelOrder의 동작이 아니다 — CancelOrder는 DB를 건드리지
 // 않으므로 이 테스트가 재현하던 시나리오 자체가 성립하지 않는다. 대체 증명은
-// TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements(레이스
-// 해소 자체를 증명)와 TestIntegrationCancelReturnsConflictWhenOrderMissingFromEngineBook
-// (엔진 미스가 409로 매핑됨을 증명)로 옮겨졌다.
+// TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements로
+// 옮겨졌다.
+//
+// 엔진 미스는 이제 409가 아니다 — CancelOrder가 엔진을 호출하지 않으므로
+// 오더북에 없는 주문도 접수된다(TestIntegrationCancelAcceptsOrderMissingFromEngineBook).
 
 func TestIntegrationCancelPendingBuyOrderReleasesKRWAndRemovesFromEngine(t *testing.T) {
 	db := openServiceIntegrationDB(t)

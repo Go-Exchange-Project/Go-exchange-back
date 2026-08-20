@@ -161,3 +161,19 @@ func TestIntegrationCancelOrderHandlerKeepsErrorMapping(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	})
 }
+
+// 내구 접수 실패는 4xx가 아니다. 503이어야 클라이언트가 재시도한다.
+func TestIntegrationCancelOrderHandlerMapsDatabaseFailureTo503(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	order := seedCancellableOrder(t, db, 909005)
+
+	broken := testdb.OpenIntegrationDB(t)
+	sqlDB, err := broken.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	handler := newIntegrationOrderHandler(broken)
+	recorder := newCancelHandlerRequest(t, handler, order.UserID, order.ID)
+
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code, "body=%s", recorder.Body.String())
+}
