@@ -21,7 +21,7 @@ const (
 )
 
 type cancelCommandStore interface {
-	FindPending(limit int) ([]model.CancelCommand, error)
+	FindPending(excluded []uint64, limit int) ([]model.CancelCommand, error)
 	FindStatuses(ids []uint64) ([]model.CancelCommand, error)
 	MarkNoop(id uint64) (*model.CancelCommand, error)
 	RecordAttempt(id uint64, message string) error
@@ -144,6 +144,13 @@ func (w *CancelCommandWorker) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 
+		// ctx.Done()과 wake/ticker/result가 동시에 준비되면 select가 다른 case를
+		// 고를 수 있다. 그대로 두면 종료 중에 새 엔진 호출이 시작된다.
+		if ctx.Err() != nil {
+			w.drainDispatches(dispatching)
+			return
+		}
+
 		w.releaseCompleted()
 		w.warnStaleAwaiting()
 		dispatching += w.dispatchReady(dispatching)
@@ -200,29 +207,38 @@ func (w *CancelCommandWorker) dispatchReady(dispatching int) int {
 		return 0
 	}
 
-	pending, err := w.commands.FindPending(w.scanLimit())
+	// 아직 때가 아닌 command를 SQL에서 먼저 뺀다. 조회한 뒤 애플리케이션에서
+	// 빼면 앞선 LIMIT개가 전부 in-flight일 때 그 뒤가 영영 조회되지 않는다.
+	pending, err := w.commands.FindPending(w.blockedIDs(), w.scanLimit())
 	if err != nil {
 		w.logf("cancel worker: pending scan failed: %v", err)
 		return 0
 	}
 
-	now := time.Now()
 	started := 0
 	for _, command := range pending {
 		if started >= free {
 			break
-		}
-		if entry, ok := w.inFlight[command.ID]; ok {
-			// backoff 중인 command를 polling이 즉시 되던지면 backoff가 무의미해진다.
-			if entry.phase != cancelCommandBackoff || now.Before(entry.nextAttemptAt) {
-				continue
-			}
 		}
 		w.inFlight[command.ID] = w.markDispatching(command.ID)
 		go w.dispatch(command)
 		started++
 	}
 	return started
+}
+
+// blockedIDs는 지금 다시 투입하면 안 되는 command다: 엔진 호출 중, outbox 커밋
+// 대기 중, 그리고 아직 nextAttemptAt에 도달하지 않은 backoff.
+func (w *CancelCommandWorker) blockedIDs() []uint64 {
+	now := time.Now()
+	blocked := make([]uint64, 0, len(w.inFlight))
+	for id, entry := range w.inFlight {
+		if entry.phase == cancelCommandBackoff && !now.Before(entry.nextAttemptAt) {
+			continue
+		}
+		blocked = append(blocked, id)
+	}
+	return blocked
 }
 
 func (w *CancelCommandWorker) markDispatching(id uint64) *cancelCommandInFlight {
@@ -314,20 +330,21 @@ func (w *CancelCommandWorker) nextBackoff(current time.Duration) time.Duration {
 	return next
 }
 
-// drainDispatches는 이미 시작한 엔진 호출의 결과만 회수한다. 종료 시 새 dispatch는
-// 하지 않으므로 in-flight 상태는 프로세스와 함께 사라지고, 남은 PENDING command는
-// 재기동 후 다시 실행된다.
+// drainDispatches는 이미 시작한 엔진 호출이 전부 반환할 때까지 기다린다.
+// 여기서 자체 상한을 두면 안 된다 — 엔진의 CancelOrder는 enqueue 1초와 response
+// 1초를 순차로 기다려 한 호출만으로 약 2초가 걸릴 수 있고, 그 호출이 살아 있는
+// 채로 Run이 반환하면 종료 순서상 뒤에 오는 엔진 정지와 경쟁한다.
+// 종료 상한은 이 worker를 정지시키는 lifecycle이 소유한다.
+//
+// 종료 시 새 dispatch는 하지 않으므로 in-flight 상태는 프로세스와 함께 사라지고,
+// 남은 PENDING command는 재기동 후 다시 실행된다.
 func (w *CancelCommandWorker) drainDispatches(dispatching int) {
-	deadline := time.After(2 * time.Second)
 	for dispatching > 0 {
 		select {
 		case <-w.results:
 			dispatching--
 		case done := <-w.queries:
 			done <- len(w.inFlight)
-		case <-deadline:
-			w.logf("cancel worker: %d dispatch(es) still running at shutdown", dispatching)
-			return
 		}
 	}
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -34,17 +35,29 @@ func newFakeCancelCommandStore(commands ...*model.CancelCommand) *fakeCancelComm
 	return store
 }
 
-func (f *fakeCancelCommandStore) FindPending(limit int) ([]model.CancelCommand, error) {
+// FindPending은 실제 repository와 같이 ID 오름차순으로, 제외 목록을 LIMIT보다
+// 먼저 적용해 돌려준다. 이 순서가 아니면 기아 시나리오가 재현되지 않는다.
+func (f *fakeCancelCommandStore) FindPending(excluded []uint64, limit int) ([]model.CancelCommand, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scanCount++
 
+	skip := make(map[uint64]struct{}, len(excluded))
+	for _, id := range excluded {
+		skip[id] = struct{}{}
+	}
+
 	var pending []model.CancelCommand
 	for _, command := range f.commands {
-		if command.Status == model.CancelCommandStatusPending {
-			pending = append(pending, *command)
+		if command.Status != model.CancelCommandStatusPending {
+			continue
 		}
+		if _, blocked := skip[command.ID]; blocked {
+			continue
+		}
+		pending = append(pending, *command)
 	}
+	sort.Slice(pending, func(i, j int) bool { return pending[i].ID < pending[j].ID })
 	if len(pending) > limit {
 		pending = pending[:limit]
 	}
@@ -391,4 +404,94 @@ func TestCancelCommandWorkerWakeIsNonBlocking(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Wake가 블록됐다")
 	}
+}
+
+// 앞선 ScanLimit개가 전부 in-flight여도 그 뒤의 command가 dispatch돼야 한다.
+// 제외를 SQL LIMIT 이후에 적용하면 129번째는 조회조차 되지 않아 영구히 굶는다.
+func TestCancelCommandWorkerDoesNotStarveCommandsBeyondScanLimit(t *testing.T) {
+	const scanLimit = 8
+	var commands []*model.CancelCommand
+	var orders []*model.Order
+	for id := uint64(1); id <= scanLimit+1; id++ {
+		commands = append(commands, testCancelCommand(id, uint(100+id)))
+		orders = append(orders, testOpenOrder(uint(100+id)))
+	}
+
+	store := newFakeCancelCommandStore(commands...)
+	// 엔진은 성공 반환하지만 store가 PROCESSED로 바뀌지 않으므로 모두
+	// awaiting_outbox에 쌓인다.
+	engine := &fakeCancelEngine{result: matching.CancelOrderResult{Removed: true}}
+	worker := NewCancelCommandWorker(store, newFakeOrderReader(orders...), engine)
+	worker.PollInterval = 5 * time.Millisecond
+	worker.ScanLimit = scanLimit
+	worker.MaxDispatch = 2
+
+	startTestWorker(t, worker)
+
+	last := uint64(scanLimit + 1)
+	require.Eventually(t, func() bool { return engine.callsFor(last) == 1 }, 3*time.Second, 5*time.Millisecond,
+		"앞선 %d개가 in-flight라 %d번 command가 조회되지 않았다", scanLimit, last)
+}
+
+// 종료 상한은 lifecycle이 소유한다. Run은 시작한 엔진 호출이 반환하기 전에
+// 종료 완료를 보고하면 안 된다 — 그러면 뒤이은 엔진 정지와 경쟁한다.
+func TestCancelCommandWorkerRunBlocksUntilInFlightDispatchReturns(t *testing.T) {
+	store := newFakeCancelCommandStore(testCancelCommand(1, 100))
+	release := make(chan struct{})
+	engine := &fakeCancelEngine{result: matching.CancelOrderResult{Removed: true}, release: release}
+	worker := NewCancelCommandWorker(store, newFakeOrderReader(testOpenOrder(100)), engine)
+	worker.PollInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool { return engine.callsFor(1) == 1 }, time.Second, 5*time.Millisecond)
+	cancel()
+
+	// 엔진의 CancelOrder는 enqueue 1초 + response 1초로 약 2초가 걸릴 수 있다.
+	// 그보다 짧게 기다리면 "worker가 자체 상한을 두고 먼저 포기하는" 결함을
+	// 구분하지 못한다.
+	select {
+	case <-done:
+		t.Fatal("진행 중인 엔진 호출을 남겨둔 채 Run이 반환했다")
+	case <-time.After(2500 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("호출이 끝났는데 Run이 반환하지 않았다")
+	}
+}
+
+// 이미 취소된 context로 시작하면 엔진 호출을 한 번도 하지 않아야 한다.
+func TestCancelCommandWorkerStartsNoDispatchAfterCancel(t *testing.T) {
+	store := newFakeCancelCommandStore(testCancelCommand(1, 100))
+	engine := &fakeCancelEngine{result: matching.CancelOrderResult{Removed: true}}
+	worker := NewCancelCommandWorker(store, newFakeOrderReader(testOpenOrder(100)), engine)
+	worker.PollInterval = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// wake 신호까지 미리 넣어 select가 다른 case를 고를 여지를 만든다.
+	worker.Wake()
+
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("취소된 context인데 Run이 반환하지 않았다")
+	}
+	assert.Zero(t, engine.callsFor(1), "취소된 context에서 새 dispatch가 시작됐다")
 }

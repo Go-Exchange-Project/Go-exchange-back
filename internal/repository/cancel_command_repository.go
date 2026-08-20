@@ -45,13 +45,18 @@ func (r *CancelCommandRepository) CreateOrGet(command *model.CancelCommand) (*mo
 }
 
 // FindPending은 worker의 dispatch 후보를 ID 오름차순으로 조회합니다.
-func (r *CancelCommandRepository) FindPending(limit int) ([]model.CancelCommand, error) {
+//
+// excluded(현재 in-flight인 command)를 SQL에서 먼저 걸러내야 합니다. 조회한 뒤
+// 애플리케이션에서 빼면, 앞선 LIMIT개가 모두 in-flight일 때 그 뒤의 command는
+// 조회조차 되지 않아 영구히 기아 상태가 됩니다.
+func (r *CancelCommandRepository) FindPending(excluded []uint64, limit int) ([]model.CancelCommand, error) {
+	query := r.DB.Where("status = ?", model.CancelCommandStatusPending)
+	if len(excluded) > 0 {
+		query = query.Where("id NOT IN ?", excluded)
+	}
+
 	var commands []model.CancelCommand
-	err := r.DB.
-		Where("status = ?", model.CancelCommandStatusPending).
-		Order("id ASC").
-		Limit(limit).
-		Find(&commands).Error
+	err := query.Order("id ASC").Limit(limit).Find(&commands).Error
 	return commands, err
 }
 

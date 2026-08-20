@@ -143,7 +143,7 @@ func TestIntegrationCancelCommandFindPendingOrdersByIDAndExcludesTerminal(t *tes
 	require.NoError(t, db.Model(&model.CancelCommand{}).Where("id = ?", ids[1]).
 		Update("status", model.CancelCommandStatusProcessed).Error)
 
-	pending, err := repo.FindPending(128)
+	pending, err := repo.FindPending(nil, 128)
 	require.NoError(t, err)
 
 	found := map[uint64]bool{}
@@ -159,7 +159,7 @@ func TestIntegrationCancelCommandFindPendingOrdersByIDAndExcludesTerminal(t *tes
 	assert.False(t, found[ids[1]], "PROCESSED가 PENDING 스캔에 포함됐다")
 	assert.True(t, found[ids[2]])
 
-	limited, err := repo.FindPending(1)
+	limited, err := repo.FindPending(nil, 1)
 	require.NoError(t, err)
 	assert.Len(t, limited, 1)
 }
@@ -282,4 +282,26 @@ func TestIntegrationCancelCommandCountPending(t *testing.T) {
 	drained, err := repo.CountPending()
 	require.NoError(t, err)
 	assert.Equal(t, before, drained)
+}
+
+// 제외는 LIMIT보다 먼저 적용돼야 한다. 조회 후 애플리케이션에서 빼면 앞선
+// LIMIT개가 전부 in-flight일 때 그 뒤의 command가 영구히 조회되지 않는다.
+func TestIntegrationCancelCommandFindPendingExcludesBeforeLimit(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewCancelCommandRepository(db)
+
+	var ids []uint64
+	for i := 0; i < 3; i++ {
+		command, _, err := repo.CreateOrGet(seedCancelCommand(uniqueCancelOrderID() + uint(i)))
+		require.NoError(t, err)
+		ids = append(ids, command.ID)
+	}
+	defer cleanupCancelCommands(t, db, ids)
+
+	// 앞의 두 개를 제외한 뒤 한 건만 요청하면 세 번째가 나와야 한다.
+	// 제외가 LIMIT 뒤였다면 결과는 비어 있다.
+	pending, err := repo.FindPending([]uint64{ids[0], ids[1]}, 1)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, ids[2], pending[0].ID)
 }
