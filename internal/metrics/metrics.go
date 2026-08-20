@@ -68,6 +68,22 @@ var (
 		Help: "Total outbox batch INSERT failures (each retried until success).",
 	})
 
+	// CancelCommandLatency measures the durable cancel path end to end. The
+	// application does not promise an upper bound on it, so this histogram is
+	// the only basis for discussing one later.
+	CancelCommandLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "cancel_command_latency_seconds",
+		Help:    "Time from durable cancel command creation to PROCESSED or NOOP commit.",
+		Buckets: matchLatencyBuckets,
+	})
+
+	// A rising counter means the outbox commit is stalled, not that a command
+	// was lost: the worker keeps holding it instead of re-dispatching.
+	CancelCommandAwaitingOutboxDeadlineTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cancel_command_awaiting_outbox_deadline_total",
+		Help: "Cancel commands still awaiting the atomic outbox commit after the warning deadline.",
+	})
+
 	SettlementBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "settlement_batch_size",
 		Help:    "Number of trades per committed settlement batch. Stuck at 1 indicates low load or drain not happening.",

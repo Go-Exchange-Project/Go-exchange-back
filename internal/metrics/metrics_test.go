@@ -52,3 +52,21 @@ hold_coordinator_input_length 9
 		t.Fatal(err)
 	}
 }
+
+// 두 지표는 취소 계약의 관측 기반이다. 이름이 바뀌면 대시보드와 35번 기준선이
+// 조용히 비어 버리므로 이름 자체를 고정한다.
+func TestCancelCommandMetricsAreRegisteredUnderStableNames(t *testing.T) {
+	CancelCommandLatency.Observe(0.25)
+	CancelCommandAwaitingOutboxDeadlineTotal.Inc()
+
+	count, err := testutil.GatherAndCount(prometheus.DefaultGatherer,
+		"cancel_command_latency_seconds",
+		"cancel_command_awaiting_outbox_deadline_total",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("두 지표가 모두 등록돼야 한다: got %d", count)
+	}
+}
