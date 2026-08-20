@@ -11,7 +11,6 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
-	"github.com/google/btree"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -390,9 +389,8 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 	require.NoError(t, second.worker.WaitUntilDrained(barrierCtx))
 
 	// 장벽 통과 후 들어온 crossing 주문은 그 maker와 체결되면 안 된다.
-	crossingID := order.ID + 900_000
 	second.engine.OrderCh <- &matching.Order{
-		ID:         crossingID,
+		ID:         order.ID + 900_000,
 		UserID:     makerID + 1,
 		CoinSymbol: symbol,
 		Side:       model.OrderSideSell,
@@ -405,9 +403,8 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 	// sentinel: 같은 오더북은 OrderCh를 FIFO로 처리하므로, 뒤에 넣은 이 주문이
 	// 보이면 crossing 주문의 매칭도 이미 끝났다는 뜻이다. snapshot 채널을 그냥
 	// 읽으면 앞서 남은 취소 snapshot을 집어 아직 처리 전에 판정할 수 있다.
-	sentinelID := order.ID + 900_001
 	second.engine.OrderCh <- &matching.Order{
-		ID:         sentinelID,
+		ID:         order.ID + 900_001,
 		UserID:     makerID + 2,
 		CoinSymbol: symbol,
 		Side:       model.OrderSideSell,
@@ -416,40 +413,36 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 		OrderType:  model.OrderTypeLimit,
 		CreatedAt:  time.Now(),
 	}
+	// 살아 있는 엔진의 BTree를 테스트 goroutine에서 직접 순회하면 매칭 루프와
+	// 데이터 레이스다. RequestOrderBookSnapshot은 캐시를 락 없이 읽어 매칭과
+	// 경쟁하지 않는 유일한 조회 경로다.
+	sentinelPrice := decimal.NewFromInt(100_000)
 	require.Eventually(t, func() bool {
-		return engineHasSellOrder(second.engine, symbol, sentinelID)
-	}, 5*time.Second, 20*time.Millisecond, "sentinel 주문이 처리되지 않았다")
+		snapshot, err := second.engine.RequestOrderBookSnapshot(symbol, matching.DefaultSnapshotDepth)
+		return err == nil && snapshotHasLevel(snapshot.Asks, sentinelPrice)
+	}, 5*time.Second, 20*time.Millisecond, "sentinel 주문이 스냅샷에 반영되지 않았다")
 
-	// 판정: crossing 매도가 체결되지 않고 오더북에 그대로 남아야 한다.
+	// 판정: crossing 매도가 체결되지 않고 그대로 남고, 취소된 매수는 없어야 한다.
 	//
 	// trades 테이블로는 판정할 수 없다 — 그 행은 SettlementService가 만드는데
 	// 이 하니스는 정산을 돌리지 않으므로 실제로 체결돼도 0이다.
-	assert.True(t, engineHasSellOrder(second.engine, symbol, crossingID),
-		"crossing 매도가 사라졌다 — 취소된 주문이 부활해 체결됐다")
-	assert.False(t, engineHasBuyOrder(second.engine, symbol, order.ID),
-		"취소된 매수 주문이 오더북에 남아 있다")
+	snapshot, err := second.engine.RequestOrderBookSnapshot(symbol, matching.DefaultSnapshotDepth)
+	require.NoError(t, err)
+	crossingPrice := decimal.NewFromInt(100)
+
+	assert.True(t, snapshotHasLevel(snapshot.Asks, crossingPrice),
+		"crossing 매도가 사라졌다 — 취소된 주문이 부활해 체결됐다: %+v", snapshot)
+	assert.False(t, snapshotHasLevel(snapshot.Bids, crossingPrice),
+		"취소된 매수 주문이 오더북에 남아 있다: %+v", snapshot)
 }
 
-func engineHasSellOrder(engine *matching.MatchingEngine, symbol string, orderID uint) bool {
-	return engineBookHasOrder(engine.GetOrderBook(symbol).SellOrders, orderID)
-}
-
-func engineHasBuyOrder(engine *matching.MatchingEngine, symbol string, orderID uint) bool {
-	return engineBookHasOrder(engine.GetOrderBook(symbol).BuyOrders, orderID)
-}
-
-func engineBookHasOrder(levels *btree.BTreeG[*matching.PriceLevel], orderID uint) bool {
-	found := false
-	levels.Ascend(func(level *matching.PriceLevel) bool {
-		for i := 0; i < level.Orders.Len(); i++ {
-			if level.Orders.At(i).ID == orderID {
-				found = true
-				return false
-			}
+func snapshotHasLevel(levels []matching.PriceLevelData, price decimal.Decimal) bool {
+	for _, level := range levels {
+		if level.Price.Equal(price) && level.Quantity.IsPositive() {
+			return true
 		}
-		return true
-	})
-	return found
+	}
+	return false
 }
 
 // 검증 4: 동시 100회 취소에도 hold 해제는 한 번뿐이다. 판정 기준은 상태가 아니라
@@ -640,8 +633,8 @@ func TestIntegrationCancelCommandStaysPendingWhenEngineMissesOpenOrder(t *testin
 }
 
 // 검증 8d(통합): outbox 커밋을 막아 두면 worker는 같은 command를 재투입하지 않는다.
-// 재투입하면 두 번째 호출이 NOOP을 만들고, 뒤늦은 첫 이벤트의 PROCESSED UPDATE가
-// 0행이 되어 배치 전체가 rollback된다.
+// 재투입되면 엔진은 이미 제거된 주문을 못 찾고(not-found), DB 주문은 아직 open이라
+// worker는 NOOP이 아니라 RecordAttempt + backoff로 간다.
 func TestIntegrationCancelCommandDoesNotRedispatchWhileOutboxIsBlocked(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	userID := serviceTestUserID(47)
