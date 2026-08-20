@@ -569,7 +569,7 @@ type cancelCommandInFlight struct {
   - open → `RecordAttempt`, 다음 backoff.
   - terminal → `MarkNoop`; 반환 row의 `updated_at-created_at`을 관측하고 삭제.
 - 그 외 error → `RecordAttempt`, 지수 backoff.
-- process context 취소 → 신규 scan/dispatch 중지, 이미 시작한 engine 호출이 최대 2초 안에 반환할 때까지 기다린 뒤 `Run` 반환.
+- process context 취소 → 신규 scan/dispatch 중지, **이미 시작한 engine 호출이 모두 반환할 때까지** 기다린 뒤 `Run` 반환. worker는 자체 상한을 두지 않는다 — `MatchingEngine.CancelOrder`는 enqueue 1초와 response 1초를 순차로 기다려 한 호출만으로 약 2초가 걸릴 수 있고, 그보다 짧은 상한으로 먼저 반환하면 살아 있는 호출과 뒤이은 엔진 정지가 경쟁한다. **종료 상한은 lifecycle이 소유한다**(Task 6).
 
 `WaitUntilDrained`는 `Wake()` 후 DB `CountPending()`을 반복 조회한다. 0일 때만 성공하며 context 만료·DB 오류는 error다.
 
@@ -647,7 +647,15 @@ func runCancelCommandStartupBarrier(
 }
 ```
 
-shutdown helper는 cancel 함수를 호출한 뒤 done 또는 timeout을 기다린다. timeout은 error로 반환해 main이 로그를 남기되, engine 정지보다 먼저 호출됐다는 순서는 유지한다.
+shutdown helper는 cancel 함수를 호출한 뒤 done 또는 timeout을 기다린다.
+
+> **⚠ timeout이 나면 `me.Stop()`으로 진행하지 않는다.** 로그만 남기고 다음 단계로 가면 worker가 아직 엔진을 호출하고 있는 채로 엔진을 정지시켜 Task 5에서 닫은 경쟁을 그대로 다시 연다. timeout은 "worker가 끝나지 않았다"는 사실이지 "끝났다고 쳐도 된다"가 아니다.
+>
+> 선택지는 둘뿐이다.
+> - **계속 기다린다**(권장): 상한을 넉넉히 잡고, 초과 시 경고를 남기며 대기를 이어간다. `Run`은 시작한 호출이 반환하면 반드시 끝나므로 무한 대기가 아니다.
+> - **프로세스 종료 경로로 전환한다**: graceful 종료를 포기하고 즉시 종료한다. 미완 command는 내구 기록돼 있으므로 재기동 후 부팅 장벽(§4.4)이 처리한다.
+>
+> 어느 쪽이든 **엔진 정지 단계로는 넘어가지 않는다.**
 
 - [ ] **Step 3: `cmd/main.go` 배선**
 
