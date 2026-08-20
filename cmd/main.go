@@ -367,8 +367,14 @@ func main() {
 		dev.POST("/wallets/fund", devHandler.FundWallet)
 	}
 
-	// graceful shutdown 체인: HTTP 차단 → 엔진 드레인(ExecutionCh close) →
-	// outbox writer flush(큐 close) → 정산 워커 드레인 → 백그라운드 워커 취소.
+	// graceful shutdown 체인: HTTP 차단 → hold coordinator 정지 → cancel worker 정지
+	// → 엔진 드레인(ExecutionCh close) → outbox writer flush(큐 close) →
+	// 정산 워커 드레인 → 백그라운드 워커 취소.
+	//
+	// cancel worker는 엔진보다 반드시 먼저 끝난다. 아직 CancelOrder를 호출 중인데
+	// 엔진이 멈추면 진행 중인 취소가 오더북에 반영되지 못하기 때문에, 이 단계만은
+	// 상한을 넘겨도 다음으로 넘어가지 않는다.
+	//
 	// 상한 초과로 강제 종료돼도 outbox 덕에 유실은 없다 — 다음 부팅 리플레이가 처리한다.
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
