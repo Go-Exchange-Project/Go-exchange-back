@@ -764,22 +764,37 @@ func TestIntegrationCancelPendingBuyOrderReleasesKRWAndRemovesFromEngine(t *test
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
 	require.NoError(t, err)
-	// Status는 "접수됨" 의미로 재정의됐다(A-4) — DB가 실제로 CANCELLED인지는
-	// 아래에서 별도로 확인한다.
-	assert.Equal(t, model.OrderStatusCancelled, result.Status)
-	assert.Equal(t, model.KRWAssetSymbol, result.ReleasedAsset)
-	assert.True(t, result.ReleasedAmount.Equal(decimal.RequireFromString("500.25")), "추정 해제량(예상)")
-	assert.True(t, result.EngineRemoved)
-	requireIntegrationSnapshot(t, me)
-	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+	// 응답은 "취소 의도를 내구 기록했다"까지다. 오더북 제거는 worker가 별도로 한다.
+	assert.Equal(t, CancelOrderAcceptedStatus, result.Status)
+	assert.NotZero(t, result.CommandID)
+	assert.Equal(t, order.ID, result.OrderID)
+	defer cleanupServiceCancelCommands(t, db, result.CommandID)
 
-	// Step 1 계약: CancelOrder 단독 호출은 DB를 건드리지 않는다.
+	command := requireCancelCommand(t, db, result.CommandID)
+	assert.Equal(t, model.CancelCommandStatusPending, command.Status)
+	assert.Equal(t, order.CoinSymbol, command.CoinSymbol)
+	assert.Equal(t, order.Side, command.Side)
+	assert.True(t, command.Price.Equal(order.Price), "price=%s", command.Price)
+
 	var afterAccept model.Order
 	require.NoError(t, db.First(&afterAccept, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, afterAccept.Status, "CancelOrder만으로는 DB가 아직 CANCELLED가 되면 안 된다")
 
-	// 정산 파이프라인이 엔진의 OrderCancelled 이벤트를 소비하는 것을 시뮬레이션한다.
+	// worker가 command를 엔진에 전달하는 것을 시뮬레이션한다.
+	engineResult := me.CancelOrder(matching.CancelOrderCommand{
+		CommandID:  result.CommandID,
+		CoinSymbol: command.CoinSymbol,
+		OrderID:    command.OrderID,
+		Side:       command.Side,
+		Price:      command.Price,
+	})
+	require.NoError(t, engineResult.Err)
+	require.True(t, engineResult.Removed)
+	requireIntegrationSnapshot(t, me)
+	assert.Equal(t, 0, me.GetOrderBook("BTC").BuyOrders.Len())
+
 	cancelled := requireIntegrationOrderCancelledEvent(t, me)
+	assert.Equal(t, result.CommandID, cancelled.CommandID)
 	assert.Equal(t, order.ID, cancelled.OrderID)
 	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
 
@@ -812,13 +827,24 @@ func TestIntegrationCancelPartialBuyOrderReleasesRemainingKRW(t *testing.T) {
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
 	require.NoError(t, err)
-	assert.True(t, result.ReleasedAmount.Equal(decimal.RequireFromString("600.3")), "추정 해제량(예상)")
-	assert.True(t, result.EngineRemoved)
-	requireIntegrationSnapshot(t, me)
+	assert.Equal(t, CancelOrderAcceptedStatus, result.Status)
+	require.NotZero(t, result.CommandID)
+	defer cleanupServiceCancelCommands(t, db, result.CommandID)
 
 	var afterAccept model.Order
 	require.NoError(t, db.First(&afterAccept, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPartial, afterAccept.Status, "CancelOrder만으로는 DB가 아직 CANCELLED가 되면 안 된다")
+
+	command := requireCancelCommand(t, db, result.CommandID)
+	engineResult := me.CancelOrder(matching.CancelOrderCommand{
+		CommandID:  result.CommandID,
+		CoinSymbol: command.CoinSymbol,
+		OrderID:    command.OrderID,
+		Side:       command.Side,
+		Price:      command.Price,
+	})
+	require.NoError(t, engineResult.Err)
+	requireIntegrationSnapshot(t, me)
 
 	cancelled := requireIntegrationOrderCancelledEvent(t, me)
 	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
@@ -849,15 +875,26 @@ func TestIntegrationCancelPendingSellOrderReleasesCoin(t *testing.T) {
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
 	require.NoError(t, err)
-	assert.Equal(t, "BTC", result.ReleasedAsset)
-	assert.True(t, result.ReleasedAmount.Equal(decimal.NewFromInt(5)), "추정 해제량(예상)")
-	assert.True(t, result.EngineRemoved)
-	requireIntegrationSnapshot(t, me)
-	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
+	assert.Equal(t, CancelOrderAcceptedStatus, result.Status)
+	require.NotZero(t, result.CommandID)
+	defer cleanupServiceCancelCommands(t, db, result.CommandID)
 
 	var afterAccept model.Order
 	require.NoError(t, db.First(&afterAccept, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, afterAccept.Status, "CancelOrder만으로는 DB가 아직 CANCELLED가 되면 안 된다")
+
+	command := requireCancelCommand(t, db, result.CommandID)
+	assert.Equal(t, model.OrderSideSell, command.Side)
+	engineResult := me.CancelOrder(matching.CancelOrderCommand{
+		CommandID:  result.CommandID,
+		CoinSymbol: command.CoinSymbol,
+		OrderID:    command.OrderID,
+		Side:       command.Side,
+		Price:      command.Price,
+	})
+	require.NoError(t, engineResult.Err)
+	requireIntegrationSnapshot(t, me)
+	assert.Equal(t, 0, me.GetOrderBook("BTC").SellOrders.Len())
 
 	cancelled := requireIntegrationOrderCancelledEvent(t, me)
 	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
@@ -963,10 +1000,13 @@ func TestIntegrationProcessOrderCancellationRollsBackWhenWalletLockedBalanceIsIn
 	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(100)))
 }
 
-// 엔진에 주문이 없는 경우(이미 체결/소진 또는 애초에 미제출)는 "이미 늦음"이지
-// 인프라 실패가 아니다 — 409(conflict)로 매핑되고, DB·지갑은 CancelOrder가
-// 전혀 건드리지 않으므로 그대로 남아야 한다(A-4의 핵심 계약).
-func TestIntegrationCancelReturnsConflictWhenOrderMissingFromEngineBook(t *testing.T) {
+// 엔진 상태는 더 이상 취소 접수의 판정 근거가 아니다. CancelOrder는 엔진을
+// 호출하지 않으므로 오더북에 없는 주문도 202로 접수된다 — "엔진에 없음"의 해석은
+// worker가 DB 주문 상태를 보고 결정한다(NOOP 또는 재시도).
+//
+// 이 계약이 바뀐 이유: 예전에는 엔진 미스를 409로 돌려줬는데, 그러려면 응답 전에
+// 엔진을 동기 호출해야 하고 그건 내구 기록보다 앞선다.
+func TestIntegrationCancelAcceptsOrderMissingFromEngineBook(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	userID := serviceTestUserID(19)
 	defer cleanupServiceUsers(t, db, userID)
@@ -989,15 +1029,14 @@ func TestIntegrationCancelReturnsConflictWhenOrderMissingFromEngineBook(t *testi
 	// 체결/소진된 것과 동일한 신호).
 	result, err := orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 
-	require.Error(t, err)
-	assert.Nil(t, result)
-	kind, ok := DomainErrorKind(err)
-	require.True(t, ok, "엔진 미스는 도메인 conflict 에러여야 한다(핸들러가 409로 매핑)")
-	assert.Equal(t, ErrorKindConflict, kind)
+	require.NoError(t, err, "엔진 상태는 접수 판정에 쓰이지 않는다")
+	require.NotZero(t, result.CommandID)
+	defer cleanupServiceCancelCommands(t, db, result.CommandID)
+	assert.Equal(t, CancelOrderAcceptedStatus, result.Status)
 
 	var persisted model.Order
 	require.NoError(t, db.First(&persisted, order.ID).Error)
-	assert.Equal(t, model.OrderStatusPending, persisted.Status, "CancelOrder는 DB를 건드리지 않는다")
+	assert.Equal(t, model.OrderStatusPending, persisted.Status, "CancelOrder는 주문을 건드리지 않는다")
 	walletRepo := repository.NewWalletRepository(db)
 	wallet, err := walletRepo.FindKRWWalletByUserID(userID)
 	require.NoError(t, err)

@@ -257,7 +257,22 @@ func TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements(t
 	// 2) 바로 이 창에서 취소 요청 — 레이스의 핵심 순간.
 	cancelResult, err := orderService.CancelOrder(CancelOrderInput{UserID: buyerID, OrderID: buyOrder.ID})
 	require.NoError(t, err, "취소 접수는 500이 아니라 성공해야 한다(발견 문서의 21/154건 500 버그)")
-	assert.True(t, cancelResult.EngineRemoved)
+	require.NotZero(t, cancelResult.CommandID)
+	defer cleanupServiceCancelCommands(t, db, cancelResult.CommandID)
+
+	// CancelOrder는 더 이상 엔진을 직접 호출하지 않는다. worker가 command를
+	// 전달하는 단계를 여기서 대신한다 — 이 테스트가 보려는 것은 그 다음의
+	// in-flight 체결과 취소의 순서다.
+	command := requireCancelCommand(t, db, cancelResult.CommandID)
+	engineResult := me.CancelOrder(matching.CancelOrderCommand{
+		CommandID:  command.ID,
+		CoinSymbol: command.CoinSymbol,
+		OrderID:    command.OrderID,
+		Side:       command.Side,
+		Price:      command.Price,
+	})
+	require.NoError(t, engineResult.Err)
+	require.True(t, engineResult.Removed)
 
 	// Step 1 계약 재확인: CancelOrder 단독 호출은 DB를 건드리지 않는다.
 	var afterCancelCall model.Order
