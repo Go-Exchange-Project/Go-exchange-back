@@ -96,9 +96,11 @@ func (w *OutboxWriter) flushAndForward(events []matching.ExecutionEvent) {
 		}
 		rows = append(rows, row)
 		forwarded = append(forwarded, event)
-		// 직렬화에 성공한 뒤에만 수집한다. 배치 원본에서 먼저 모으면 outbox에
-		// 남지 않은 취소의 command만 PROCESSED가 되는 유실 경로가 열린다.
-		if event.OrderCancelled != nil && event.OrderCancelled.CommandID != 0 {
+		// 실제로 만들어진 row가 취소일 때만 수집한다. 직렬화에 성공한 뒤에만 모으는
+		// 것으로는 부족하다 — NewTradeOutboxEvent는 첫 non-nil 필드만 보므로
+		// Trade와 OrderCancelled가 함께 든 이벤트는 TRADE 행이 되는데, 그때 취소 ID를
+		// 모으면 outbox에 없는 취소의 command가 PROCESSED가 된다.
+		if row.EventType == model.TradeOutboxEventTypeOrderCancelled && event.OrderCancelled.CommandID != 0 {
 			commandIDs = append(commandIDs, event.OrderCancelled.CommandID)
 		}
 	}

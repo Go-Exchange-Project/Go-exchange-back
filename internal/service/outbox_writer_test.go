@@ -16,14 +16,24 @@ import (
 type fakeOutboxInserter struct {
 	mu         sync.Mutex
 	batches    [][]*model.TradeOutboxEvent
-	commandIDs [][]uint64 // 배치마다 함께 전달된 취소 command ID
-	errs       []error    // 호출마다 하나씩 소비, 소진되면 성공
-	nextID     uint64
+	commandIDs [][]uint64 // 커밋에 성공한 배치의 취소 command ID
+	// callCommandIDs/callSizes는 실패한 호출까지 포함한다. 재시도가 같은 배치와
+	// 같은 ID로 이뤄지는지는 성공 호출만 봐서는 확인할 수 없다.
+	callCommandIDs [][]uint64
+	callSizes      []int
+	errs           []error // 호출마다 하나씩 소비, 소진되면 성공
+	nextID         uint64
 }
 
 func (f *fakeOutboxInserter) InsertBatchAndMarkCancelCommands(events []*model.TradeOutboxEvent, commandIDs []uint64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.callSizes = append(f.callSizes, len(events))
+	callIDs := make([]uint64, len(commandIDs))
+	copy(callIDs, commandIDs)
+	f.callCommandIDs = append(f.callCommandIDs, callIDs)
+
 	if len(f.errs) > 0 {
 		err := f.errs[0]
 		f.errs = f.errs[1:]
@@ -416,4 +426,36 @@ func TestOutboxWriterRetriesWithSameCancelCommandIDs(t *testing.T) {
 	require.Len(t, repo.batches, 1, "성공한 커밋만 기록된다")
 	assert.Equal(t, []uint64{31}, repo.lastCommandIDs())
 	assert.Equal(t, 1, forwarded)
+
+	// 실패한 두 번을 포함해 세 호출 모두 같은 배치·같은 ID여야 한다. 재시도가
+	// ID를 흘리면 outbox 행만 남고 command는 PENDING으로 방치된다.
+	require.Equal(t, []int{1, 1, 1}, repo.callSizes)
+	assert.Equal(t, [][]uint64{{31}, {31}, {31}}, repo.callCommandIDs)
+}
+
+// NewTradeOutboxEvent는 첫 non-nil 필드만 보므로 Trade와 OrderCancelled가 함께 든
+// 이벤트는 TRADE 행이 된다. 그때 취소 ID를 수집하면 outbox에 없는 취소의 command가
+// PROCESSED가 된다.
+func TestOutboxWriterSkipsCancelIDWhenRowIsNotCancellation(t *testing.T) {
+	repo := &fakeOutboxInserter{}
+	source := make(chan matching.ExecutionEvent, 1)
+	writer := &OutboxWriter{Repo: repo, Source: source, BatchSize: 1, FlushInterval: time.Millisecond}
+
+	malformed := outboxTestTrade("BTC", 1)
+	malformed.OrderCancelled = &matching.OrderCancelled{
+		CommandID:     41,
+		OrderID:       42,
+		CoinSymbol:    "BTC",
+		Side:          model.OrderSideBuy,
+		EngineEventID: "engine-test-outbox-cancel",
+	}
+
+	source <- malformed
+	close(source)
+	writer.Run()
+
+	require.Len(t, repo.batches, 1)
+	require.Len(t, repo.batches[0], 1)
+	assert.Equal(t, model.TradeOutboxEventTypeTrade, repo.batches[0][0].EventType)
+	assert.Empty(t, repo.lastCommandIDs(), "TRADE 행인데 취소 command가 완료 대상에 들어갔다")
 }

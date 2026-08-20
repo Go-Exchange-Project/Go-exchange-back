@@ -30,19 +30,22 @@ func (r *TradeOutboxRepository) InsertBatch(events []*model.TradeOutboxEvent) er
 // commandIDs가 비어 있으면 UPDATE를 아예 실행하지 않습니다. 취소가 섞이지 않은
 // 대다수 배치에 문장을 추가하지 않기 위해서입니다.
 func (r *TradeOutboxRepository) InsertBatchAndMarkCancelCommands(events []*model.TradeOutboxEvent, commandIDs []uint64) error {
-	if len(events) == 0 && len(commandIDs) == 0 {
-		return nil
-	}
-
 	// 한 배치에 같은 command의 이벤트가 두 번 들어올 수 있고, command 없이 들어온
 	// 취소는 0으로 온다. 그대로 두면 행 수 검사가 어긋나 정상 배치가 rollback된다.
 	ids := dedupeNonzeroUint64(commandIDs)
 
+	if len(events) == 0 {
+		if len(ids) == 0 {
+			return nil
+		}
+		// outbox 행 없이 command만 PROCESSED가 되면 그 취소는 replay로도 재실행으로도
+		// 복구되지 않는다. 이 메서드가 존재하는 이유 자체가 그 상태를 막는 것이다.
+		return fmt.Errorf("refusing to mark %d cancel commands processed without outbox events", len(ids))
+	}
+
 	return r.DB.Transaction(func(tx *gorm.DB) error {
-		if len(events) > 0 {
-			if err := tx.Create(&events).Error; err != nil {
-				return err
-			}
+		if err := tx.Create(&events).Error; err != nil {
+			return err
 		}
 		if len(ids) == 0 {
 			return nil

@@ -241,3 +241,32 @@ func TestIntegrationTradeOutboxWithoutCancelCommandsBehavesLikeInsertBatch(t *te
 	assert.NotZero(t, events[0].ID)
 	assert.Greater(t, events[1].ID, events[0].ID)
 }
+
+// outbox 행 없이 command만 PROCESSED가 되면 그 취소는 replay로도 재실행으로도
+// 복구되지 않는다. 이 입력은 성공시키면 안 된다.
+func TestIntegrationTradeOutboxRejectsCancelCommandsWithoutEvents(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	outboxRepo := NewTradeOutboxRepository(db)
+	commandRepo := NewCancelCommandRepository(db)
+
+	command, _, err := commandRepo.CreateOrGet(seedCancelCommand(uniqueCancelOrderID()))
+	require.NoError(t, err)
+	defer cleanupCancelCommands(t, db, []uint64{command.ID})
+
+	err = outboxRepo.InsertBatchAndMarkCancelCommands(nil, []uint64{command.ID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without outbox events")
+
+	var got model.CancelCommand
+	require.NoError(t, db.Where("id = ?", command.ID).First(&got).Error)
+	assert.Equal(t, model.CancelCommandStatusPending, got.Status)
+}
+
+// 이벤트도 command도 없으면 할 일이 없다 — 오류가 아니다.
+func TestIntegrationTradeOutboxEmptyInputIsNoop(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewTradeOutboxRepository(db)
+
+	require.NoError(t, repo.InsertBatchAndMarkCancelCommands(nil, nil))
+	require.NoError(t, repo.InsertBatchAndMarkCancelCommands(nil, []uint64{0}))
+}
