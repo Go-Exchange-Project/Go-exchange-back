@@ -109,6 +109,13 @@ func main() {
 	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, walletRepo, repository.NewLedgerRepository(config.DB), config.HoldBatchSizeFromEnv())
 	go holdCoordinator.Run()
 	orderService.HoldCoordinator = holdCoordinator
+
+	// 취소는 엔진 호출 전에 DB에 먼저 기록된다. worker가 그 command를 엔진에
+	// 전달하고, OutboxWriter가 실행 이벤트와 함께 PROCESSED로 커밋한다.
+	cancelCommandRepo := repository.NewCancelCommandRepository(config.DB)
+	cancelWorker := service.NewCancelCommandWorker(cancelCommandRepo, orderRepo, me)
+	orderService.CancelCommandRepository = cancelCommandRepo
+	orderService.CancelCommandWake = cancelWorker.Wake
 	metrics.RegisterHoldCoordinatorInputGauge(func() int { return holdCoordinator.InputLen() })
 	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
@@ -256,21 +263,45 @@ func main() {
 		}
 	}()
 
+	// 부팅 장벽: outbox replay → matching bootstrap → cancel worker 시작·drain →
+	// (아래) HTTP listen. bootstrap이 주문을 오더북에 다시 올린 직후 트래픽을 받으면
+	// 복구된 취소가 처리되기 전에 체결될 수 있다.
 	bootstrapService := service.NewMatchingBootstrapService(orderRepo, me)
-	bootstrapCtx, cancelBootstrap := context.WithTimeout(context.Background(), 30*time.Second)
-	bootstrapResult, err := bootstrapService.BootstrapOpenOrders(bootstrapCtx)
-	cancelBootstrap()
-	if err != nil {
-		log.Fatal("matching bootstrap failed: ", err)
-	}
-	log.Printf(
-		"matching bootstrap completed: loaded=%d submitted=%d skipped=%d pending=%d partial=%d",
-		bootstrapResult.Loaded,
-		bootstrapResult.Submitted,
-		bootstrapResult.Skipped,
-		bootstrapResult.StatusCounts[model.OrderStatusPending],
-		bootstrapResult.StatusCounts[model.OrderStatusPartial],
+	cancelWorkerCtx, cancelCancelWorker := context.WithCancel(context.Background())
+	cancelWorkerDone := make(chan struct{})
+
+	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), 30*time.Second)
+	barrierErr := runCancelCommandStartupBarrier(
+		barrierCtx,
+		func(ctx context.Context) error {
+			bootstrapResult, err := bootstrapService.BootstrapOpenOrders(ctx)
+			if err != nil {
+				return err
+			}
+			log.Printf(
+				"matching bootstrap completed: loaded=%d submitted=%d skipped=%d pending=%d partial=%d",
+				bootstrapResult.Loaded,
+				bootstrapResult.Submitted,
+				bootstrapResult.Skipped,
+				bootstrapResult.StatusCounts[model.OrderStatusPending],
+				bootstrapResult.StatusCounts[model.OrderStatusPartial],
+			)
+			return nil
+		},
+		func() {
+			go func() {
+				cancelWorker.Run(cancelWorkerCtx)
+				close(cancelWorkerDone)
+			}()
+		},
+		cancelWorker.WaitUntilDrained,
 	)
+	cancelBarrier()
+	if barrierErr != nil {
+		// 취소를 못 지키면서 주문을 받는 것보다 안 받는 것이 낫다.
+		log.Fatal("startup barrier failed: ", barrierErr)
+	}
+	log.Println("startup barrier passed: recovered cancel commands drained")
 
 	if config.UpbitEnabledFromEnv() {
 		upbitClient, err := upbit.NewUpbitClient()
@@ -366,7 +397,11 @@ func main() {
 	holdCoordinator.Shutdown()
 
 	drainDeadline := time.After(30 * time.Second)
-	me.Stop()
+
+	// cancel worker가 엔진보다 먼저 끝나야 drain 중 새 dispatch가 들어오지 않는다.
+	// 상한을 넘겨도 엔진 정지로 넘어가지 않는다 — worker가 아직 CancelOrder를
+	// 호출하고 있으면 진행 중인 취소가 오더북에 반영되지 못한다.
+	stopCancelWorkerThenEngine(cancelCancelWorker, cancelWorkerDone, 10*time.Second, me.Stop, log.Printf)
 	select {
 	case <-me.Done():
 	case <-drainDeadline:

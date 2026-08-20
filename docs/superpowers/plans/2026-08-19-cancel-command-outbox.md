@@ -621,7 +621,13 @@ Expected: timing 테스트 20회 안정 PASS, deadline 이후에도 중복 dispa
 
 - [ ] **Step 1: lifecycle RED 테스트 작성**
 
-startup test는 closure 호출 순서를 기록해 `bootstrap → start_worker → drain`을 단언한다. drain channel을 막아 둔 동안 barrier가 반환하지 않는 것도 확인한다. shutdown test는 worker의 진행 중 engine 호출을 풀기 전에는 `stopCancelCommandWorker`가 반환하지 않음을 확인한다.
+startup test는 closure 호출 순서를 기록해 `bootstrap → start_worker → drain`을 단언한다. drain channel을 막아 둔 동안 barrier가 반환하지 않는 것도 확인한다.
+
+shutdown test는 **세 단계를 각각** 고정한다. helper는 timeout이면 먼저 error로 반환하므로 "호출을 풀기 전에는 반환하지 않는다" 하나로 묶으면 timeout 계약과 충돌한다.
+
+1. **timeout 전에는 반환하지 않는다** — worker가 아직 끝나지 않았고 상한도 남았으면 helper는 대기한다.
+2. **timeout이면 error를 반환한다** — done이 닫히지 않은 채 상한이 지나면 error다.
+3. **error 이후에도 엔진을 정지하지 않는다** — 호출자는 `workerDone`을 계속 기다리고, done이 닫힌 **뒤에만** `me.Stop()`을 호출한다. timeout error가 엔진 정지를 앞당기면 Task 5에서 닫은 경쟁이 다시 열린다.
 
 Run: `go test ./cmd -run CancelCommandLifecycle -race -v`
 
