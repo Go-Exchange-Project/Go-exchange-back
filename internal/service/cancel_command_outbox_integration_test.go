@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
+
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/google/btree"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -212,11 +215,39 @@ func (h *cancelPipelineHarness) releaseEntryCount(userID uint, orderID uint) int
 	return count
 }
 
+// harnessSymbol은 테스트마다 고유한 심볼을 만든다. 공유 test DB에는 다른 테스트의
+// outbox 행이 함께 있으므로, 공통 심볼("BTC")을 쓰면 정리와 replay가 남의 행까지
+// 건드린다.
+func harnessSymbol(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("CX%d", time.Now().UnixNano()%100_000_000)
+}
+
 func cleanupHarnessOutbox(t *testing.T, db *gorm.DB, symbol string) {
 	t.Helper()
 	t.Cleanup(func() {
 		require.NoError(t, db.Where("coin_symbol = ?", symbol).Delete(&model.TradeOutboxEvent{}).Error)
 	})
+}
+
+// symbolScopedReplaySource는 이 하니스가 만든 행만 replay 대상으로 노출한다.
+// 감싸지 않으면 replayer가 DB의 모든 PENDING 행을 읽어 무관한 이벤트까지
+// PROCESSED로 바꾼다.
+type symbolScopedReplaySource struct {
+	inner  *repository.TradeOutboxRepository
+	symbol string
+}
+
+func (s *symbolScopedReplaySource) FindPendingAfter(afterID uint64, limit int) ([]model.TradeOutboxEvent, error) {
+	var events []model.TradeOutboxEvent
+	err := s.inner.DB.
+		Where("status = ? AND coin_symbol = ? AND id > ?", model.TradeOutboxStatusPending, s.symbol, afterID).
+		Order("id ASC").Limit(limit).Find(&events).Error
+	return events, err
+}
+
+func (s *symbolScopedReplaySource) MarkProcessed(id uint64) error {
+	return s.inner.MarkProcessed(id)
 }
 
 // 검증 1: command만 커밋된 상태에서 죽어도(=outbox 커밋 전) 재기동한 worker가
@@ -226,9 +257,10 @@ func TestIntegrationCancelCommandCrashBeforeOutboxIsRecovered(t *testing.T) {
 	userID := serviceTestUserID(40)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -236,7 +268,7 @@ func TestIntegrationCancelCommandCrashBeforeOutboxIsRecovered(t *testing.T) {
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	// 1차 런타임: worker를 시작하지 않은 채 취소만 접수하고 "죽는다".
 	first := newCancelPipelineHarness(t, db)
@@ -272,9 +304,10 @@ func TestIntegrationCancelCommandCrashAfterOutboxIsFinishedByReplay(t *testing.T
 	userID := serviceTestUserID(41)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -282,7 +315,7 @@ func TestIntegrationCancelCommandCrashAfterOutboxIsFinishedByReplay(t *testing.T
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	harness := newCancelPipelineHarness(t, db)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
@@ -303,11 +336,12 @@ func TestIntegrationCancelCommandCrashAfterOutboxIsFinishedByReplay(t *testing.T
 
 	// 재기동: outbox replay가 남은 PENDING 이벤트를 마무리한다.
 	replayer := &OutboxReplayer{
-		Repo:     repository.NewTradeOutboxRepository(db),
+		Repo:     &symbolScopedReplaySource{inner: repository.NewTradeOutboxRepository(db), symbol: symbol},
 		PageSize: 32,
 		Process: func(_ uint64, event matching.ExecutionEvent) bool {
 			if event.OrderCancelled == nil {
-				return true
+				t.Errorf("이 심볼에는 취소 이벤트만 있어야 한다: %+v", event)
+				return false
 			}
 			return harness.orderService.ProcessOrderCancellation(*event.OrderCancelled) == nil
 		},
@@ -326,9 +360,10 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 	makerID := serviceTestUserID(42)
 	defer cleanupServiceUsers(t, db, makerID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        makerID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -336,7 +371,7 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	first := newCancelPipelineHarness(t, db)
 	result, err := first.orderService.CancelOrder(CancelOrderInput{UserID: makerID, OrderID: order.ID})
@@ -355,22 +390,66 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 	require.NoError(t, second.worker.WaitUntilDrained(barrierCtx))
 
 	// 장벽 통과 후 들어온 crossing 주문은 그 maker와 체결되면 안 된다.
+	crossingID := order.ID + 900_000
 	second.engine.OrderCh <- &matching.Order{
-		ID:         order.ID + 900_000,
+		ID:         crossingID,
 		UserID:     makerID + 1,
-		CoinSymbol: "BTC",
+		CoinSymbol: symbol,
 		Side:       model.OrderSideSell,
 		Price:      decimal.NewFromInt(100),
 		Amount:     decimal.NewFromInt(5),
 		OrderType:  model.OrderTypeLimit,
 		CreatedAt:  time.Now(),
 	}
-	requireIntegrationSnapshot(t, second.engine)
 
-	var trades int64
-	require.NoError(t, db.Model(&model.Trade{}).
-		Where("buy_order_id = ?", order.ID).Count(&trades).Error)
-	assert.Zero(t, trades, "취소된 주문이 부활해 체결됐다")
+	// sentinel: 같은 오더북은 OrderCh를 FIFO로 처리하므로, 뒤에 넣은 이 주문이
+	// 보이면 crossing 주문의 매칭도 이미 끝났다는 뜻이다. snapshot 채널을 그냥
+	// 읽으면 앞서 남은 취소 snapshot을 집어 아직 처리 전에 판정할 수 있다.
+	sentinelID := order.ID + 900_001
+	second.engine.OrderCh <- &matching.Order{
+		ID:         sentinelID,
+		UserID:     makerID + 2,
+		CoinSymbol: symbol,
+		Side:       model.OrderSideSell,
+		Price:      decimal.NewFromInt(100_000),
+		Amount:     decimal.NewFromInt(1),
+		OrderType:  model.OrderTypeLimit,
+		CreatedAt:  time.Now(),
+	}
+	require.Eventually(t, func() bool {
+		return engineHasSellOrder(second.engine, symbol, sentinelID)
+	}, 5*time.Second, 20*time.Millisecond, "sentinel 주문이 처리되지 않았다")
+
+	// 판정: crossing 매도가 체결되지 않고 오더북에 그대로 남아야 한다.
+	//
+	// trades 테이블로는 판정할 수 없다 — 그 행은 SettlementService가 만드는데
+	// 이 하니스는 정산을 돌리지 않으므로 실제로 체결돼도 0이다.
+	assert.True(t, engineHasSellOrder(second.engine, symbol, crossingID),
+		"crossing 매도가 사라졌다 — 취소된 주문이 부활해 체결됐다")
+	assert.False(t, engineHasBuyOrder(second.engine, symbol, order.ID),
+		"취소된 매수 주문이 오더북에 남아 있다")
+}
+
+func engineHasSellOrder(engine *matching.MatchingEngine, symbol string, orderID uint) bool {
+	return engineBookHasOrder(engine.GetOrderBook(symbol).SellOrders, orderID)
+}
+
+func engineHasBuyOrder(engine *matching.MatchingEngine, symbol string, orderID uint) bool {
+	return engineBookHasOrder(engine.GetOrderBook(symbol).BuyOrders, orderID)
+}
+
+func engineBookHasOrder(levels *btree.BTreeG[*matching.PriceLevel], orderID uint) bool {
+	found := false
+	levels.Ascend(func(level *matching.PriceLevel) bool {
+		for i := 0; i < level.Orders.Len(); i++ {
+			if level.Orders.At(i).ID == orderID {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // 검증 4: 동시 100회 취소에도 hold 해제는 한 번뿐이다. 판정 기준은 상태가 아니라
@@ -380,9 +459,10 @@ func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T)
 	userID := serviceTestUserID(43)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -390,7 +470,7 @@ func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T)
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	harness := newCancelPipelineHarness(t, db)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
@@ -443,9 +523,10 @@ func TestIntegrationCancelCommandRepeatBeforeSettlementReleasesOnce(t *testing.T
 	userID := serviceTestUserID(44)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -453,7 +534,7 @@ func TestIntegrationCancelCommandRepeatBeforeSettlementReleasesOnce(t *testing.T
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	harness := newCancelPipelineHarness(t, db)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
@@ -484,9 +565,10 @@ func TestIntegrationCancelCommandOnFilledOrderBecomesNoop(t *testing.T) {
 	userID := serviceTestUserID(45)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -494,7 +576,7 @@ func TestIntegrationCancelCommandOnFilledOrderBecomesNoop(t *testing.T) {
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	harness := newCancelPipelineHarness(t, db)
 	result, err := harness.orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
@@ -525,9 +607,10 @@ func TestIntegrationCancelCommandStaysPendingWhenEngineMissesOpenOrder(t *testin
 	userID := serviceTestUserID(46)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -535,7 +618,7 @@ func TestIntegrationCancelCommandStaysPendingWhenEngineMissesOpenOrder(t *testin
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	// 주문을 엔진에 올리지 않는다 — 엔진 관점에서는 "없음"이다.
 	harness := newCancelPipelineHarness(t, db)
@@ -564,9 +647,10 @@ func TestIntegrationCancelCommandDoesNotRedispatchWhileOutboxIsBlocked(t *testin
 	userID := serviceTestUserID(47)
 	defer cleanupServiceUsers(t, db, userID)
 
+	symbol := harnessSymbol(t)
 	order := seedCancelOrderRows(t, db, cancelOrderSeed{
 		UserID:        userID,
-		CoinSymbol:    "BTC",
+		CoinSymbol:    symbol,
 		Side:          model.OrderSideBuy,
 		Status:        model.OrderStatusPending,
 		Price:         decimal.NewFromInt(100),
@@ -574,7 +658,7 @@ func TestIntegrationCancelCommandDoesNotRedispatchWhileOutboxIsBlocked(t *testin
 		FilledAmount:  decimal.Zero,
 		LockedBalance: decimal.RequireFromString("500.25"),
 	})
-	cleanupHarnessOutbox(t, db, "BTC")
+	cleanupHarnessOutbox(t, db, symbol)
 
 	harness := newCancelPipelineHarness(t, db)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
