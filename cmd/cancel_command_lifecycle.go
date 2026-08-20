@@ -70,3 +70,19 @@ func stopCancelWorkerThenEngine(
 	}
 	stopEngine()
 }
+
+// waitForShutdownStage는 종료 단계 하나가 끝나거나 공용 deadline이 만료될 때까지
+// 기다린다. drained 여부를 돌려준다.
+//
+// deadline은 반드시 닫히는 채널이어야 한다(`context.WithTimeout(...).Done()`).
+// `time.After`의 one-shot 채널을 여러 단계에서 재사용하면 첫 단계가 유일한 값을
+// 소비해 버리고, 이후 단계에는 timeout 신호가 영영 오지 않아 영구 대기한다.
+func waitForShutdownStage(stage string, done <-chan struct{}, deadline <-chan struct{}, logf func(format string, args ...any)) bool {
+	select {
+	case <-done:
+		return true
+	case <-deadline:
+		logf("shutdown: %s drain timed out", stage)
+		return false
+	}
+}

@@ -193,3 +193,48 @@ func TestShutdownCancelWorkerThenEngineStopsAfterCleanExit(t *testing.T) {
 	assert.True(t, engineStopped)
 	assert.Zero(t, warnings)
 }
+
+// 종료 단계 세 개는 같은 deadline을 공유한다. one-shot 채널(time.After)을 쓰면
+// 첫 단계가 유일한 값을 소비해 이후 단계가 영구 대기한다. 이미 만료된
+// deadline이면 세 단계가 모두 즉시 빠져나와야 한다.
+func TestWaitForShutdownStageAllStagesExitOnExpiredDeadline(t *testing.T) {
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelDrain()
+	<-drainCtx.Done()
+
+	blocked := make(chan struct{}) // 어떤 단계도 끝나지 않았다
+	var timeouts int
+	logf := func(string, ...any) { timeouts++ }
+
+	finished := make(chan struct{})
+	go func() {
+		for _, stage := range []string{"matching engine", "outbox writer flush", "settlement workers"} {
+			if waitForShutdownStage(stage, blocked, drainCtx.Done(), logf) {
+				t.Errorf("%s: 끝나지 않았는데 drained로 보고했다", stage)
+			}
+		}
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("만료된 deadline인데 종료 단계가 대기에 걸렸다")
+	}
+	assert.Equal(t, 3, timeouts, "세 단계 모두 timeout을 알려야 한다")
+}
+
+// 단계가 제때 끝나면 timeout 로그 없이 drained로 보고한다.
+func TestWaitForShutdownStageReportsDrained(t *testing.T) {
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelDrain()
+
+	done := make(chan struct{})
+	close(done)
+
+	var timeouts int
+	drained := waitForShutdownStage("matching engine", done, drainCtx.Done(), func(string, ...any) { timeouts++ })
+
+	assert.True(t, drained)
+	assert.Zero(t, timeouts)
+}

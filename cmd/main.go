@@ -396,22 +396,20 @@ func main() {
 	// 엔진 Stop() 앞: 엔진이 멈추면 이후 접수된 홀드가 매칭될 수 없다.
 	holdCoordinator.Shutdown()
 
-	drainDeadline := time.After(30 * time.Second)
-
 	// cancel worker가 엔진보다 먼저 끝나야 drain 중 새 dispatch가 들어오지 않는다.
 	// 상한을 넘겨도 엔진 정지로 넘어가지 않는다 — worker가 아직 CancelOrder를
 	// 호출하고 있으면 진행 중인 취소가 오더북에 반영되지 못한다.
 	stopCancelWorkerThenEngine(cancelCancelWorker, cancelWorkerDone, 10*time.Second, me.Stop, log.Printf)
-	select {
-	case <-me.Done():
-	case <-drainDeadline:
-		log.Println("shutdown: matching engine drain timed out")
-	}
-	select {
-	case <-outboxWriterDone:
-	case <-drainDeadline:
-		log.Println("shutdown: outbox writer flush timed out")
-	}
+
+	// downstream 상한은 worker가 실제로 끝난 뒤부터 센다. worker를 기다리는 동안
+	// 흘러간 시간이 엔진·outbox·정산 drain의 몫을 깎으면 안 된다.
+	// context의 Done()은 닫히는 채널이라 세 단계가 모두 만료를 관측한다.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelDrain()
+
+	waitForShutdownStage("matching engine", me.Done(), drainCtx.Done(), log.Printf)
+	waitForShutdownStage("outbox writer flush", outboxWriterDone, drainCtx.Done(), log.Printf)
+
 	settlementDrained := make(chan struct{})
 	go func() {
 		settlementWg.Wait()
@@ -419,10 +417,8 @@ func main() {
 		settlementWorkerWg.Wait()
 		close(settlementDrained)
 	}()
-	select {
-	case <-settlementDrained:
-	case <-drainDeadline:
-		log.Println("shutdown: settlement workers drain timed out, next boot replay will finish the rest")
+	if !waitForShutdownStage("settlement workers", settlementDrained, drainCtx.Done(), log.Printf) {
+		log.Println("shutdown: next boot replay will finish the rest")
 	}
 
 	cancelBackground()
