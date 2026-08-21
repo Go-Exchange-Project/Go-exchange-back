@@ -22,7 +22,10 @@ export default function () {
   r = classifyOrderResponse(0, 90000, SLO);
   assert(!r.available && !r.businessSuccess, 'status 0 → 둘 다 실패');
   // 취소 판정표
-  assert(classifyCancelResponse(200) === 'success', '취소 200 → success');
+  // 200은 202 전환 전 계약이다. 두 값을 모두 성공으로 두어 구·신 하니스가
+  // 같은 분류기를 쓸 수 있게 한다.
+  assert(classifyCancelResponse(200) === 'success', '취소 legacy 200 → success');
+  assert(classifyCancelResponse(202) === 'success', '취소 202 → success');
   assert(classifyCancelResponse(404) === 'excluded', '취소 404 → excluded');
   assert(classifyCancelResponse(409) === 'excluded', '취소 409 → excluded');
   assert(classifyCancelResponse(0) === 'infra_fail', '취소 status 0 → infra_fail');

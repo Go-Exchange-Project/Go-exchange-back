@@ -27,7 +27,7 @@ const TAKER_MARKET_RATIO = 0.5; // 테이커 중 시장가 50% / crossing 지정
 
 // 취소 응답의 404(주문 없음)·409(이미 체결)는 정상 레이스 결과라 http_req_failed에
 // 실패로 세지 않는다 — 성공/이미체결/실패는 커스텀 카운터로만 구분한다.
-const cancelResponseCallback = http.expectedStatuses(200, 404, 409);
+const cancelResponseCallback = http.expectedStatuses(200, 202, 404, 409);
 
 const orderSuccess = new Counter('custom_order_success');
 const orderFail = new Counter('custom_order_fail');
@@ -195,7 +195,7 @@ function makerFlow(user) {
     tags: { name: 'cancel_order' },
     responseCallback: cancelResponseCallback,
   });
-  if (cancelRes.status === 200) {
+  if (cancelRes.status === 200 || cancelRes.status === 202) {
     cancelSuccess.add(1);
   } else if (cancelRes.status === 404 || cancelRes.status === 409) {
     cancelAlreadyFilled.add(1);

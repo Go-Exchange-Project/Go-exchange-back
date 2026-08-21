@@ -35,7 +35,7 @@ const MAKER_CANCEL_PROBABILITY = 0.3;
 const TAKER_MARKET_RATIO = 0.5;
 
 // 취소 응답의 404(주문 없음)·409(이미 체결)는 정상 레이스 결과 — 실패로 안 셈.
-const cancelResponseCallback = http.expectedStatuses(200, 404, 409);
+const cancelResponseCallback = http.expectedStatuses(200, 202, 404, 409);
 // 주문 생성의 503(입장 거절)은 ④의 의도된 "우아한 셰딩" — http_req_failed로 안 셈,
 // custom_fast_reject_503로 별도 집계.
 const orderResponseCallback = http.expectedStatuses(200, 201, 503);
@@ -325,7 +325,7 @@ function makerFlow(user) {
     tags: { name: 'cancel_order' },
     responseCallback: cancelResponseCallback,
   });
-  if (cancelRes.status === 200) {
+  if (cancelRes.status === 200 || cancelRes.status === 202) {
     cancelSuccess.add(1);
   } else if (cancelRes.status === 404 || cancelRes.status === 409) {
     cancelAlreadyFilled.add(1);

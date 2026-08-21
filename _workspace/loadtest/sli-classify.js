@@ -7,9 +7,12 @@ export function classifyOrderResponse(status, durationMs, sloMs) {
   };
 }
 
-// 취소 성공률 분류: 404/409는 정상 경쟁이라 분모 제외, 그 외 비-200(status 0·5xx 포함)은 인프라 실패.
+// 취소 성공률 분류: 404/409는 정상 경쟁이라 분모 제외, 그 외(status 0·5xx 포함)는 인프라 실패.
+//
+// 202는 "취소 의도가 내구적으로 저장됐다"는 현재 계약이고, 200은 그 전 계약이다.
+// 둘 다 성공으로 둔다 — 202를 빠뜨리면 취소 성공률이 0%로 보인다.
 export function classifyCancelResponse(status) {
-  if (status === 200) return 'success';
+  if (status === 200 || status === 202) return 'success';
   if (status === 404 || status === 409) return 'excluded';
   return 'infra_fail';
 }
