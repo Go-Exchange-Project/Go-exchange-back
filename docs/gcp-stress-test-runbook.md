@@ -96,6 +96,50 @@ Grafana 대시보드(5번 단계에서 연 탭)를 계속 보면서, 다음 중 
 
 어느 패널이 가장 먼저 무너지는지, 몇 VU 근처에서 그랬는지를 기록해둔다.
 
+## 7.5. 산출물 시크릿 게이트 (필수)
+
+**동기화 대상 경로(`_workspace/`, `_artifacts/`, OneDrive 아래 어디든)에는 시크릿 스캔을
+통과한 정리본만 진입한다. 원본 summary는 진입하지 않는다.**
+
+k6의 `--summary-export`는 `setup()`의 반환값을 `setup_data`에 통째로 덤프한다. 이 저장소의
+부하 하니스는 사용자별 JWT를 거기에 담으므로, 정리하지 않은 summary는 토큰 수백~수천 개를
+그대로 들고 있다. 34번·35번에서 실제로 그렇게 남아 사후 정리와 클라우드 버전 기록 확인이
+필요했다. 순서를 지키면 그 일이 생기지 않는다.
+
+| # | 단계 | 실패 시 |
+|---|---|---|
+| 1 | summary 원본은 **원격 VM 또는 OneDrive 밖 임시 경로**에만 생성한다 | — |
+| 2 | `setup_data`를 redaction metadata로 치환한다 | — |
+| 3 | metrics가 정리 전후 **동일**한지 검증한다 | **중단** |
+| 4 | JWT·`"token"`·Bearer·Authorization·`GOEXCHANGE_JWT_SECRET` 패턴을 스캔한다 | — |
+| 5 | 히트가 하나라도 있으면 **packaging·복사를 중단**한다 | **중단** |
+| 6 | 통과한 파일만 tgz로 만들고 checksum을 계산한다 | — |
+| 7 | **그 이후에만** `_workspace/`·`_artifacts/`로 복사한다 | — |
+
+2~5는 스크립트가 수행하고, 실패하면 **exit 2**로 멈춘다.
+
+```bash
+# VM 또는 OneDrive 밖 임시 경로에서 (2~5단계)
+python _workspace/loadtest/redact_summary.py <phase>-summary-a.json <phase>-summary-b.json
+
+# 6단계: 통과한 뒤에만 packaging
+tar czf <phase>-loadgen-a.tgz <phase>-summary-a.json <phase>-stdout-a.log <phase>/
+sha256sum *.tgz > checksums.txt
+
+# 7단계 직전 최종 확인 — 디렉터리 재귀 스캔
+python _workspace/loadtest/redact_summary.py --scan-only <staging-dir>
+```
+
+tgz를 만든 뒤에 정리하면 압축 내부가 남으므로 **반드시 packaging 전에** 수행한다.
+이미 만들어진 tgz를 정리하려면 풀어서 정리하고 **멤버 이름·순서를 보존해 재생성**한 뒤
+checksum을 갱신하고, 정리 전/후 checksum을 `redaction-manifest.json`에 남긴다.
+
+스크립트 자체의 회귀는 `python _workspace/loadtest/redact_summary_test.py`로 고정돼 있다
+(JWT fixture 입력에서 `setup_data` 제거 · metrics 불변 · 스캔 0건 · 히트 시 exit 2).
+
+> 이 게이트는 **측정 산출물**에 적용한다. 하니스 소스 자체를 스캔하면 스크립트의 패턴
+> 리터럴과 테스트 fixture가 히트로 잡히는데, 둘 다 실제 시크릿이 아니다.
+
 ## 8. 결과 기록
 
 k6 종료 시 출력되는 요약과, Grafana 대시보드 스크린샷(문제가 시작된 시점 전후)을 캡처해서 기존 컨벤션대로 저장한다.

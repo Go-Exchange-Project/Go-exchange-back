@@ -26,6 +26,7 @@
 - API·프런트·E2E·k6의 202 계약을 같은 변경 집합에서 완성한다. UI polling timeout은 실패가 아니라 “접수됨 · 처리 중”이다.
 - B 이후 성능 수치를 34번과 PASS/FAIL로 직접 비교하지 않는다. 500 VU 10분 1회에서 취소 acceptance 100%, 인프라 실패 0건만 게이트로 쓰고 HTTP p95·`cancel_command_latency_seconds`는 새 기준선으로 기록한다.
 - 백엔드와 프런트는 별도 Git 저장소다. 각 저장소에서 관련 파일만 stage하고 커밋 전 `commit-message` 스킬을 사용한다. 기존 `_workspace/` 산출물과 프런트의 선행 커밋을 되돌리거나 섞지 않는다.
+- **산출물은 시크릿 게이트를 통과한 정리본만 동기화 경로(`_workspace/`·`_artifacts/`)에 넣는다.** k6 `--summary-export`가 `setup_data`에 사용자 JWT를 덤프하므로, summary 원본은 원격 VM이나 OneDrive 밖에서 만들고 → `setup_data` 치환 → metrics 불변 검증 → 시크릿 스캔 → 통과분만 packaging·복사한다. 절차와 스크립트는 [gcp-stress-test-runbook §7.5](../../gcp-stress-test-runbook.md)에 있다.
 - 각 코드 작업은 RED → GREEN 순서다. 백엔드 단위 게이트는 `go test ./... -race`, 통합 게이트는 DSN을 설정한 `go test -run Integration -p 1`, 프런트 게이트는 `npm test && npm run lint && npm run build`다.
 
 ---
