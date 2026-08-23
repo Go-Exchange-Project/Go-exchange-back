@@ -293,7 +293,24 @@ _workspace/buy-order-index-remeasurement/
       hard-gate.json, gcp-gate.json|gcp-report.json,
       snapshots/ (176 / 98 / 75), cpu-*.txt (각 4)
   gcp/ARTIFACT-SHA256.txt         산출물·하니스·판정기 checksum
+  redaction-manifest.json         setup_data 제거 이력(정리 전/후 checksum)
 ```
+
+> **⚠ 산출물은 측정 후 재패키징됐다 — 지표는 불변이다.**
+>
+> k6의 `--summary-export`는 `setup_data`를 그대로 덤프하는데, 이 하니스의 `setup()`은
+> 부하 사용자별 JWT를 그 안에 담는다. 그래서 평문 summary 12개와 load-gen tgz 6개에
+> 사용자 토큰이 남아 있었다(총 6,000개, 중복 사본 포함).
+>
+> 2026-08-23에 **`setup_data`를 `{users_redacted, note}`로 치환**하고 load-gen tgz를
+> 재패키징했다. **`metrics`를 포함한 지표 데이터는 건드리지 않았고**, 정리 전후 18개
+> 파일의 `metrics`가 동일함을 파싱 비교로 확인했다. DB·server tgz 6개는 열지 않았다
+> (스캔 결과 토큰 0건).
+>
+> 위 `ARTIFACT-SHA256.txt`의 `summary-a/b.json` 6줄은 **정리본 기준으로 갱신**됐고,
+> 정리로 값이 바뀐 load-gen tgz 6개의 checksum을 새로 추가했다. 나머지 항목은 측정 당시
+> 값 그대로다(전수 대조 41건 일치). 정리 전 checksum과 제거 필드는
+> `redaction-manifest.json`에 남겼다. **JWT를 포함한 원본은 보존하지 않는다.**
 
 ### 6.3 GCP 종료
 
