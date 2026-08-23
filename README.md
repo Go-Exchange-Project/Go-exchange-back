@@ -131,7 +131,11 @@ flowchart TD
 - `locked_balance`: 미체결 주문에 예약된 영역
 - BUY 지정가 주문: KRW를 hold
 - SELL 지정가 주문: 코인을 hold
-- 주문 취소: remaining 기준으로 locked를 available로 release
+- 주문 취소: remaining 기준으로 locked를 available로 release.
+  **`DELETE /orders/:id`는 `202 Accepted`로 "접수"만 응답한다** — 취소 의도를
+  `cancel_commands`에 내구 기록한 시점이지 오더북에서 제거된 시점이 아니다. 실제 제거는
+  worker가, hold 해제는 정산 파이프라인이 비동기로 수행하므로 최종 상태는 주문 조회로
+  확인한다([35번](docs/benchmarks/35-2026-08-23-cancel-command-outbox.md))
 - 체결 정산: buyer/seller 양쪽 주문, 지갑, 수수료, 평균매수가, ledger를 하나의 DB transaction으로 반영
 
 ```mermaid
@@ -212,7 +216,7 @@ go run ./cmd
 | GET | `/markets/rules?coin_symbol=BTC` | 없음 | 시장 정책 조회 |
 | GET | `/orderbook?coin_symbol=BTC` | 없음 | 현재 오더북 snapshot 조회 |
 | POST | `/orders` | 필요 | 지정가/시장가 주문 생성 |
-| DELETE | `/orders/:id` | 필요 | 미체결/부분체결 주문 취소 |
+| DELETE | `/orders/:id` | 필요 | 미체결/부분체결 주문 **취소 command 접수**(`202 Accepted`) |
 | GET | `/orders` | 필요 | 내 주문 목록 |
 | GET | `/orders/:id` | 필요 | 내 주문 단건 |
 | GET | `/wallets` | 필요 | 내 지갑 목록 |

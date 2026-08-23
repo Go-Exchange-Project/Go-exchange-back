@@ -261,6 +261,29 @@ CPU 단독 효과가 아니다. DB4 기준값은 다른 세션·호스트에서 
   않는다. 비교 가능한 것은 **같은 750 VU에서의 배율 변화**까지다.
 - 인덱스 제거 후에도 750에서 growth가 1.26~1.46이다 — **남은 비용 성장 항은 여전히 미분리**다.
 
+### 취소 command outbox — B(정확성 부채) 1번 ([35](../benchmarks/35-2026-08-23-cancel-command-outbox.md))
+
+성능 측정이 아니라 **계약 전환**이다. 취소 성공 응답이 내구 기록보다 앞서던 창을 닫았다.
+
+- **닫은 결함**: `processCancel`이 `ResponseCh` 응답 뒤에 `emitOrderCancelled`를 하므로, 그
+  사이에 죽으면 사용자는 취소 성공을 받았는데 outbox에는 기록이 없고 DB 주문은 `PENDING`이라
+  재기동 bootstrap이 **그 주문을 다시 오더북에 올린다**.
+- **바뀐 계약**: `DELETE /orders/:id`가 엔진을 호출하지 않고 `cancel_commands`에 내구 기록한 뒤
+  **`202 Accepted`**. `CancelCommandWorker`가 엔진에 전달하고, `OutboxWriter`가 execution outbox
+  INSERT와 command `PROCESSED`를 **한 트랜잭션**으로 커밋한다.
+- **⚠ 사용자가 체감하는 대가**: 202는 "오더북에서 제거됨"이 아니다. 응답 시점에 주문은 아직
+  오더북에 있고 **추가 체결 가능 창**이 있다. end-to-end 상한은 약속하지 않는다.
+- **500 VU 10분 1회**: 취소 acceptance **100%**(29,541/0), 인프라 실패 **0**, 정합성 4종 0.
+  `DELETE` 응답 **202 30,267 · 409 45,779 · 200 0**이고, k6 취소 성공과 `cancel_commands` 종결
+  (PROCESSED 30,195 + NOOP 72)이 **같은 30,267**이다. CANCELLED 72,355 : `ORDER_RELEASE`
+  72,355 = **1:1**, 중복 0.
+- **새 기준선**(합격선 아님): command latency p50 16.6ms · p95 49.4ms · p99 180.3ms,
+  HTTP 202 p95 7.9ms, `awaiting_outbox` deadline 증가량 0.
+- **⚠ 34번과 성능 비교하지 않는다.** 취소 SLI 정의(200 → 200|202), `matching` 패키지 바이너리,
+  취소 응답의 의미가 모두 바뀌었다. 공유하는 것은 topology와 워크로드 형태뿐이다.
+- **`maxConsecutiveCancels` 재튜닝은 남아 있다** — 취소 도착 패턴이 worker dispatch로 바뀌었으므로
+  이 패턴 위에서 다시 정해야 한다.
+
 증설은 그 뒤에 판단한다. **진단이 동시성 부족을 가리킬 때만** 아래로 간다:
 
 1. **N=16에서 동일 경계 탐색**(10분 hold 기준, 32-B의 500이 비교 기준선)
