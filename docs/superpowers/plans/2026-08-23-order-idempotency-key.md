@@ -22,7 +22,8 @@
 - **`UNKNOWN`은 best-effort다.** 기록에 실패하면 `PENDING`에 머문다.
 - 모든 outcome 변경은 **`outcome`과 `updated_at`을 한 UPDATE 문에서** 갱신한다.
 - **주문이 커밋된 뒤에는 어떤 실패에서도 키를 삭제하지 않는다.** 예외는 hold 검증에 실패해 주문이 만들어지지 않은 미커밋 키뿐이다.
-- 지문은 **버전 + 길이-prefix 인코딩**이다. DTO 통째 직렬화 금지, decimal은 정규화 문자열.
+- 지문은 **버전 + 길이-prefix 인코딩**이다. DTO 통째 직렬화 금지, decimal은 문자열로 넣되
+  **자릿수를 자르지 않는다**(자르면 그 아래 자리만 다른 주문이 같은 지문을 받는다).
 - `order_idempotency_keys`는 **AutoMigrate에 등록하지 않는다**(007과 같은 이유 — GORM이 UNIQUE를 자기 명명규칙으로 DROP하려 해 두 번째 부팅부터 SQLSTATE 42704).
 - migration 008은 부분 인덱스를 **같은 Up에서 카탈로그로 검증**하고 어긋나면 `RAISE EXCEPTION`한다(006과 같은 방식).
 - **보장 범위**: 중복 방지 + 같은 `order_id` + 저장된 최선의 결과. **첫 HTTP 응답 재생은 보장하지 않는다.**
@@ -69,7 +70,7 @@
 
 **Interfaces:**
 - Produces:
-  - `const OrderFingerprintVersion = 1`
+  - `const CurrentOrderFingerprintVersion = 1` (알고리즘은 `computeOrderFingerprintV1`로 분리)
   - `service.OrderFingerprintInput{UserID uint; CoinSymbol, Side, OrderType string; Price, Amount, QuoteAmount decimal.Decimal}`
   - `service.ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, error)`
 
@@ -105,9 +106,9 @@ func TestComputeOrderFingerprintNormalizesDecimals(t *testing.T) {
 	b := fingerprintInput()
 	b.Price = decimal.RequireFromString("100.5")
 
-	fa, err := ComputeOrderFingerprint(a, OrderFingerprintVersion)
+	fa, err := ComputeOrderFingerprint(a, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
-	fb, err := ComputeOrderFingerprint(b, OrderFingerprintVersion)
+	fb, err := ComputeOrderFingerprint(b, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
 
 	assert.Equal(t, fa, fb)
@@ -120,16 +121,16 @@ func TestComputeOrderFingerprintIsUnambiguousAcrossFieldBoundaries(t *testing.T)
 	b := fingerprintInput()
 	b.CoinSymbol, b.Side = "BTCS", "ELL"
 
-	fa, err := ComputeOrderFingerprint(a, OrderFingerprintVersion)
+	fa, err := ComputeOrderFingerprint(a, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
-	fb, err := ComputeOrderFingerprint(b, OrderFingerprintVersion)
+	fb, err := ComputeOrderFingerprint(b, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, fa, fb, "필드 경계가 모호하면 서로 다른 요청이 같은 지문을 갖는다")
 }
 
 func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
-	base, err := ComputeOrderFingerprint(fingerprintInput(), OrderFingerprintVersion)
+	base, err := ComputeOrderFingerprint(fingerprintInput(), CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
 
 	mutations := map[string]func(*OrderFingerprintInput){
@@ -144,7 +145,7 @@ func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
 	for name, mutate := range mutations {
 		in := fingerprintInput()
 		mutate(&in)
-		got, err := ComputeOrderFingerprint(in, OrderFingerprintVersion)
+		got, err := ComputeOrderFingerprint(in, CurrentOrderFingerprintVersion)
 		require.NoError(t, err)
 		assert.NotEqual(t, base, got, "%s가 지문에 반영되지 않았다", name)
 	}
@@ -154,6 +155,32 @@ func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
 func TestComputeOrderFingerprintRejectsUnknownVersion(t *testing.T) {
 	_, err := ComputeOrderFingerprint(fingerprintInput(), 99)
 	require.Error(t, err)
+}
+
+// 자릿수를 잘라내는 것은 정규화가 아니라 정보 손실이다. 입력이 소수 18자리로 제한되지
+// 않으므로, 19번째 자리만 다른 두 주문이 같은 지문을 받으면 서로를 재시도로 오인한다.
+func TestComputeOrderFingerprintKeepsDigitsBeyondEighteenPlaces(t *testing.T) {
+	a := fingerprintInput()
+	a.Amount = decimal.RequireFromString("1.0000000000000000001")
+	b := fingerprintInput()
+	b.Amount = decimal.RequireFromString("1.0000000000000000002")
+
+	fa, err := ComputeOrderFingerprint(a, CurrentOrderFingerprintVersion)
+	require.NoError(t, err)
+	fb, err := ComputeOrderFingerprint(b, CurrentOrderFingerprintVersion)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, fa, fb)
+}
+
+// v1은 DB에 저장된 값이다. CurrentOrderFingerprintVersion을 2로 올려도 v1 계산은
+// 그대로여야 한다 — 이 값이 바뀌면 배포만으로 기존 키의 재시도가 409가 된다.
+// 버전을 올릴 때 이 테스트를 고치면 안 되고, 새 버전용 golden을 추가해야 한다.
+func TestComputeOrderFingerprintV1IsFrozen(t *testing.T) {
+	got, err := ComputeOrderFingerprint(fingerprintInput(), 1)
+	require.NoError(t, err)
+
+	assert.Equal(t, "95798288d827b6cccfc97d5bd57abb442f1f00047f1c9433b4f57463f699c398", got)
 }
 ```
 
@@ -177,9 +204,13 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// OrderFingerprintVersion은 지문 계산 규칙의 버전이다. 지문에 들어가는 필드 목록이
-// 바뀌면 올린다. 비교는 항상 레코드에 저장된 버전의 규칙으로 한다.
-const OrderFingerprintVersion = 1
+// CurrentOrderFingerprintVersion은 새 레코드를 저장할 때 쓰는 버전이다. 지문에 들어가는
+// 필드 목록이 바뀌면 올린다.
+//
+// 이 상수를 올려도 computeOrderFingerprintV1은 그대로 남아야 한다. 비교는 항상 레코드에
+// 저장된 버전의 알고리즘으로 하므로, 그래야 배포만으로 기존 키의 재시도가 다른 지문을
+// 얻지 않는다.
+const CurrentOrderFingerprintVersion = 1
 
 type OrderFingerprintInput struct {
 	UserID      uint
@@ -191,16 +222,22 @@ type OrderFingerprintInput struct {
 	QuoteAmount decimal.Decimal
 }
 
-// ComputeOrderFingerprint는 요청을 결정하는 값만 모아 해시한다.
+// ComputeOrderFingerprint는 version이 지정한 알고리즘으로 지문을 계산한다.
+func ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, error) {
+	switch version {
+	case 1:
+		return computeOrderFingerprintV1(in), nil
+	default:
+		return "", fmt.Errorf("unsupported order fingerprint version %d", version)
+	}
+}
+
+// computeOrderFingerprintV1은 요청을 결정하는 값만 모아 해시한다.
 //
 // DTO를 통째로 직렬화하지 않는다 — 필드 추가·키 순서·JSON 표현 변경만으로 기존 키가
 // 전부 깨진다. 필드는 명시적으로 나열하고, 각 값은 길이-prefix로 이어 붙여 경계를
 // 모호하지 않게 만든다("BTC"+"SELL"과 "BTCS"+"ELL"이 같은 입력이 되면 안 된다).
-func ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, error) {
-	if version != OrderFingerprintVersion {
-		return "", fmt.Errorf("unsupported order fingerprint version %d", version)
-	}
-
+func computeOrderFingerprintV1(in OrderFingerprintInput) string {
 	hash := sha256.New()
 	write := func(value string) {
 		var prefix [4]byte
@@ -209,28 +246,26 @@ func ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, err
 		hash.Write([]byte(value))
 	}
 
-	write(fmt.Sprintf("v%d", version))
+	write("v1")
 	write(strconv.FormatUint(uint64(in.UserID), 10))
 	write(in.CoinSymbol)
 	write(in.Side)
 	write(in.OrderType)
-	// decimal은 JSON 숫자나 부동소수점이 아니라 정규화된 문자열로 넣는다.
-	write(normalizedDecimalString(in.Price))
-	write(normalizedDecimalString(in.Amount))
-	write(normalizedDecimalString(in.QuoteAmount))
+	// decimal은 JSON 숫자나 부동소수점이 아니라 문자열로 넣는다. String()은 후행 0을
+	// 제거하므로 100.50과 100.5가 같은 지문이 된다. 자릿수는 자르지 않는다 — 자르면
+	// 그 아래 자리만 다른 주문이 같은 지문이 된다.
+	write(in.Price.String())
+	write(in.Amount.String())
+	write(in.QuoteAmount.String())
 
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func normalizedDecimalString(value decimal.Decimal) string {
-	return value.Truncate(18).String()
+	return hex.EncodeToString(hash.Sum(nil))
 }
 ```
 
 - [ ] **Step 4: 통과 확인**
 
 Run: `go test ./internal/service -run OrderFingerprint -v`
-Expected: PASS 4개
+Expected: PASS 6개
 
 - [ ] **Step 5: 커밋**
 
@@ -241,7 +276,7 @@ git commit -F _workspace/commit-draft.md
 
 권장 subject: `feat(order): 주문 요청의 버전형 지문 계산 추가`
 
-**커버하는 검증**: 6, 6b, 6c
+**커버하는 검증**: 6, 6b, 6c, 6d
 
 ---
 
@@ -275,6 +310,10 @@ func TestOrderIdempotencyMigrationDeclaresContract(t *testing.T) {
 	assert.Contains(t, sql, "UNIQUE (user_id, idempotency_key)")
 	assert.Contains(t, sql, "fingerprint_version")
 	assert.Contains(t, sql, "'PENDING','ACCEPTED','REJECTED','UNKNOWN'")
+	assert.Contains(t, sql, "NOT NULL DEFAULT 'PENDING'")
+
+	// 제약도 conname 존재만으로는 부족하다 — 실제 정의를 확인해야 한다.
+	assert.Contains(t, sql, "pg_get_constraintdef")
 
 	assert.Contains(t, sql, "CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at")
 	assert.Contains(t, sql, "WHERE outcome = 'PENDING'")
@@ -320,8 +359,11 @@ type OrderIdempotencyKey struct {
 	IdempotencyKey     string                  `gorm:"not null"`
 	Fingerprint        string                  `gorm:"not null"`
 	FingerprintVersion int                     `gorm:"not null"`
-	OrderID            *uint                   // 1단계 INSERT 시점에는 모른다
-	Outcome            OrderIdempotencyOutcome // 〃
+	OrderID            *uint // 1단계 INSERT 시점에는 모른다
+	// DB는 NOT NULL DEFAULT 'PENDING'이다. 커밋 시점의 outcome은 이미 PENDING으로
+	// 확정되므로 nullable로 두지 않는다 — 값 타입과 NULL 컬럼이 섞이면 GORM이 빈
+	// 문자열을 넣어 CHECK와 충돌한다. INSERT 시 명시적으로 PENDING을 채운다.
+	Outcome            OrderIdempotencyOutcome
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -341,7 +383,9 @@ CREATE TABLE IF NOT EXISTS order_idempotency_keys (
     fingerprint         TEXT        NOT NULL,
     fingerprint_version INT         NOT NULL,
     order_id            BIGINT,
-    outcome             TEXT,
+    -- 커밋 시점의 outcome은 이미 PENDING으로 확정된다. NULL을 허용하면 Go 모델의
+    -- 값 타입과 어긋나 GORM이 빈 문자열을 넣는 경로가 생긴다.
+    outcome             TEXT        NOT NULL DEFAULT 'PENDING',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -376,10 +420,50 @@ BEGIN
     ) THEN
         ALTER TABLE order_idempotency_keys
             ADD CONSTRAINT order_idempotency_keys_outcome_check
-            CHECK (outcome IS NULL OR outcome IN ('PENDING','ACCEPTED','REJECTED','UNKNOWN'));
+            CHECK (outcome IN ('PENDING','ACCEPTED','REJECTED','UNKNOWN'));
     END IF;
 END $$;
 -- +goose StatementEnd
+
+-- 위 블록은 conname 존재만 본다. 같은 이름의 잘못된 제약이 이미 있으면 조용히 통과하므로
+-- (인덱스의 IF NOT EXISTS와 같은 구멍), 실제 정의를 확인하고 어긋나면 실패시킨다.
+-- 기대 문자열은 PostgreSQL 16.14와 18.4의 pg_get_constraintdef 출력이 동일함을 확인했다.
+-- +goose StatementBegin
+DO $$
+DECLARE
+    expected CONSTANT text[][] := ARRAY[
+        ARRAY['order_idempotency_keys_user_key_unique',
+              $def$UNIQUE (user_id, idempotency_key)$def$],
+        ARRAY['order_idempotency_keys_key_length',
+              $def$CHECK (((length(btrim(idempotency_key)) >= 1) AND (length(btrim(idempotency_key)) <= 128)))$def$],
+        ARRAY['order_idempotency_keys_outcome_check',
+              $def$CHECK ((outcome = ANY (ARRAY['PENDING'::text, 'ACCEPTED'::text, 'REJECTED'::text, 'UNKNOWN'::text])))$def$]
+    ];
+    constraint_name text;
+    want text;
+    got text;
+BEGIN
+    FOR i IN 1 .. array_length(expected, 1) LOOP
+        constraint_name := expected[i][1];
+        want := expected[i][2];
+
+        SELECT pg_get_constraintdef(oid) INTO got
+        FROM pg_constraint
+        WHERE conrelid = 'order_idempotency_keys'::regclass
+          AND conname = constraint_name;
+
+        IF got IS NULL THEN
+            RAISE EXCEPTION 'constraint % is missing on order_idempotency_keys', constraint_name;
+        END IF;
+
+        -- 공백만 다른 경우는 같은 제약으로 본다.
+        IF regexp_replace(got, '\s+', '', 'g') <> regexp_replace(want, '\s+', '', 'g') THEN
+            RAISE EXCEPTION 'constraint % has an unexpected definition: %', constraint_name, got;
+        END IF;
+    END LOOP;
+END $$;
+-- +goose StatementEnd
+
 
 -- stale PENDING gauge 조회 전용. 정상 상태에서는 거의 비어 있다.
 CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at
@@ -429,12 +513,14 @@ SELECT 1;
 package dbmigration_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestOrderIdempotencyKeysIntegration(t *testing.T) {
@@ -452,20 +538,25 @@ WHERE t.relname = 'order_idempotency_keys'
 		assert.Equal(t, "UNIQUE (user_id, idempotency_key)", definition)
 	})
 
+	// 008의 카탈로그 검증이 보는 조건을 그대로 단언한다. 하나라도 느슨하면
+	// 검증 조건이 빠져도 이 테스트가 통과한다.
 	t.Run("부분 인덱스 정의가 정확하다", func(t *testing.T) {
 		var got struct {
-			AccessMethod string
-			FirstColumn  string
-			Indisready   bool
-			Indisvalid   bool
-			Indisunique  bool
-			Indnkeyatts  int
-			Predicate    *string
+			AccessMethod    string
+			FirstColumn     string
+			Indisready      bool
+			Indisvalid      bool
+			Indisunique     bool
+			Indnkeyatts     int
+			Indnatts        int
+			HasNoExpression bool
+			Predicate       *string
 		}
 		require.NoError(t, db.Raw(`
 SELECT am.amname AS access_method,
        a.attname AS first_column,
-       i.indisready, i.indisvalid, i.indisunique, i.indnkeyatts,
+       i.indisready, i.indisvalid, i.indisunique, i.indnkeyatts, i.indnatts,
+       (i.indexprs IS NULL) AS has_no_expression,
        pg_get_expr(i.indpred, i.indrelid) AS predicate
 FROM pg_class c
 JOIN pg_index i ON i.indexrelid = c.oid
@@ -479,8 +570,53 @@ WHERE c.relname = 'order_idempotency_pending_updated_at'`).Scan(&got).Error)
 		assert.True(t, got.Indisvalid)
 		assert.False(t, got.Indisunique)
 		assert.Equal(t, 1, got.Indnkeyatts)
+		assert.Equal(t, 1, got.Indnatts, "INCLUDE 컬럼이 붙으면 008의 검증이 실패한다")
+		assert.True(t, got.HasNoExpression, "표현식 인덱스가 아니어야 한다")
 		require.NotNil(t, got.Predicate)
-		assert.Contains(t, *got.Predicate, "PENDING")
+		assert.Equal(t, "(outcome = 'PENDING'::text)", *got.Predicate)
+	})
+
+	// gauge 조회는 이 CHECK를 신뢰한다. HTTP 검증만으로는 다른 경로의 INSERT를 못 막는다.
+	t.Run("키 길이 CHECK가 공백 제외 1~128자를 강제한다", func(t *testing.T) {
+		insert := func(key string) error {
+			return db.Exec(`
+INSERT INTO order_idempotency_keys (user_id, idempotency_key, fingerprint, fingerprint_version)
+VALUES (?, ?, ?, ?)`, 999999, key, "fp", 1).Error
+		}
+
+		valid := strings.Repeat("k", 128)
+		require.NoError(t, insert(valid))
+		t.Cleanup(func() {
+			require.NoError(t, db.Exec(
+				`DELETE FROM order_idempotency_keys WHERE user_id = ?`, 999999).Error)
+		})
+
+		assert.Error(t, insert("   "), "공백만 있는 키가 통과했다")
+		assert.Error(t, insert(strings.Repeat("k", 129)), "129자 키가 통과했다")
+
+		// length()는 바이트가 아니라 문자를 센다. 서버 검증도 rune으로 세야 두 단위가 맞는다.
+		multibyte := strings.Repeat("가", 128) // 384바이트
+		require.NoError(t, insert(multibyte), "128자 멀티바이트 키가 거부됐다 — CHECK가 바이트를 센다")
+		assert.Error(t, insert(strings.Repeat("가", 129)), "129자 멀티바이트 키가 통과했다")
+	})
+
+	// 커밋 시점 outcome은 PENDING으로 확정된다. NULL을 허용하면 Go 모델의 값 타입과
+	// 어긋나 GORM이 빈 문자열을 넣는 경로가 생긴다.
+	t.Run("outcome은 NOT NULL이고 기본값이 PENDING이다", func(t *testing.T) {
+		var got struct {
+			IsNullable    string
+			ColumnDefault *string
+		}
+		require.NoError(t, db.Raw(`
+SELECT is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND table_name = 'order_idempotency_keys'
+  AND column_name = 'outcome'`).Scan(&got).Error)
+
+		assert.Equal(t, "NO", got.IsNullable)
+		require.NotNil(t, got.ColumnDefault)
+		assert.Contains(t, *got.ColumnDefault, "'PENDING'")
 	})
 
 	t.Run("goose version이 8이다", func(t *testing.T) {
@@ -489,6 +625,47 @@ WHERE c.relname = 'order_idempotency_pending_updated_at'`).Scan(&got).Error)
 			`SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version).Error)
 		assert.GreaterOrEqual(t, version, int64(8))
 	})
+}
+
+// 제약은 conname 존재만 보고 조건부로 만든다. 같은 이름의 잘못된 제약이 이미 있으면
+// 이름만으로 통과하므로, 실제 정의 검증이 없으면 틀린 스키마가 version 8로 기록된다.
+func TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint(t *testing.T) {
+	wrong := map[string]struct{ name, definition string }{
+		"UNIQUE 범위가 전역이다": {
+			"order_idempotency_keys_user_key_unique", "UNIQUE (idempotency_key)"},
+		"키 길이 상한이 다르다": {
+			"order_idempotency_keys_key_length",
+			"CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 1280)"},
+		"outcome 목록이 다르다": {
+			"order_idempotency_keys_outcome_check",
+			"CHECK (outcome IN ('PENDING','ACCEPTED','REJECTED'))"},
+	}
+
+	for name, tc := range wrong {
+		t.Run(name, func(t *testing.T) {
+			db := testdb.OpenIntegrationDB(t)
+
+			require.NoError(t, db.Exec(
+				`ALTER TABLE order_idempotency_keys DROP CONSTRAINT `+tc.name).Error)
+			require.NoError(t, db.Exec(
+				`ALTER TABLE order_idempotency_keys ADD CONSTRAINT `+tc.name+` `+tc.definition).Error)
+			t.Cleanup(func() {
+				require.NoError(t, db.Exec(
+					`ALTER TABLE order_idempotency_keys DROP CONSTRAINT IF EXISTS `+tc.name).Error)
+				reapply008(t, db)
+			})
+
+			require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
+
+			err := dbmigration.Up(db)
+
+			require.Error(t, err, "잘못된 동명 제약인데 migration이 성공했다")
+			var applied int64
+			require.NoError(t, db.Raw(
+				`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
+			assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
+		})
+	}
 }
 
 // 같은 이름의 잘못된 인덱스가 있으면 migration이 실패하고 version 8이 기록되지 않아야
@@ -500,11 +677,11 @@ func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
 	// predicate 없는 전체 인덱스를 같은 이름으로 만든다.
 	require.NoError(t, db.Exec(
 		`CREATE INDEX order_idempotency_pending_updated_at ON order_idempotency_keys (updated_at)`).Error)
+	// 이 테스트는 goose version 8 행을 지우고 008을 실패시킨다. 다음 테스트가 우연히
+	// 복구해 주기를 기대하지 않고, 여기서 008을 다시 적용해 인덱스와 version을 모두 되돌린다.
 	t.Cleanup(func() {
 		require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
-		require.NoError(t, db.Exec(
-			`CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at
-			 ON order_idempotency_keys (updated_at) WHERE outcome = 'PENDING'`).Error)
+		reapply008(t, db)
 	})
 
 	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
@@ -517,6 +694,22 @@ func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
 		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
 	assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
 }
+
+// reapply008은 스키마를 훼손한 테스트가 끝난 뒤 008을 다시 적용한다.
+//
+// version 8 행을 먼저 지우는 것이 핵심이다. migration이 성공해 버린 경우에는 version 8이
+// 남아 goose가 "no migrations to run"으로 건너뛰고, 훼손된 스키마가 그대로 남는다.
+func reapply008(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
+	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
+	require.NoError(t, dbmigration.Up(db), "cleanup에서 008 재적용이 실패했다")
+
+	var applied int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
+	require.EqualValues(t, 1, applied, "cleanup 후에도 version 8이 복구되지 않았다")
+}
 ```
 
 - [ ] **Step 6: 통과 확인**
@@ -526,13 +719,18 @@ $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=
 go test ./internal/dbmigration -run OrderIdempotency -v -p 1
 ```
 
-Expected: 정적 1개 + 카탈로그 3개 서브테스트 + 실패 케이스 1개 PASS. `testdb/integration.go`는 **바꾸지 않는다**.
+Expected: 정적 1개 + 카탈로그 5개 서브테스트 + 실패 케이스 4개(동명 오제약 3 + 동명 오인덱스 1) PASS.
+`testdb/integration.go`는 **바꾸지 않는다**.
+
+스키마를 훼손하는 실패 케이스의 cleanup은 반드시 `reapply008` 헬퍼처럼 **goose version 8 행을
+먼저 지운 뒤** `dbmigration.Up`을 호출해야 한다. migration이 성공해 버린 경우에는 version 8이
+남아 goose가 건너뛰고, 훼손된 스키마가 공유 테스트 DB에 그대로 남는다.
 
 - [ ] **Step 7: 커밋**
 
 권장 subject: `feat(order): 멱등성 키 테이블과 카탈로그 검증 migration 추가`
 
-**커버하는 검증**: 9d, 9e
+**커버하는 검증**: 9d, 9e, 9f
 
 ---
 
@@ -581,6 +779,8 @@ func seedIdemRecord(userID uint, key string) *model.OrderIdempotencyKey {
 		IdempotencyKey:     key,
 		Fingerprint:        "fp-" + key,
 		FingerprintVersion: 1,
+		// outcome은 NOT NULL이다. 비워 두면 GORM이 빈 문자열을 넣어 CHECK에 걸린다.
+		Outcome: model.OrderIdempotencyOutcomePending,
 	}
 }
 
@@ -915,7 +1115,7 @@ import (
 func idemReq(userID uint, key, fingerprint string) holdRequest {
 	return holdRequest{
 		order: &model.Order{UserID: userID},
-		idem:  &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: OrderFingerprintVersion},
+		idem:  &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: CurrentOrderFingerprintVersion},
 	}
 }
 
@@ -1073,6 +1273,9 @@ for _, i := range owners {
 		IdempotencyKey:     reqs[i].idem.Key,
 		Fingerprint:        reqs[i].idem.Fingerprint,
 		FingerprintVersion: reqs[i].idem.Version,
+		// outcome은 NOT NULL이다. 비워 두면 GORM이 빈 문자열을 넣어 CHECK에 걸린다.
+		// 커밋 시점의 상태는 "durable하게 알지 못함" = PENDING으로 확정돼 있다.
+		Outcome: model.OrderIdempotencyOutcomePending,
 	})
 	recordIdx = append(recordIdx, i)
 }
@@ -1272,11 +1475,11 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		Price:       order.Price,
 		Amount:      order.Amount,
 		QuoteAmount: order.QuoteAmount,
-	}, OrderFingerprintVersion)
+	}, CurrentOrderFingerprintVersion)
 	if err != nil {
 		return nil, err
 	}
-	idem := &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: OrderFingerprintVersion}
+	idem := &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: CurrentOrderFingerprintVersion}
 
 	// ... 기존 유입 게이트 ...
 

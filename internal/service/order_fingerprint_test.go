@@ -27,12 +27,28 @@ func TestComputeOrderFingerprintNormalizesDecimals(t *testing.T) {
 	b := fingerprintInput()
 	b.Price = decimal.RequireFromString("100.5")
 
-	fa, err := ComputeOrderFingerprint(a, OrderFingerprintVersion)
+	fa, err := ComputeOrderFingerprint(a, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
-	fb, err := ComputeOrderFingerprint(b, OrderFingerprintVersion)
+	fb, err := ComputeOrderFingerprint(b, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
 
 	assert.Equal(t, fa, fb)
+}
+
+// 자릿수를 잘라내는 것은 정규화가 아니라 정보 손실이다. 입력이 소수 18자리로 제한되지
+// 않으므로, 19번째 자리만 다른 두 주문이 같은 지문을 받으면 서로를 재시도로 오인한다.
+func TestComputeOrderFingerprintKeepsDigitsBeyondEighteenPlaces(t *testing.T) {
+	a := fingerprintInput()
+	a.Amount = decimal.RequireFromString("1.0000000000000000001")
+	b := fingerprintInput()
+	b.Amount = decimal.RequireFromString("1.0000000000000000002")
+
+	fa, err := ComputeOrderFingerprint(a, CurrentOrderFingerprintVersion)
+	require.NoError(t, err)
+	fb, err := ComputeOrderFingerprint(b, CurrentOrderFingerprintVersion)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, fa, fb)
 }
 
 // 단순 연결이면 ("BTC","SELL")과 ("BTCS","ELL")이 같은 입력 문자열이 된다.
@@ -42,16 +58,16 @@ func TestComputeOrderFingerprintIsUnambiguousAcrossFieldBoundaries(t *testing.T)
 	b := fingerprintInput()
 	b.CoinSymbol, b.Side = "BTCS", "ELL"
 
-	fa, err := ComputeOrderFingerprint(a, OrderFingerprintVersion)
+	fa, err := ComputeOrderFingerprint(a, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
-	fb, err := ComputeOrderFingerprint(b, OrderFingerprintVersion)
+	fb, err := ComputeOrderFingerprint(b, CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, fa, fb, "필드 경계가 모호하면 서로 다른 요청이 같은 지문을 갖는다")
 }
 
 func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
-	base, err := ComputeOrderFingerprint(fingerprintInput(), OrderFingerprintVersion)
+	base, err := ComputeOrderFingerprint(fingerprintInput(), CurrentOrderFingerprintVersion)
 	require.NoError(t, err)
 
 	mutations := map[string]func(*OrderFingerprintInput){
@@ -66,7 +82,7 @@ func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
 	for name, mutate := range mutations {
 		in := fingerprintInput()
 		mutate(&in)
-		got, err := ComputeOrderFingerprint(in, OrderFingerprintVersion)
+		got, err := ComputeOrderFingerprint(in, CurrentOrderFingerprintVersion)
 		require.NoError(t, err)
 		assert.NotEqual(t, base, got, "%s가 지문에 반영되지 않았다", name)
 	}
@@ -76,4 +92,14 @@ func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
 func TestComputeOrderFingerprintRejectsUnknownVersion(t *testing.T) {
 	_, err := ComputeOrderFingerprint(fingerprintInput(), 99)
 	require.Error(t, err)
+}
+
+// v1은 DB에 저장된 값이다. CurrentOrderFingerprintVersion을 2로 올려도 v1 계산은
+// 그대로여야 한다 — 이 값이 바뀌면 배포만으로 기존 키의 재시도가 409가 된다.
+// 버전을 올릴 때 이 테스트를 고치면 안 되고, 새 버전용 golden을 추가해야 한다.
+func TestComputeOrderFingerprintV1IsFrozen(t *testing.T) {
+	got, err := ComputeOrderFingerprint(fingerprintInput(), 1)
+	require.NoError(t, err)
+
+	assert.Equal(t, "95798288d827b6cccfc97d5bd57abb442f1f00047f1c9433b4f57463f699c398", got)
 }

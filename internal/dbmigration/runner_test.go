@@ -91,6 +91,10 @@ func TestOrderIdempotencyMigrationDeclaresContract(t *testing.T) {
 	assert.Contains(t, sql, "UNIQUE (user_id, idempotency_key)")
 	assert.Contains(t, sql, "fingerprint_version")
 	assert.Contains(t, sql, "'PENDING','ACCEPTED','REJECTED','UNKNOWN'")
+	assert.Contains(t, sql, "NOT NULL DEFAULT 'PENDING'")
+
+	// 제약도 conname 존재만으로는 부족하다 — 실제 정의를 확인해야 한다.
+	assert.Contains(t, sql, "pg_get_constraintdef")
 
 	assert.Contains(t, sql, "CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at")
 	assert.Contains(t, sql, "WHERE outcome = 'PENDING'")

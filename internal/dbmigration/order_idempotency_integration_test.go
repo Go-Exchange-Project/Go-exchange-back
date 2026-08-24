@@ -10,6 +10,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestOrderIdempotencyKeysIntegration(t *testing.T) {
@@ -89,12 +90,72 @@ VALUES (?, ?, ?, ?)`, 999999, key, "fp", 1).Error
 		assert.Error(t, insert(strings.Repeat("가", 129)), "129자 멀티바이트 키가 통과했다")
 	})
 
+	// 커밋 시점 outcome은 PENDING으로 확정된다. NULL을 허용하면 Go 모델의 값 타입과
+	// 어긋나 GORM이 빈 문자열을 넣는 경로가 생긴다.
+	t.Run("outcome은 NOT NULL이고 기본값이 PENDING이다", func(t *testing.T) {
+		var got struct {
+			IsNullable    string
+			ColumnDefault *string
+		}
+		require.NoError(t, db.Raw(`
+SELECT is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND table_name = 'order_idempotency_keys'
+  AND column_name = 'outcome'`).Scan(&got).Error)
+
+		assert.Equal(t, "NO", got.IsNullable)
+		require.NotNil(t, got.ColumnDefault)
+		assert.Contains(t, *got.ColumnDefault, "'PENDING'")
+	})
+
 	t.Run("goose version이 8이다", func(t *testing.T) {
 		var version int64
 		require.NoError(t, db.Raw(
 			`SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version).Error)
 		assert.GreaterOrEqual(t, version, int64(8))
 	})
+}
+
+// 제약은 conname 존재만 보고 조건부로 만든다. 같은 이름의 잘못된 제약이 이미 있으면
+// 이름만으로 통과하므로, 실제 정의 검증이 없으면 틀린 스키마가 version 8로 기록된다.
+func TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint(t *testing.T) {
+	wrong := map[string]struct{ name, definition string }{
+		"UNIQUE 범위가 전역이다": {
+			"order_idempotency_keys_user_key_unique", "UNIQUE (idempotency_key)"},
+		"키 길이 상한이 다르다": {
+			"order_idempotency_keys_key_length",
+			"CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 1280)"},
+		"outcome 목록이 다르다": {
+			"order_idempotency_keys_outcome_check",
+			"CHECK (outcome IN ('PENDING','ACCEPTED','REJECTED'))"},
+	}
+
+	for name, tc := range wrong {
+		t.Run(name, func(t *testing.T) {
+			db := testdb.OpenIntegrationDB(t)
+
+			require.NoError(t, db.Exec(
+				`ALTER TABLE order_idempotency_keys DROP CONSTRAINT `+tc.name).Error)
+			require.NoError(t, db.Exec(
+				`ALTER TABLE order_idempotency_keys ADD CONSTRAINT `+tc.name+` `+tc.definition).Error)
+			t.Cleanup(func() {
+				require.NoError(t, db.Exec(
+					`ALTER TABLE order_idempotency_keys DROP CONSTRAINT IF EXISTS `+tc.name).Error)
+				reapply008(t, db)
+			})
+
+			require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
+
+			err := dbmigration.Up(db)
+
+			require.Error(t, err, "잘못된 동명 제약인데 migration이 성공했다")
+			var applied int64
+			require.NoError(t, db.Raw(
+				`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
+			assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
+		})
+	}
 }
 
 // 같은 이름의 잘못된 인덱스가 있으면 migration이 실패하고 version 8이 기록되지 않아야
@@ -110,12 +171,7 @@ func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
 	// 복구해 주기를 기대하지 않고, 여기서 008을 다시 적용해 인덱스와 version을 모두 되돌린다.
 	t.Cleanup(func() {
 		require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
-		require.NoError(t, dbmigration.Up(db), "cleanup에서 008 재적용이 실패했다")
-
-		var applied int64
-		require.NoError(t, db.Raw(
-			`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
-		require.EqualValues(t, 1, applied, "cleanup 후에도 version 8이 복구되지 않았다")
+		reapply008(t, db)
 	})
 
 	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
@@ -127,4 +183,20 @@ func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
 	require.NoError(t, db.Raw(
 		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
 	assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
+}
+
+// reapply008은 스키마를 훼손한 테스트가 끝난 뒤 008을 다시 적용한다.
+//
+// version 8 행을 먼저 지우는 것이 핵심이다. migration이 성공해 버린 경우에는 version 8이
+// 남아 goose가 "no migrations to run"으로 건너뛰고, 훼손된 스키마가 그대로 남는다.
+func reapply008(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
+	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
+	require.NoError(t, dbmigration.Up(db), "cleanup에서 008 재적용이 실패했다")
+
+	var applied int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
+	require.EqualValues(t, 1, applied, "cleanup 후에도 version 8이 복구되지 않았다")
 }
