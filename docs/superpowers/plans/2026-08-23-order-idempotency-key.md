@@ -357,14 +357,15 @@ BEGIN
             ADD CONSTRAINT order_idempotency_keys_user_key_unique UNIQUE (user_id, idempotency_key);
     END IF;
 
+    -- HTTP 계약(공백 제외 1~128자)과 같은 범위를 DB에서도 막는다.
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'order_idempotency_keys'::regclass
-          AND conname = 'order_idempotency_keys_key_not_empty'
+          AND conname = 'order_idempotency_keys_key_length'
     ) THEN
         ALTER TABLE order_idempotency_keys
-            ADD CONSTRAINT order_idempotency_keys_key_not_empty
-            CHECK (length(btrim(idempotency_key)) > 0);
+            ADD CONSTRAINT order_idempotency_keys_key_length
+            CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 128);
     END IF;
 
     IF NOT EXISTS (

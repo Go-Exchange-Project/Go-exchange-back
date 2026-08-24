@@ -3,6 +3,7 @@
 package dbmigration_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
@@ -26,20 +27,25 @@ WHERE t.relname = 'order_idempotency_keys'
 		assert.Equal(t, "UNIQUE (user_id, idempotency_key)", definition)
 	})
 
+	// 008의 카탈로그 검증이 보는 조건을 그대로 단언한다. 하나라도 느슨하면
+	// 검증 조건이 빠져도 이 테스트가 통과한다.
 	t.Run("부분 인덱스 정의가 정확하다", func(t *testing.T) {
 		var got struct {
-			AccessMethod string
-			FirstColumn  string
-			Indisready   bool
-			Indisvalid   bool
-			Indisunique  bool
-			Indnkeyatts  int
-			Predicate    *string
+			AccessMethod    string
+			FirstColumn     string
+			Indisready      bool
+			Indisvalid      bool
+			Indisunique     bool
+			Indnkeyatts     int
+			Indnatts        int
+			HasNoExpression bool
+			Predicate       *string
 		}
 		require.NoError(t, db.Raw(`
 SELECT am.amname AS access_method,
        a.attname AS first_column,
-       i.indisready, i.indisvalid, i.indisunique, i.indnkeyatts,
+       i.indisready, i.indisvalid, i.indisunique, i.indnkeyatts, i.indnatts,
+       (i.indexprs IS NULL) AS has_no_expression,
        pg_get_expr(i.indpred, i.indrelid) AS predicate
 FROM pg_class c
 JOIN pg_index i ON i.indexrelid = c.oid
@@ -53,8 +59,29 @@ WHERE c.relname = 'order_idempotency_pending_updated_at'`).Scan(&got).Error)
 		assert.True(t, got.Indisvalid)
 		assert.False(t, got.Indisunique)
 		assert.Equal(t, 1, got.Indnkeyatts)
+		assert.Equal(t, 1, got.Indnatts, "INCLUDE 컬럼이 붙으면 008의 검증이 실패한다")
+		assert.True(t, got.HasNoExpression, "표현식 인덱스가 아니어야 한다")
 		require.NotNil(t, got.Predicate)
-		assert.Contains(t, *got.Predicate, "PENDING")
+		assert.Equal(t, "(outcome = 'PENDING'::text)", *got.Predicate)
+	})
+
+	// gauge 조회는 이 CHECK를 신뢰한다. HTTP 검증만으로는 다른 경로의 INSERT를 못 막는다.
+	t.Run("키 길이 CHECK가 공백 제외 1~128자를 강제한다", func(t *testing.T) {
+		insert := func(key string) error {
+			return db.Exec(`
+INSERT INTO order_idempotency_keys (user_id, idempotency_key, fingerprint, fingerprint_version)
+VALUES (?, ?, ?, ?)`, 999999, key, "fp", 1).Error
+		}
+
+		valid := strings.Repeat("k", 128)
+		require.NoError(t, insert(valid))
+		t.Cleanup(func() {
+			require.NoError(t, db.Exec(
+				`DELETE FROM order_idempotency_keys WHERE user_id = ?`, 999999).Error)
+		})
+
+		assert.Error(t, insert("   "), "공백만 있는 키가 통과했다")
+		assert.Error(t, insert(strings.Repeat("k", 129)), "129자 키가 통과했다")
 	})
 
 	t.Run("goose version이 8이다", func(t *testing.T) {
@@ -74,11 +101,16 @@ func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
 	// predicate 없는 전체 인덱스를 같은 이름으로 만든다.
 	require.NoError(t, db.Exec(
 		`CREATE INDEX order_idempotency_pending_updated_at ON order_idempotency_keys (updated_at)`).Error)
+	// 이 테스트는 goose version 8 행을 지우고 008을 실패시킨다. 다음 테스트가 우연히
+	// 복구해 주기를 기대하지 않고, 여기서 008을 다시 적용해 인덱스와 version을 모두 되돌린다.
 	t.Cleanup(func() {
 		require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
-		require.NoError(t, db.Exec(
-			`CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at
-			 ON order_idempotency_keys (updated_at) WHERE outcome = 'PENDING'`).Error)
+		require.NoError(t, dbmigration.Up(db), "cleanup에서 008 재적용이 실패했다")
+
+		var applied int64
+		require.NoError(t, db.Raw(
+			`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
+		require.EqualValues(t, 1, applied, "cleanup 후에도 version 8이 복구되지 않았다")
 	})
 
 	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)

@@ -425,8 +425,8 @@ CREATE TABLE IF NOT EXISTS order_idempotency_keys (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT order_idempotency_keys_user_key_unique UNIQUE (user_id, idempotency_key),
-    CONSTRAINT order_idempotency_keys_key_not_empty
-        CHECK (length(btrim(idempotency_key)) > 0),
+    CONSTRAINT order_idempotency_keys_key_length
+        CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 128),
     CONSTRAINT order_idempotency_keys_outcome_check
         CHECK (outcome IS NULL OR outcome IN ('PENDING','ACCEPTED','REJECTED','UNKNOWN'))
 );
