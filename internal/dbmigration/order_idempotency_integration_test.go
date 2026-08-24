@@ -82,6 +82,11 @@ VALUES (?, ?, ?, ?)`, 999999, key, "fp", 1).Error
 
 		assert.Error(t, insert("   "), "공백만 있는 키가 통과했다")
 		assert.Error(t, insert(strings.Repeat("k", 129)), "129자 키가 통과했다")
+
+		// length()는 바이트가 아니라 문자를 센다. 서버 검증도 rune으로 세야 두 단위가 맞는다.
+		multibyte := strings.Repeat("가", 128) // 384바이트
+		require.NoError(t, insert(multibyte), "128자 멀티바이트 키가 거부됐다 — CHECK가 바이트를 센다")
+		assert.Error(t, insert(strings.Repeat("가", 129)), "129자 멀티바이트 키가 통과했다")
 	})
 
 	t.Run("goose version이 8이다", func(t *testing.T) {

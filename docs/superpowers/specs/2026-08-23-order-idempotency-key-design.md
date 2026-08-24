@@ -68,7 +68,7 @@ CreateOrder (order_service.go:114)
 | 규칙 | 값 |
 |---|---|
 | 위치 | HTTP 헤더 `Idempotency-Key` |
-| 형식 | 공백 제외 1~128자. UUIDv4 권장, 강제하지 않음 |
+| 형식 | 공백 제외 1~128자(바이트가 아니라 문자 수. 서버는 rune, DB CHECK는 `length()`로 같은 단위를 쓴다). UUIDv4 권장, 강제하지 않음 |
 | 범위 | **사용자별**. UNIQUE는 `(user_id, idempotency_key)`다 |
 | 누락·빈 값 | **400** |
 

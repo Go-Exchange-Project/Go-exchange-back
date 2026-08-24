@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- `Idempotency-Key` 헤더는 **필수**다. 누락·공백은 **400**. 길이는 공백 제외 **1~128자**.
+- `Idempotency-Key` 헤더는 **필수**다. 누락·공백은 **400**. 길이는 공백 제외 **1~128자**
+  (바이트가 아니라 **문자 수**. 서버는 rune, DB CHECK는 `length()`로 같은 단위를 쓴다).
 - UNIQUE 범위는 **`(user_id, idempotency_key)`** 다. 전역이 아니다.
 - 주문 INSERT·지갑 UPDATE·원장 INSERT·멱등성 레코드가 **한 트랜잭션**에서 커밋된다.
 - **owner만 `TrySubmitOrder`를 호출한다.** follower는 저장된 `outcome`으로 응답한다.
@@ -1218,6 +1219,17 @@ func TestCreateOrderRequiresIdempotencyKey(t *testing.T) {
 		})
 	}
 }
+
+// 128자 계약은 문자 수 기준이다. len()으로 세면 128자 한글 키가 384바이트라 거절돼
+// DB CHECK(length() = 문자 수)와 어긋난다.
+func TestNormalizeIdempotencyKeyCountsCharactersNotBytes(t *testing.T) {
+	key, err := normalizeIdempotencyKey(strings.Repeat("가", 128))
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("가", 128), key)
+
+	_, err = normalizeIdempotencyKey(strings.Repeat("가", 129))
+	require.Error(t, err)
+}
 ```
 
 - [ ] **Step 2: 실패 확인**
@@ -1230,10 +1242,21 @@ Expected: FAIL — `unknown field IdempotencyKey`
 ```go
 const maxIdempotencyKeyLength = 128
 
+// 계약은 "공백 제외 1~128자"다. len()은 바이트를 세므로 멀티바이트 키에서 DB CHECK의
+// length()(문자 수)와 단위가 어긋난다. 두 곳이 같은 단위를 쓰도록 rune으로 센다.
+// import에 "unicode/utf8"을 추가한다.
+func normalizeIdempotencyKey(raw string) (string, error) {
+	key := strings.TrimSpace(raw)
+	if key == "" || utf8.RuneCountInString(key) > maxIdempotencyKeyLength {
+		return "", NewValidationErrorf("idempotency_key is required and must be 1..%d characters", maxIdempotencyKeyLength)
+	}
+	return key, nil
+}
+
 func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, error) {
-	key := strings.TrimSpace(input.IdempotencyKey)
-	if key == "" || len(key) > maxIdempotencyKeyLength {
-		return nil, NewValidationErrorf("idempotency_key is required and must be 1..%d characters", maxIdempotencyKeyLength)
+	key, err := normalizeIdempotencyKey(input.IdempotencyKey)
+	if err != nil {
+		return nil, err
 	}
 
 	order, err := s.BuildOrder(input)
