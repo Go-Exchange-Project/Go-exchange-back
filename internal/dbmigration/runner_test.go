@@ -78,3 +78,25 @@ func TestSQLDBFromGORMRejectsNil(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, sqlDB)
 }
+
+// 008은 gauge 조회용 부분 인덱스를 만든다. IF NOT EXISTS는 "같은 이름의 다른 인덱스"도
+// 조용히 통과시키므로(006에서 확인한 구멍), 같은 Up 안의 카탈로그 검증이 한 세트다.
+func TestOrderIdempotencyMigrationDeclaresContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(migrationsDir(), "008_order_idempotency_keys.sql"))
+	require.NoError(t, err)
+	sql := string(raw)
+
+	assert.Contains(t, sql, "CREATE TABLE IF NOT EXISTS order_idempotency_keys")
+	assert.Contains(t, sql, "order_idempotency_keys_user_key_unique")
+	assert.Contains(t, sql, "UNIQUE (user_id, idempotency_key)")
+	assert.Contains(t, sql, "fingerprint_version")
+	assert.Contains(t, sql, "'PENDING','ACCEPTED','REJECTED','UNKNOWN'")
+
+	assert.Contains(t, sql, "CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at")
+	assert.Contains(t, sql, "WHERE outcome = 'PENDING'")
+
+	// 카탈로그 방어 — 셋이 한 세트다.
+	assert.Contains(t, sql, "indisready")
+	assert.Contains(t, sql, "indisvalid")
+	assert.Contains(t, sql, "RAISE EXCEPTION")
+}
