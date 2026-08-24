@@ -1,0 +1,2128 @@
+# 주문 생성 idempotency key 구현 계획
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 클라이언트가 준 키로 주문 생성을 멱등하게 만들어, 응답이 유실된 뒤의 재시도가 두 번째 주문을 만들지 않게 한다.
+
+**Architecture:** `POST /orders`가 `Idempotency-Key` 헤더를 필수로 받는다. 주문·hold·멱등성 레코드를 한 트랜잭션에 커밋하고, `(user_id, idempotency_key)` UNIQUE가 중복을 직렬화한다. 배치 경로에서는 키를 먼저 INSERT해 owner와 follower를 가르고 **owner만 엔진에 제출**한다. 커밋 시점의 `outcome`은 `PENDING`이고, 엔진 제출 결과에 따라 `ACCEPTED`/`REJECTED`/`UNKNOWN`으로 전이한다. 전이가 실패하면 `PENDING`에 머물며 stale gauge로 관측한다.
+
+**Tech Stack:** Go 1.25.7, Gin 1.12, GORM 1.31, PostgreSQL, goose 3.27, Prometheus client_golang, React 18, TypeScript 5.8, Vitest, Playwright, k6
+
+**Spec:** [`docs/superpowers/specs/2026-08-23-order-idempotency-key-design.md`](../specs/2026-08-23-order-idempotency-key-design.md)
+
+## Global Constraints
+
+- `Idempotency-Key` 헤더는 **필수**다. 누락·공백은 **400**. 길이는 공백 제외 **1~128자**.
+- UNIQUE 범위는 **`(user_id, idempotency_key)`** 다. 전역이 아니다.
+- 주문 INSERT·지갑 UPDATE·원장 INSERT·멱등성 레코드가 **한 트랜잭션**에서 커밋된다.
+- **owner만 `TrySubmitOrder`를 호출한다.** follower는 저장된 `outcome`으로 응답한다.
+- hold 커밋 시점의 `outcome`은 **`PENDING`** 이다. `ACCEPTED`로 앞당겨 쓰지 않는다.
+- **`REJECTED` 기록은 보상 트랜잭션 안에서** hold 해제·주문 종결과 함께 커밋된다.
+- **`UNKNOWN`은 best-effort다.** 기록에 실패하면 `PENDING`에 머문다.
+- 모든 outcome 변경은 **`outcome`과 `updated_at`을 한 UPDATE 문에서** 갱신한다.
+- **주문이 커밋된 뒤에는 어떤 실패에서도 키를 삭제하지 않는다.** 예외는 hold 검증에 실패해 주문이 만들어지지 않은 미커밋 키뿐이다.
+- 지문은 **버전 + 길이-prefix 인코딩**이다. DTO 통째 직렬화 금지, decimal은 정규화 문자열.
+- `order_idempotency_keys`는 **AutoMigrate에 등록하지 않는다**(007과 같은 이유 — GORM이 UNIQUE를 자기 명명규칙으로 DROP하려 해 두 번째 부팅부터 SQLSTATE 42704).
+- migration 008은 부분 인덱스를 **같은 Up에서 카탈로그로 검증**하고 어긋나면 `RAISE EXCEPTION`한다(006과 같은 방식).
+- **보장 범위**: 중복 방지 + 같은 `order_id` + 저장된 최선의 결과. **첫 HTTP 응답 재생은 보장하지 않는다.**
+- 산출물은 [gcp-stress-test-runbook §7.5](../../gcp-stress-test-runbook.md)의 시크릿 게이트를 통과한 정리본만 동기화 경로에 넣는다.
+- 백엔드와 프런트는 별도 Git 저장소다. 각 저장소에서 관련 파일만 stage하고 커밋 전 `commit-message` 스킬을 쓴다.
+- 각 코드 작업은 RED → GREEN 순서다. 백엔드 단위 게이트는 `go test ./... -race`, 통합 게이트는 DSN을 설정한 `go test -run Integration -p 1`, 프런트 게이트는 `npm test && npm run lint && npm run build`.
+
+---
+
+## File Structure
+
+| 파일 | 책임 | 태스크 |
+|---|---|---|
+| `internal/service/order_fingerprint.go` | 버전형 길이-prefix 지문 계산 | 1 |
+| `internal/service/order_fingerprint_test.go` | 정규화·경계 모호성·버전 | 1 |
+| `migrations/008_order_idempotency_keys.sql` | 테이블·UNIQUE·CHECK·부분 인덱스·카탈로그 검증 | 2 |
+| `internal/model/order_idempotency_key.go` | 모델 + outcome 상수 4종 | 2 |
+| `internal/dbmigration/runner_test.go` | 008 정적 계약 | 2 |
+| `internal/dbmigration/order_idempotency_integration_test.go` | 008 카탈로그 + 잘못된 동명 인덱스 실패 | 2 |
+| `internal/repository/order_idempotency_repository.go` | 배치 INSERT-or-conflict, 조회, outcome UPDATE, 미커밋 정리, stale count | 3 |
+| `internal/repository/order_idempotency_repository_integration_test.go` | repository SQL 계약 | 3 |
+| `internal/service/hold_coordinator.go` | 그룹화·owner/follower·트랜잭션 순서·미커밋 키 정리 | 4 |
+| `internal/service/hold_coordinator_test.go` | 그룹화 결정성·역할 분배 | 4 |
+| `internal/service/order_service.go` | 키 검증, 지문, follower 엔진 제출 차단, outcome 전이, 5xx 매핑 | 5 |
+| `internal/handler/order_handler.go` | 헤더 파싱, 400/409/202, `idempotent_replay` | 6 |
+| `internal/handler/order_handler_integration_test.go` | HTTP 계약 | 6 |
+| `internal/metrics/metrics.go` | 지표 4종 | 7 |
+| `internal/service/order_idempotency_monitor.go` | stale PENDING gauge 갱신 | 7 |
+| `internal/service/order_idempotency_monitor_test.go` | 즉시 1회·주기·실패 시 gauge 유지 | 7 |
+| `cmd/main.go` | monitor 배선(lifecycle) | 7 |
+| `internal/service/order_idempotency_integration_test.go` | 동시성·혼합 배치·상태 전이 통합 검증 | 8 |
+| `src/lib/api.ts`, `OrderForm.tsx` (front) | 헤더 전송·키 수명·202 처리 | 9 |
+| `tests/e2e/exchange.spec.ts` (front) | 중복 제출 eventual 계약 | 10 |
+| `_workspace/loadtest/*.js`, `loadtest/order-spike-single-symbol.js` | iteration마다 새 키 | 10 |
+| `docs/benchmarks/36-*.md`, README, refactor, ENGINEERING-SUMMARY | 결과·문서 | 11 |
+
+---
+
+### Task 1: 버전형 지문
+
+**Files:**
+- Create: `internal/service/order_fingerprint.go`
+- Create: `internal/service/order_fingerprint_test.go`
+
+**Interfaces:**
+- Produces:
+  - `const OrderFingerprintVersion = 1`
+  - `service.OrderFingerprintInput{UserID uint; CoinSymbol, Side, OrderType string; Price, Amount, QuoteAmount decimal.Decimal}`
+  - `service.ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, error)`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+```go
+package service
+
+import (
+	"testing"
+
+	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func fingerprintInput() OrderFingerprintInput {
+	return OrderFingerprintInput{
+		UserID:      7,
+		CoinSymbol:  "BTC",
+		Side:        "SELL",
+		OrderType:   "LIMIT",
+		Price:       decimal.RequireFromString("100.50"),
+		Amount:      decimal.RequireFromString("1.5"),
+		QuoteAmount: decimal.Zero,
+	}
+}
+
+// 1.50과 1.5는 같은 주문이다. 표현 차이가 다른 지문이 되면 재시도가 409가 된다.
+func TestComputeOrderFingerprintNormalizesDecimals(t *testing.T) {
+	a := fingerprintInput()
+	a.Price = decimal.RequireFromString("100.50")
+	b := fingerprintInput()
+	b.Price = decimal.RequireFromString("100.5")
+
+	fa, err := ComputeOrderFingerprint(a, OrderFingerprintVersion)
+	require.NoError(t, err)
+	fb, err := ComputeOrderFingerprint(b, OrderFingerprintVersion)
+	require.NoError(t, err)
+
+	assert.Equal(t, fa, fb)
+}
+
+// 단순 연결이면 ("BTC","SELL")과 ("BTCS","ELL")이 같은 입력 문자열이 된다.
+func TestComputeOrderFingerprintIsUnambiguousAcrossFieldBoundaries(t *testing.T) {
+	a := fingerprintInput()
+	a.CoinSymbol, a.Side = "BTC", "SELL"
+	b := fingerprintInput()
+	b.CoinSymbol, b.Side = "BTCS", "ELL"
+
+	fa, err := ComputeOrderFingerprint(a, OrderFingerprintVersion)
+	require.NoError(t, err)
+	fb, err := ComputeOrderFingerprint(b, OrderFingerprintVersion)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, fa, fb, "필드 경계가 모호하면 서로 다른 요청이 같은 지문을 갖는다")
+}
+
+func TestComputeOrderFingerprintDiffersPerField(t *testing.T) {
+	base, err := ComputeOrderFingerprint(fingerprintInput(), OrderFingerprintVersion)
+	require.NoError(t, err)
+
+	mutations := map[string]func(*OrderFingerprintInput){
+		"user":  func(in *OrderFingerprintInput) { in.UserID = 8 },
+		"coin":  func(in *OrderFingerprintInput) { in.CoinSymbol = "ETH" },
+		"side":  func(in *OrderFingerprintInput) { in.Side = "BUY" },
+		"type":  func(in *OrderFingerprintInput) { in.OrderType = "MARKET" },
+		"price": func(in *OrderFingerprintInput) { in.Price = decimal.RequireFromString("101") },
+		"amt":   func(in *OrderFingerprintInput) { in.Amount = decimal.RequireFromString("2") },
+		"quote": func(in *OrderFingerprintInput) { in.QuoteAmount = decimal.RequireFromString("5") },
+	}
+	for name, mutate := range mutations {
+		in := fingerprintInput()
+		mutate(&in)
+		got, err := ComputeOrderFingerprint(in, OrderFingerprintVersion)
+		require.NoError(t, err)
+		assert.NotEqual(t, base, got, "%s가 지문에 반영되지 않았다", name)
+	}
+}
+
+// 저장된 버전의 규칙으로 비교해야 배포만으로 기존 재시도가 409가 되지 않는다.
+func TestComputeOrderFingerprintRejectsUnknownVersion(t *testing.T) {
+	_, err := ComputeOrderFingerprint(fingerprintInput(), 99)
+	require.Error(t, err)
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/service -run OrderFingerprint -v`
+Expected: FAIL — `undefined: OrderFingerprintInput`
+
+- [ ] **Step 3: 최소 구현**
+
+```go
+package service
+
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"strconv"
+
+	"github.com/shopspring/decimal"
+)
+
+// OrderFingerprintVersion은 지문 계산 규칙의 버전이다. 지문에 들어가는 필드 목록이
+// 바뀌면 올린다. 비교는 항상 레코드에 저장된 버전의 규칙으로 한다.
+const OrderFingerprintVersion = 1
+
+type OrderFingerprintInput struct {
+	UserID      uint
+	CoinSymbol  string
+	Side        string
+	OrderType   string
+	Price       decimal.Decimal
+	Amount      decimal.Decimal
+	QuoteAmount decimal.Decimal
+}
+
+// ComputeOrderFingerprint는 요청을 결정하는 값만 모아 해시한다.
+//
+// DTO를 통째로 직렬화하지 않는다 — 필드 추가·키 순서·JSON 표현 변경만으로 기존 키가
+// 전부 깨진다. 필드는 명시적으로 나열하고, 각 값은 길이-prefix로 이어 붙여 경계를
+// 모호하지 않게 만든다("BTC"+"SELL"과 "BTCS"+"ELL"이 같은 입력이 되면 안 된다).
+func ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, error) {
+	if version != OrderFingerprintVersion {
+		return "", fmt.Errorf("unsupported order fingerprint version %d", version)
+	}
+
+	hash := sha256.New()
+	write := func(value string) {
+		var prefix [4]byte
+		binary.BigEndian.PutUint32(prefix[:], uint32(len(value)))
+		hash.Write(prefix[:])
+		hash.Write([]byte(value))
+	}
+
+	write(fmt.Sprintf("v%d", version))
+	write(strconv.FormatUint(uint64(in.UserID), 10))
+	write(in.CoinSymbol)
+	write(in.Side)
+	write(in.OrderType)
+	// decimal은 JSON 숫자나 부동소수점이 아니라 정규화된 문자열로 넣는다.
+	write(normalizedDecimalString(in.Price))
+	write(normalizedDecimalString(in.Amount))
+	write(normalizedDecimalString(in.QuoteAmount))
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func normalizedDecimalString(value decimal.Decimal) string {
+	return value.Truncate(18).String()
+}
+```
+
+- [ ] **Step 4: 통과 확인**
+
+Run: `go test ./internal/service -run OrderFingerprint -v`
+Expected: PASS 4개
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add internal/service/order_fingerprint.go internal/service/order_fingerprint_test.go
+git commit -F _workspace/commit-draft.md
+```
+
+권장 subject: `feat(order): 주문 요청의 버전형 지문 계산 추가`
+
+**커버하는 검증**: 6, 6b, 6c
+
+---
+
+### Task 2: migration 008과 모델
+
+**Files:**
+- Create: `migrations/008_order_idempotency_keys.sql`
+- Create: `internal/model/order_idempotency_key.go`
+- Create: `internal/dbmigration/order_idempotency_integration_test.go`
+- Modify: `internal/dbmigration/runner_test.go`
+
+**Interfaces:**
+- Produces:
+  - `model.OrderIdempotencyOutcomePending|Accepted|Rejected|Unknown`
+  - `model.OrderIdempotencyKey`
+
+- [ ] **Step 1: 정적 계약 RED 테스트 작성**
+
+`internal/dbmigration/runner_test.go` 끝에 추가한다.
+
+```go
+// 008은 gauge 조회용 부분 인덱스를 만든다. IF NOT EXISTS는 "같은 이름의 다른 인덱스"도
+// 조용히 통과시키므로(006에서 확인한 구멍), 같은 Up 안의 카탈로그 검증이 한 세트다.
+func TestOrderIdempotencyMigrationDeclaresContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(migrationsDir(), "008_order_idempotency_keys.sql"))
+	require.NoError(t, err)
+	sql := string(raw)
+
+	assert.Contains(t, sql, "CREATE TABLE IF NOT EXISTS order_idempotency_keys")
+	assert.Contains(t, sql, "order_idempotency_keys_user_key_unique")
+	assert.Contains(t, sql, "UNIQUE (user_id, idempotency_key)")
+	assert.Contains(t, sql, "fingerprint_version")
+	assert.Contains(t, sql, "'PENDING','ACCEPTED','REJECTED','UNKNOWN'")
+
+	assert.Contains(t, sql, "CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at")
+	assert.Contains(t, sql, "WHERE outcome = 'PENDING'")
+
+	// 카탈로그 방어 — 셋이 한 세트다.
+	assert.Contains(t, sql, "indisready")
+	assert.Contains(t, sql, "indisvalid")
+	assert.Contains(t, sql, "RAISE EXCEPTION")
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/dbmigration -run OrderIdempotency -v`
+Expected: FAIL — 008 파일이 없다
+
+- [ ] **Step 3: 모델 작성**
+
+```go
+package model
+
+import "time"
+
+type OrderIdempotencyOutcome string
+
+// PENDING은 "아직 진행 중"만 뜻하지 않는다. 이후 UPDATE가 실패해도 여기 머물므로,
+// "이 시점 이후를 서버가 durable하게 알지 못한다"는 뜻이다.
+const (
+	OrderIdempotencyOutcomePending  OrderIdempotencyOutcome = "PENDING"
+	OrderIdempotencyOutcomeAccepted OrderIdempotencyOutcome = "ACCEPTED"
+	OrderIdempotencyOutcomeRejected OrderIdempotencyOutcome = "REJECTED"
+	OrderIdempotencyOutcomeUnknown  OrderIdempotencyOutcome = "UNKNOWN"
+)
+
+// OrderIdempotencyKey는 주문 생성 요청의 재시도를 식별한다.
+//
+// 이 테이블은 AutoMigrate 대상이 아니다. 스키마는 migration 008이 전부 소유한다 —
+// AutoMigrate에 넣으면 008이 만든 UNIQUE를 GORM이 자기 명명규칙
+// (uni_order_idempotency_keys_...)으로 DROP하려 해 두 번째 부팅부터 실패한다.
+type OrderIdempotencyKey struct {
+	ID                 uint64                  `gorm:"primaryKey"`
+	UserID             uint                    `gorm:"not null"`
+	IdempotencyKey     string                  `gorm:"not null"`
+	Fingerprint        string                  `gorm:"not null"`
+	FingerprintVersion int                     `gorm:"not null"`
+	OrderID            *uint                   // 1단계 INSERT 시점에는 모른다
+	Outcome            OrderIdempotencyOutcome // 〃
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+```
+
+- [ ] **Step 4: migration 008 작성**
+
+```sql
+-- +goose Up
+-- 주문 생성 재시도를 식별하는 키. 스키마는 이 migration이 단독으로 소유한다
+-- (AutoMigrate에 넣으면 GORM이 아래 UNIQUE를 자기 명명규칙으로 DROP하려 한다).
+
+CREATE TABLE IF NOT EXISTS order_idempotency_keys (
+    id                  BIGSERIAL PRIMARY KEY,
+    user_id             BIGINT      NOT NULL,
+    idempotency_key     TEXT        NOT NULL,
+    fingerprint         TEXT        NOT NULL,
+    fingerprint_version INT         NOT NULL,
+    order_id            BIGINT,
+    outcome             TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'order_idempotency_keys'::regclass
+          AND conname = 'order_idempotency_keys_user_key_unique'
+    ) THEN
+        ALTER TABLE order_idempotency_keys
+            ADD CONSTRAINT order_idempotency_keys_user_key_unique UNIQUE (user_id, idempotency_key);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'order_idempotency_keys'::regclass
+          AND conname = 'order_idempotency_keys_key_not_empty'
+    ) THEN
+        ALTER TABLE order_idempotency_keys
+            ADD CONSTRAINT order_idempotency_keys_key_not_empty
+            CHECK (length(btrim(idempotency_key)) > 0);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'order_idempotency_keys'::regclass
+          AND conname = 'order_idempotency_keys_outcome_check'
+    ) THEN
+        ALTER TABLE order_idempotency_keys
+            ADD CONSTRAINT order_idempotency_keys_outcome_check
+            CHECK (outcome IS NULL OR outcome IN ('PENDING','ACCEPTED','REJECTED','UNKNOWN'));
+    END IF;
+END $$;
+-- +goose StatementEnd
+
+-- stale PENDING gauge 조회 전용. 정상 상태에서는 거의 비어 있다.
+CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at
+    ON order_idempotency_keys (updated_at)
+    WHERE outcome = 'PENDING';
+
+-- IF NOT EXISTS는 같은 이름의 잘못된 인덱스도 조용히 통과시킨다(006에서 확인).
+-- 카탈로그로 확인하고 어긋나면 실패시켜 goose version 8이 기록되지 않게 한다.
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_class index_rel
+        JOIN pg_index index_meta ON index_meta.indexrelid = index_rel.oid
+        JOIN pg_am access_method ON access_method.oid = index_rel.relam
+        JOIN pg_attribute column_meta
+          ON column_meta.attrelid = index_meta.indrelid
+         AND column_meta.attnum = index_meta.indkey[0]
+        WHERE index_rel.relname = 'order_idempotency_pending_updated_at'
+          AND index_meta.indrelid = 'order_idempotency_keys'::regclass
+          AND index_meta.indisready
+          AND index_meta.indisvalid
+          AND NOT index_meta.indisunique
+          AND access_method.amname = 'btree'
+          AND index_meta.indnkeyatts = 1
+          AND index_meta.indnatts = 1
+          AND column_meta.attname = 'updated_at'
+          AND index_meta.indexprs IS NULL
+          AND pg_get_expr(index_meta.indpred, index_meta.indrelid) = '(outcome = ''PENDING''::text)'
+    ) THEN
+        RAISE EXCEPTION 'order_idempotency_pending_updated_at is missing, invalid, or has the wrong definition';
+    END IF;
+END $$;
+-- +goose StatementEnd
+
+-- +goose Down
+-- data-bearing 키를 자동으로 지우지 않는다. rollback이 필요하면 별도 운영 절차에서 처리한다.
+SELECT 1;
+```
+
+- [ ] **Step 5: 카탈로그 통합 테스트 작성**
+
+```go
+// package dbmigration_test인 이유: testdb가 dbmigration을 import하므로 내부 테스트
+// 패키지에서 testdb를 쓰면 import cycle이 된다.
+package dbmigration_test
+
+import (
+	"testing"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestOrderIdempotencyKeysIntegration(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+
+	t.Run("UNIQUE는 (user_id, idempotency_key)다", func(t *testing.T) {
+		var definition string
+		require.NoError(t, db.Raw(`
+SELECT pg_get_constraintdef(c.oid)
+FROM pg_constraint c
+JOIN pg_class t ON t.oid = c.conrelid
+WHERE t.relname = 'order_idempotency_keys'
+  AND c.conname = 'order_idempotency_keys_user_key_unique'`).Scan(&definition).Error)
+		require.NotEmpty(t, definition)
+		assert.Equal(t, "UNIQUE (user_id, idempotency_key)", definition)
+	})
+
+	t.Run("부분 인덱스 정의가 정확하다", func(t *testing.T) {
+		var got struct {
+			AccessMethod string
+			FirstColumn  string
+			Indisready   bool
+			Indisvalid   bool
+			Indisunique  bool
+			Indnkeyatts  int
+			Predicate    *string
+		}
+		require.NoError(t, db.Raw(`
+SELECT am.amname AS access_method,
+       a.attname AS first_column,
+       i.indisready, i.indisvalid, i.indisunique, i.indnkeyatts,
+       pg_get_expr(i.indpred, i.indrelid) AS predicate
+FROM pg_class c
+JOIN pg_index i ON i.indexrelid = c.oid
+JOIN pg_am am ON am.oid = c.relam
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+WHERE c.relname = 'order_idempotency_pending_updated_at'`).Scan(&got).Error)
+
+		require.Equal(t, "btree", got.AccessMethod, "인덱스가 없다 — goose version과 008 Up 로그를 먼저 확인한다")
+		assert.Equal(t, "updated_at", got.FirstColumn)
+		assert.True(t, got.Indisready)
+		assert.True(t, got.Indisvalid)
+		assert.False(t, got.Indisunique)
+		assert.Equal(t, 1, got.Indnkeyatts)
+		require.NotNil(t, got.Predicate)
+		assert.Contains(t, *got.Predicate, "PENDING")
+	})
+
+	t.Run("goose version이 8이다", func(t *testing.T) {
+		var version int64
+		require.NoError(t, db.Raw(
+			`SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version).Error)
+		assert.GreaterOrEqual(t, version, int64(8))
+	})
+}
+
+// 같은 이름의 잘못된 인덱스가 있으면 migration이 실패하고 version 8이 기록되지 않아야
+// 한다. IF NOT EXISTS만으로는 조용히 통과한다.
+func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+
+	require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
+	// predicate 없는 전체 인덱스를 같은 이름으로 만든다.
+	require.NoError(t, db.Exec(
+		`CREATE INDEX order_idempotency_pending_updated_at ON order_idempotency_keys (updated_at)`).Error)
+	t.Cleanup(func() {
+		require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
+		require.NoError(t, db.Exec(
+			`CREATE INDEX IF NOT EXISTS order_idempotency_pending_updated_at
+			 ON order_idempotency_keys (updated_at) WHERE outcome = 'PENDING'`).Error)
+	})
+
+	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
+
+	err := dbmigration.Up(db)
+
+	require.Error(t, err, "잘못된 동명 인덱스인데 migration이 성공했다")
+	var applied int64
+	require.NoError(t, db.Raw(
+		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
+	assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
+}
+```
+
+- [ ] **Step 6: 통과 확인**
+
+```powershell
+$env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
+go test ./internal/dbmigration -run OrderIdempotency -v -p 1
+```
+
+Expected: 정적 1개 + 카탈로그 3개 서브테스트 + 실패 케이스 1개 PASS. `testdb/integration.go`는 **바꾸지 않는다**.
+
+- [ ] **Step 7: 커밋**
+
+권장 subject: `feat(order): 멱등성 키 테이블과 카탈로그 검증 migration 추가`
+
+**커버하는 검증**: 9d, 9e
+
+---
+
+### Task 3: repository
+
+**Files:**
+- Create: `internal/repository/order_idempotency_repository.go`
+- Create: `internal/repository/order_idempotency_repository_integration_test.go`
+
+**Interfaces:**
+- Consumes: Task 2의 `model.OrderIdempotencyKey`
+- Produces:
+  - `repository.NewOrderIdempotencyRepository(db)`
+  - `(*OrderIdempotencyRepository).WithTx(tx)`
+  - `InsertNew(records []*model.OrderIdempotencyKey) (inserted []uint64, err error)` — `ON CONFLICT DO NOTHING RETURNING id`, 반환은 **실제로 들어간 레코드의 ID**
+  - `FindByUserKeys(pairs []UserKeyPair) ([]model.OrderIdempotencyKey, error)`
+  - `SetOrderAndOutcome(id uint64, orderID uint, outcome model.OrderIdempotencyOutcome) error`
+  - `UpdateOutcome(id uint64, outcome model.OrderIdempotencyOutcome) error`
+  - `DeleteByIDs(ids []uint64) error`
+  - `CountStalePending(olderThan time.Time) (int64, error)`
+  - `repository.UserKeyPair{UserID uint; Key string}`
+
+- [ ] **Step 1: RED 통합 테스트 작성**
+
+```go
+package repository
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+func uniqueIdemUserID() uint {
+	return uint(time.Now().UnixNano() % 1_000_000_000)
+}
+
+func seedIdemRecord(userID uint, key string) *model.OrderIdempotencyKey {
+	return &model.OrderIdempotencyKey{
+		UserID:             userID,
+		IdempotencyKey:     key,
+		Fingerprint:        "fp-" + key,
+		FingerprintVersion: 1,
+	}
+}
+
+func cleanupIdemRecords(t *testing.T, db *gorm.DB, userID uint) {
+	t.Helper()
+	require.NoError(t, db.Where("user_id = ?", userID).Delete(&model.OrderIdempotencyKey{}).Error)
+}
+
+// 배치 INSERT는 "어느 것이 실제로 들어갔는지"를 한 왕복에 알려줘야 한다.
+// 요청마다 INSERT하면 배치의 존재 이유(왕복 절감)가 사라진다.
+func TestIntegrationOrderIdempotencyInsertNewReturnsOnlyInserted(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	first := seedIdemRecord(userID, "k1")
+	inserted, err := repo.InsertNew([]*model.OrderIdempotencyKey{first})
+	require.NoError(t, err)
+	require.Len(t, inserted, 1)
+	assert.Equal(t, first.ID, inserted[0])
+
+	// 같은 키 재시도 + 새 키 → 새 키만 들어간다.
+	dup := seedIdemRecord(userID, "k1")
+	fresh := seedIdemRecord(userID, "k2")
+	inserted, err = repo.InsertNew([]*model.OrderIdempotencyKey{dup, fresh})
+	require.NoError(t, err)
+	require.Len(t, inserted, 1)
+	assert.Equal(t, fresh.ID, inserted[0])
+
+	var count int64
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+		Where("user_id = ?", userID).Count(&count).Error)
+	assert.EqualValues(t, 2, count)
+}
+
+// 다른 사용자의 같은 키는 충돌하지 않는다. 전역 UNIQUE였다면 여기서 막힌다.
+func TestIntegrationOrderIdempotencyKeyScopeIsPerUser(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userA := uniqueIdemUserID()
+	userB := userA + 1
+	defer cleanupIdemRecords(t, db, userA)
+	defer cleanupIdemRecords(t, db, userB)
+
+	inserted, err := repo.InsertNew([]*model.OrderIdempotencyKey{
+		seedIdemRecord(userA, "shared"),
+		seedIdemRecord(userB, "shared"),
+	})
+	require.NoError(t, err)
+	assert.Len(t, inserted, 2)
+}
+
+func TestIntegrationOrderIdempotencyFindByUserKeys(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{
+		seedIdemRecord(userID, "k1"), seedIdemRecord(userID, "k2"),
+	})
+	require.NoError(t, err)
+
+	found, err := repo.FindByUserKeys([]UserKeyPair{{UserID: userID, Key: "k1"}})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "k1", found[0].IdempotencyKey)
+	assert.Equal(t, 1, found[0].FingerprintVersion)
+
+	empty, err := repo.FindByUserKeys(nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// outcome과 updated_at은 한 UPDATE 문에서 함께 바뀌어야 한다.
+func TestIntegrationOrderIdempotencyOutcomeUpdatesTouchUpdatedAt(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	record := seedIdemRecord(userID, "k1")
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+	require.NoError(t, err)
+
+	var before model.OrderIdempotencyKey
+	require.NoError(t, db.First(&before, record.ID).Error)
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, repo.SetOrderAndOutcome(record.ID, 4242, model.OrderIdempotencyOutcomePending))
+
+	var afterSet model.OrderIdempotencyKey
+	require.NoError(t, db.First(&afterSet, record.ID).Error)
+	require.NotNil(t, afterSet.OrderID)
+	assert.EqualValues(t, 4242, *afterSet.OrderID)
+	assert.Equal(t, model.OrderIdempotencyOutcomePending, afterSet.Outcome)
+	assert.True(t, afterSet.UpdatedAt.After(before.UpdatedAt), "updated_at이 함께 갱신되지 않았다")
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, repo.UpdateOutcome(record.ID, model.OrderIdempotencyOutcomeAccepted))
+
+	var afterOutcome model.OrderIdempotencyKey
+	require.NoError(t, db.First(&afterOutcome, record.ID).Error)
+	assert.Equal(t, model.OrderIdempotencyOutcomeAccepted, afterOutcome.Outcome)
+	assert.True(t, afterOutcome.UpdatedAt.After(afterSet.UpdatedAt))
+}
+
+// hold 검증에 실패한 미커밋 키는 지워야 재사용할 수 있다.
+func TestIntegrationOrderIdempotencyDeleteByIDs(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	keep := seedIdemRecord(userID, "keep")
+	drop := seedIdemRecord(userID, "drop")
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{keep, drop})
+	require.NoError(t, err)
+
+	require.NoError(t, repo.DeleteByIDs([]uint64{drop.ID}))
+	require.NoError(t, repo.DeleteByIDs(nil))
+
+	found, err := repo.FindByUserKeys([]UserKeyPair{
+		{UserID: userID, Key: "keep"}, {UserID: userID, Key: "drop"},
+	})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "keep", found[0].IdempotencyKey)
+}
+
+func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	stale := seedIdemRecord(userID, "stale")
+	fresh := seedIdemRecord(userID, "fresh")
+	done := seedIdemRecord(userID, "done")
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{stale, fresh, done})
+	require.NoError(t, err)
+
+	require.NoError(t, repo.SetOrderAndOutcome(stale.ID, 1, model.OrderIdempotencyOutcomePending))
+	require.NoError(t, repo.SetOrderAndOutcome(fresh.ID, 2, model.OrderIdempotencyOutcomePending))
+	require.NoError(t, repo.SetOrderAndOutcome(done.ID, 3, model.OrderIdempotencyOutcomeAccepted))
+
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", stale.ID).
+		Update("updated_at", time.Now().Add(-time.Hour)).Error)
+
+	before, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+
+	// 이 사용자 범위에서 stale은 1건뿐이다(다른 테스트 데이터가 섞일 수 있어 증분으로 본다).
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", fresh.ID).
+		Update("updated_at", time.Now().Add(-time.Hour)).Error)
+	after, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+
+	assert.Equal(t, before+1, after, "PENDING이면서 임계보다 오래된 것만 세야 한다")
+	_ = fmt.Sprint(userID)
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/repository -run IntegrationOrderIdempotency`
+Expected: FAIL — `undefined: NewOrderIdempotencyRepository`
+
+- [ ] **Step 3: 구현**
+
+```go
+package repository
+
+import (
+	"time"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type OrderIdempotencyRepository struct {
+	DB *gorm.DB
+}
+
+type UserKeyPair struct {
+	UserID uint
+	Key    string
+}
+
+func NewOrderIdempotencyRepository(db *gorm.DB) *OrderIdempotencyRepository {
+	return &OrderIdempotencyRepository{DB: db}
+}
+
+func (r *OrderIdempotencyRepository) WithTx(tx *gorm.DB) *OrderIdempotencyRepository {
+	return &OrderIdempotencyRepository{DB: tx}
+}
+
+// InsertNew는 배치를 한 문장으로 넣고 실제로 삽입된 레코드의 ID만 돌려줍니다.
+//
+// 반환되지 않은 요청은 기존 키(follower)입니다. 요청마다 INSERT하면 배치의 존재
+// 이유(왕복 절감)가 사라지므로 ON CONFLICT DO NOTHING + RETURNING을 씁니다.
+func (r *OrderIdempotencyRepository) InsertNew(records []*model.OrderIdempotencyKey) ([]uint64, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+
+	result := r.DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_id"}, {Name: "idempotency_key"}},
+		DoNothing: true,
+	}).Create(&records)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+
+	inserted := make([]uint64, 0, len(records))
+	for _, record := range records {
+		if record.ID != 0 {
+			inserted = append(inserted, record.ID)
+		}
+	}
+	return inserted, nil
+}
+
+func (r *OrderIdempotencyRepository) FindByUserKeys(pairs []UserKeyPair) ([]model.OrderIdempotencyKey, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	tuples := make([][]any, 0, len(pairs))
+	for _, pair := range pairs {
+		tuples = append(tuples, []any{pair.UserID, pair.Key})
+	}
+
+	var records []model.OrderIdempotencyKey
+	err := r.DB.Where("(user_id, idempotency_key) IN ?", tuples).Find(&records).Error
+	return records, err
+}
+
+// SetOrderAndOutcome은 order_id·outcome·updated_at을 한 UPDATE 문에서 갱신합니다.
+func (r *OrderIdempotencyRepository) SetOrderAndOutcome(id uint64, orderID uint, outcome model.OrderIdempotencyOutcome) error {
+	return r.DB.Model(&model.OrderIdempotencyKey{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"order_id":   orderID,
+			"outcome":    outcome,
+			"updated_at": time.Now().UTC(),
+		}).Error
+}
+
+// UpdateOutcome은 outcome과 updated_at을 한 UPDATE 문에서 갱신합니다.
+// outcome이 바뀌면 부분 인덱스에서 빠지고, updated_at은 전이 시각을 보존합니다.
+func (r *OrderIdempotencyRepository) UpdateOutcome(id uint64, outcome model.OrderIdempotencyOutcome) error {
+	return r.DB.Model(&model.OrderIdempotencyKey{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"outcome":    outcome,
+			"updated_at": time.Now().UTC(),
+		}).Error
+}
+
+// DeleteByIDs는 이번 트랜잭션에서 삽입했지만 hold 검증에 실패한 키를 지웁니다.
+// 커밋된 주문을 가리키는 키에는 절대 쓰지 않습니다.
+func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.DB.Where("id IN ?", ids).Delete(&model.OrderIdempotencyKey{}).Error
+}
+
+// CountStalePending은 stale PENDING gauge의 원천입니다.
+// order_idempotency_pending_updated_at 부분 인덱스가 이 조회를 받칩니다.
+func (r *OrderIdempotencyRepository) CountStalePending(olderThan time.Time) (int64, error) {
+	var count int64
+	err := r.DB.Model(&model.OrderIdempotencyKey{}).
+		Where("outcome = ? AND updated_at < ?", model.OrderIdempotencyOutcomePending, olderThan).
+		Count(&count).Error
+	return count, err
+}
+```
+
+- [ ] **Step 4: 통과 확인**
+
+```powershell
+$env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
+go test ./internal/repository -run IntegrationOrderIdempotency -v -p 1
+```
+
+Expected: 6개 PASS
+
+> `InsertNew`가 `ON CONFLICT DO NOTHING`에서 삽입되지 않은 행의 `ID`를 0으로 남기는지
+> 이 테스트가 확인한다. GORM 버전에 따라 다르면 `Returning` clause를 명시적으로 붙이고
+> 반환 ID를 대조하는 방식으로 바꾼다 — **동작을 가정하지 말고 테스트로 고정한다.**
+
+- [ ] **Step 5: 커밋**
+
+권장 subject: `feat(order): 멱등성 키 저장소 추가`
+
+**커버하는 검증**: 9c
+
+---
+
+### Task 4: 배치 그룹화와 owner/follower
+
+**Files:**
+- Modify: `internal/service/hold_coordinator.go`
+- Create: `internal/service/hold_coordinator_idempotency_test.go`
+
+**Interfaces:**
+- Consumes: Task 1 지문, Task 3 repository
+- Produces:
+  - `service.holdRole` (`holdRoleOwner`, `holdRoleFollower`)
+  - `holdRequest`에 `idem *idempotencyContext` 추가
+  - `holdResult`에 `Role holdRole`, `Existing *model.OrderIdempotencyKey` 추가
+  - `service.idempotencyContext{Key string; Fingerprint string; Version int; RecordID uint64}`
+  - `service.groupIdempotentRequests(reqs []holdRequest) (owners []int, followers map[int]int, conflicts []int)` — 결정적
+  - `(*HoldCoordinator).SubmitWithIdempotency(order *model.Order, idem *idempotencyContext) (holdResult, error)`
+
+- [ ] **Step 1: 그룹화 결정성 RED 테스트 작성**
+
+```go
+package service
+
+import (
+	"testing"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func idemReq(userID uint, key, fingerprint string) holdRequest {
+	return holdRequest{
+		order: &model.Order{UserID: userID},
+		idem:  &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: OrderFingerprintVersion},
+	}
+}
+
+// 같은 키·같은 지문이면 하나가 owner, 나머지는 follower다. 둘 다 owner가 되면
+// hold는 한 번인데 엔진 제출이 두 번이 된다.
+func TestGroupIdempotentRequestsAssignsOneOwnerPerKey(t *testing.T) {
+	reqs := []holdRequest{
+		idemReq(1, "k1", "fp"),
+		idemReq(1, "k1", "fp"),
+		idemReq(2, "k1", "fp"), // 다른 사용자 — 별개다
+	}
+
+	owners, followers, conflicts := groupIdempotentRequests(reqs)
+
+	assert.Equal(t, []int{0, 2}, owners)
+	assert.Equal(t, map[int]int{1: 0}, followers, "인덱스 1은 0을 따라야 한다")
+	assert.Empty(t, conflicts)
+}
+
+// 같은 키·다른 지문이면 하나만 진행하고 나머지는 409다.
+func TestGroupIdempotentRequestsMarksFingerprintConflicts(t *testing.T) {
+	reqs := []holdRequest{
+		idemReq(1, "k1", "fp-a"),
+		idemReq(1, "k1", "fp-b"),
+	}
+
+	owners, followers, conflicts := groupIdempotentRequests(reqs)
+
+	assert.Equal(t, []int{0}, owners)
+	assert.Empty(t, followers)
+	assert.Equal(t, []int{1}, conflicts)
+}
+
+// map 순회 순서에 맡기면 같은 입력이 실행마다 다른 결과를 낸다.
+func TestGroupIdempotentRequestsIsDeterministic(t *testing.T) {
+	build := func() []holdRequest {
+		return []holdRequest{
+			idemReq(1, "k1", "fp-a"),
+			idemReq(1, "k1", "fp-b"),
+			idemReq(1, "k2", "fp-c"),
+			idemReq(2, "k1", "fp-d"),
+		}
+	}
+
+	owners, followers, conflicts := groupIdempotentRequests(build())
+	for i := 0; i < 50; i++ {
+		o, f, c := groupIdempotentRequests(build())
+		require.Equal(t, owners, o, "%d회차 owner가 달라졌다", i)
+		require.Equal(t, followers, f, "%d회차 follower가 달라졌다", i)
+		require.Equal(t, conflicts, c, "%d회차 conflict가 달라졌다", i)
+	}
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/service -run GroupIdempotentRequests -v`
+Expected: FAIL — `undefined: groupIdempotentRequests`
+
+- [ ] **Step 3: 타입과 그룹화 구현**
+
+`internal/service/hold_coordinator.go`의 기존 타입을 바꾸고 함수를 추가한다.
+
+```go
+type holdRole uint8
+
+const (
+	holdRoleOwner holdRole = iota
+	holdRoleFollower
+)
+
+// idempotencyContext는 요청의 멱등성 키와 지문을 hold 경로까지 실어 나른다.
+type idempotencyContext struct {
+	Key         string
+	Fingerprint string
+	Version     int
+	RecordID    uint64 // INSERT 후 채워진다
+}
+
+type holdRequest struct {
+	order    *model.Order
+	idem     *idempotencyContext
+	resultCh chan holdResult
+}
+
+type holdResult struct {
+	Order *model.Order // 성공 시 ID 채워짐
+	Err   error        // nil=성공, ConflictError=잔고부족, 그 외=시스템
+	// Role은 이 요청이 주문을 실제로 만들었는지(owner) 아니면 같은 키의 중복인지
+	// (follower) 구분한다. follower는 엔진에 제출하지 않는다 — 제출하면 hold는
+	// 한 번인데 엔진 제출이 두 번이 된다.
+	Role     holdRole
+	Existing *model.OrderIdempotencyKey // follower일 때 저장된 결과
+}
+
+// groupIdempotentRequests는 SQL 이전에 배치 안의 (user_id, key) 중복을 정리한다.
+//
+// 같은 키·같은 지문이면 앞선 것이 owner, 나머지는 follower다.
+// 같은 키·다른 지문이면 앞선 것만 진행하고 나머지는 conflict(409)다.
+// 도착 순서(인덱스)로 결정하므로 같은 입력은 항상 같은 결과를 낸다 — map 순회에
+// 맡기면 실행마다 달라진다.
+func groupIdempotentRequests(reqs []holdRequest) (owners []int, followers map[int]int, conflicts []int) {
+	type groupKey struct {
+		userID uint
+		key    string
+	}
+	first := map[groupKey]int{}
+	followers = map[int]int{}
+
+	for i := range reqs {
+		if reqs[i].idem == nil {
+			owners = append(owners, i)
+			continue
+		}
+		gk := groupKey{userID: reqs[i].order.UserID, key: reqs[i].idem.Key}
+		leader, seen := first[gk]
+		if !seen {
+			first[gk] = i
+			owners = append(owners, i)
+			continue
+		}
+		if reqs[leader].idem.Fingerprint == reqs[i].idem.Fingerprint {
+			followers[i] = leader
+		} else {
+			conflicts = append(conflicts, i)
+		}
+	}
+	return owners, followers, conflicts
+}
+```
+
+- [ ] **Step 4: 통과 확인**
+
+Run: `go test ./internal/service -run GroupIdempotentRequests -v`
+Expected: 3개 PASS
+
+- [ ] **Step 5: `HoldBatch`에 트랜잭션 순서 반영**
+
+`HoldBatch`의 시그니처를 `HoldBatch(reqs []holdRequest) ([]holdResult, error)`로 바꾸고,
+트랜잭션 맨 앞과 끝에 다음을 넣는다. 기존 지갑 락·검증·INSERT 로직은 그대로 두고
+**대상 목록만 owner로 좁힌다.**
+
+```go
+// 1) 멱등성 레코드를 먼저 넣어 owner/follower를 가른다. 중복이 지갑 hold를
+//    소비하지 않게 하려면 이 단계가 hold 계산보다 앞서야 한다.
+idemRepo := c.IdemRepo.WithTx(tx)
+newRecords := make([]*model.OrderIdempotencyKey, 0, len(owners))
+recordIdx := make([]int, 0, len(owners))
+for _, i := range owners {
+	if reqs[i].idem == nil {
+		continue
+	}
+	newRecords = append(newRecords, &model.OrderIdempotencyKey{
+		UserID:             reqs[i].order.UserID,
+		IdempotencyKey:     reqs[i].idem.Key,
+		Fingerprint:        reqs[i].idem.Fingerprint,
+		FingerprintVersion: reqs[i].idem.Version,
+	})
+	recordIdx = append(recordIdx, i)
+}
+if _, err := idemRepo.InsertNew(newRecords); err != nil {
+	return err
+}
+
+// 삽입되지 않은 것 = 기존 키. 그 요청은 배치에서 빼고 저장된 결과를 돌려준다.
+insertedOwners := make([]int, 0, len(owners))
+var lookup []repository.UserKeyPair
+existingIdx := map[repository.UserKeyPair]int{}
+for j, i := range recordIdx {
+	if newRecords[j].ID != 0 {
+		reqs[i].idem.RecordID = newRecords[j].ID
+		insertedOwners = append(insertedOwners, i)
+		continue
+	}
+	pair := repository.UserKeyPair{UserID: reqs[i].order.UserID, Key: reqs[i].idem.Key}
+	lookup = append(lookup, pair)
+	existingIdx[pair] = i
+}
+if len(lookup) > 0 {
+	found, err := idemRepo.FindByUserKeys(lookup)
+	if err != nil {
+		return err
+	}
+	for k := range found {
+		pair := repository.UserKeyPair{UserID: found[k].UserID, Key: found[k].IdempotencyKey}
+		if i, ok := existingIdx[pair]; ok {
+			record := found[k]
+			results[i] = holdResult{Role: holdRoleFollower, Existing: &record}
+		}
+	}
+}
+```
+
+hold 검증 루프는 `insertedOwners`만 순회하도록 바꾸고, 실패한 요청의 키를 모은다.
+
+```go
+// 4) hold 검증에 실패한 owner의 키는 이번 트랜잭션에서 지운다.
+//    HoldBatch는 실패분을 results에 격리하고 나머지와 함께 커밋하므로,
+//    지우지 않으면 "검증 실패는 키를 소비하지 않는다"가 깨진다.
+if len(failedRecordIDs) > 0 {
+	if err := idemRepo.DeleteByIDs(failedRecordIDs); err != nil {
+		return err
+	}
+}
+
+// 전원 실패 조기 반환 경로에도 같은 정리가 필요하다.
+if len(passing) == 0 {
+	return nil
+}
+
+// 5) 성공한 owner의 레코드에 order_id와 PENDING을 기록한다.
+//    ACCEPTED로 앞당겨 쓰지 않는다 — 엔진 제출은 이 트랜잭션 밖이다.
+for _, ph := range passing {
+	if reqs[ph.idx].idem == nil {
+		continue
+	}
+	if err := idemRepo.SetOrderAndOutcome(
+		reqs[ph.idx].idem.RecordID, ph.order.ID, model.OrderIdempotencyOutcomePending,
+	); err != nil {
+		return err
+	}
+}
+```
+
+`conflicts`의 요청에는 `results[i] = holdResult{Err: NewConflictErrorf("idempotency key reused with a different request")}`를 채운다.
+
+- [ ] **Step 6: fallback 경로 반영**
+
+`processBatch`의 fallback은 `persistAndHold`를 호출한다. 같은 순서를 적용한
+`persistAndHoldWithIdempotency(db, orderRepo, walletRepo, ledgerRepo, idemRepo, req)`로 바꾸고,
+`HoldBatch` 실패가 키를 소비하지 않는지(트랜잭션 롤백) 확인한다.
+
+- [ ] **Step 7: 회귀 확인**
+
+Run: `go test ./internal/service -race`
+Expected: 기존 hold coordinator 테스트 전부 PASS
+
+- [ ] **Step 8: 커밋**
+
+권장 subject: `feat(order): hold 배치에 멱등성 키와 owner/follower 분리 도입`
+
+**커버하는 검증**: 4b, 4c
+
+---
+
+### Task 5: 서비스 계약
+
+**Files:**
+- Modify: `internal/service/order_service.go`
+- Modify: `internal/service/service_integration_test.go`
+
+**Interfaces:**
+- Consumes: Task 1·3·4
+- Produces:
+  - `CreateOrderInput.IdempotencyKey string`
+  - `service.CreateOrderResult{Order *model.Order; Replay bool; Outcome model.OrderIdempotencyOutcome}`
+  - `OrderService.CreateOrder(input CreateOrderInput) (*CreateOrderResult, error)`
+  - `OrderService.OrderIdempotencyRepository *repository.OrderIdempotencyRepository`
+  - `metrics.OrderIdempotencyUnknownTotal`, `metrics.OrderIdempotencyOutcomeUpdateFailuresTotal`
+
+- [ ] **Step 0: 이 태스크가 쓰는 지표 두 개를 먼저 추가**
+
+`internal/metrics/metrics.go`의 `var (...)` 블록에 넣는다. gauge와 monitor 오류 counter는
+Task 7에서 추가한다.
+
+```go
+	// 보상 실패 후 UNKNOWN 기록에 성공한 건수. 실패해서 PENDING에 머문 경우는
+	// 여기 잡히지 않으므로 아래 counter가 함께 필요하다.
+	OrderIdempotencyUnknownTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "order_idempotency_unknown_total",
+		Help: "Order idempotency records marked UNKNOWN after a failed compensation.",
+	})
+
+	OrderIdempotencyOutcomeUpdateFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "order_idempotency_outcome_update_failures_total",
+		Help: "Failed attempts to record ACCEPTED/REJECTED/UNKNOWN on an idempotency record.",
+	})
+```
+
+- [ ] **Step 1: 키 검증 RED 테스트 작성**
+
+```go
+func TestCreateOrderRequiresIdempotencyKey(t *testing.T) {
+	svc := &OrderService{}
+
+	for name, key := range map[string]string{
+		"빈 값":  "",
+		"공백":   "   ",
+		"초과 길이": strings.Repeat("k", 129),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := svc.CreateOrder(CreateOrderInput{
+				UserID: 1, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
+				Price: "100", Amount: "1", IdempotencyKey: key,
+			})
+			require.Error(t, err)
+			assert.Nil(t, result)
+			kind, ok := DomainErrorKind(err)
+			require.True(t, ok)
+			assert.Equal(t, ErrorKindValidation, kind)
+		})
+	}
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/service -run CreateOrderRequiresIdempotencyKey -v`
+Expected: FAIL — `unknown field IdempotencyKey`
+
+- [ ] **Step 3: 키 검증·지문·follower 분기 구현**
+
+```go
+const maxIdempotencyKeyLength = 128
+
+func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, error) {
+	key := strings.TrimSpace(input.IdempotencyKey)
+	if key == "" || len(key) > maxIdempotencyKeyLength {
+		return nil, NewValidationErrorf("idempotency_key is required and must be 1..%d characters", maxIdempotencyKeyLength)
+	}
+
+	order, err := s.BuildOrder(input)
+	if err != nil {
+		return nil, err
+	}
+
+	fingerprint, err := ComputeOrderFingerprint(OrderFingerprintInput{
+		UserID:      order.UserID,
+		CoinSymbol:  order.CoinSymbol,
+		Side:        string(order.Side),
+		OrderType:   string(order.OrderType),
+		Price:       order.Price,
+		Amount:      order.Amount,
+		QuoteAmount: order.QuoteAmount,
+	}, OrderFingerprintVersion)
+	if err != nil {
+		return nil, err
+	}
+	idem := &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: OrderFingerprintVersion}
+
+	// ... 기존 유입 게이트 ...
+
+	res, err := s.holdWithIdempotency(order, idem)
+	if err != nil {
+		return nil, err
+	}
+
+	// follower는 엔진에 제출하지 않는다. 저장된 결과를 그대로 돌려준다.
+	if res.Role == holdRoleFollower {
+		return s.replayResult(res.Existing, fingerprint)
+	}
+
+	if s.MatchingEngine != nil {
+		submitted := s.MatchingEngine.TrySubmitOrder(/* 기존 인자 */, s.acceptanceTimeout())
+		if !submitted {
+			return nil, s.rejectAcceptedOrderWithIdempotency(order, idem.RecordID)
+		}
+		// 엔진 접수 성공 — ACCEPTED로 전이한다. 실패하면 PENDING에 머문다.
+		if err := s.OrderIdempotencyRepository.UpdateOutcome(
+			idem.RecordID, model.OrderIdempotencyOutcomeAccepted,
+		); err != nil {
+			metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
+			log.Printf("order idempotency: ACCEPTED update failed for record %d: %v", idem.RecordID, err)
+		}
+	}
+
+	return &CreateOrderResult{Order: order, Outcome: model.OrderIdempotencyOutcomeAccepted}, nil
+}
+
+// replayResult는 저장된 결과로 응답을 재구성한다. 지문이 다르면 409다.
+func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, fingerprint string) (*CreateOrderResult, error) {
+	if record == nil {
+		return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
+	}
+	if record.Fingerprint != fingerprint {
+		return nil, NewConflictErrorf("idempotency key was used with a different request")
+	}
+
+	order := &model.Order{}
+	if record.OrderID != nil {
+		order.ID = *record.OrderID
+	}
+	return &CreateOrderResult{Order: order, Replay: true, Outcome: record.Outcome}, nil
+}
+```
+
+- [ ] **Step 4: 보상 트랜잭션에 `REJECTED` 포함**
+
+```go
+// rejectAcceptedOrderWithIdempotency는 hold 해제·주문 REJECTED·outcome REJECTED를
+// 한 트랜잭션에 넣는다. outcome을 밖에 두면 "hold는 풀렸는데 outcome은 PENDING"인
+// 상태가 생기고, 재요청이 202를 받아 아직 진행 중인 것처럼 보인다.
+func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, recordID uint64) error {
+	err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
+		idemRepo := s.OrderIdempotencyRepository.WithTx(tx)
+
+		if err := releaseInitialHold(walletRepo, ledgerRepo, order); err != nil {
+			return err
+		}
+		if err := orderRepo.UpdateOrderExecution(
+			order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusRejected,
+		); err != nil {
+			return err
+		}
+		return idemRepo.UpdateOutcome(recordID, model.OrderIdempotencyOutcomeRejected)
+	})
+	if err == nil {
+		return NewUnavailableErrorf("order intake is saturated, please retry shortly")
+	}
+
+	// 보상 실패 — hold가 잡힌 채 남는다. UNKNOWN은 best-effort 기록이다.
+	if uerr := s.OrderIdempotencyRepository.UpdateOutcome(
+		recordID, model.OrderIdempotencyOutcomeUnknown,
+	); uerr != nil {
+		metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
+		log.Printf("order idempotency: UNKNOWN update failed for record %d: %v", recordID, uerr)
+	} else {
+		metrics.OrderIdempotencyUnknownTotal.Inc()
+	}
+
+	// 요청자 잘못이 아니다. raw error를 그대로 내면 serviceErrorStatus의 default가
+	// 400으로 매핑한다(CancelOrder에서 e0ef22a로 고친 것과 같은 클래스).
+	return NewUnavailableErrorf(
+		"order intake saturated and hold release failed for order %d, retry is safe with the same key", order.ID)
+}
+```
+
+- [ ] **Step 5: 기존 통합 테스트를 새 계약으로 갱신**
+
+`service_integration_test.go`의 `CreateOrder` 호출부에 `IdempotencyKey`를 추가하고,
+반환이 `*CreateOrderResult`가 된 것을 반영한다. 각 호출에 고유 키를 준다.
+
+- [ ] **Step 6: 통과 확인**
+
+```powershell
+$env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
+go test -run 'Integration|CreateOrder' -v -p 1 ./internal/service
+go test ./internal/service -race
+```
+
+- [ ] **Step 7: 커밋**
+
+권장 subject: `feat(order): 주문 생성에 멱등성 키 계약 적용`
+
+**커버하는 검증**: 1, 2, 7
+
+---
+
+### Task 6: HTTP 계약
+
+**Files:**
+- Modify: `internal/handler/order_handler.go`
+- Modify: `internal/handler/order_handler_integration_test.go`
+
+**Interfaces:**
+- Consumes: Task 5
+- Produces: HTTP 200/202/400/409 계약, `idempotent_replay` 필드
+
+- [ ] **Step 1: RED 테스트 작성**
+
+```go
+func TestIntegrationCreateOrderHandlerRequiresIdempotencyKey(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	user := seedFundedUser(t, db, 919001)
+	handler := newIntegrationOrderHandler(db)
+
+	recorder := postOrder(t, handler, user.ID, "", validOrderBody())
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code, "body=%s", recorder.Body.String())
+}
+
+func TestIntegrationCreateOrderHandlerReplaysSameKey(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	user := seedFundedUser(t, db, 919002)
+	handler := newIntegrationOrderHandler(db)
+
+	first := postOrder(t, handler, user.ID, "key-1", validOrderBody())
+	second := postOrder(t, handler, user.ID, "key-1", validOrderBody())
+
+	require.Equal(t, http.StatusOK, first.Code, "body=%s", first.Body.String())
+	assert.Contains(t, []int{http.StatusOK, http.StatusAccepted}, second.Code)
+	assert.Equal(t, orderIDOf(t, first), orderIDOf(t, second))
+	assert.Contains(t, second.Body.String(), "idempotent_replay")
+}
+
+func TestIntegrationCreateOrderHandlerRejectsReusedKeyWithDifferentBody(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	user := seedFundedUser(t, db, 919003)
+	handler := newIntegrationOrderHandler(db)
+
+	first := postOrder(t, handler, user.ID, "key-2", validOrderBody())
+	require.Equal(t, http.StatusOK, first.Code)
+
+	changed := validOrderBody()
+	changed.Amount = "2"
+	second := postOrder(t, handler, user.ID, "key-2", changed)
+
+	assert.Equal(t, http.StatusConflict, second.Code, "body=%s", second.Body.String())
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/handler -run IntegrationCreateOrderHandler`
+Expected: FAIL — 헬퍼와 헤더 처리가 없다
+
+- [ ] **Step 3: 핸들러 구현**
+
+```go
+func (h *OrderHandler) CreateOrder(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeAuthRequired, "authenticated user is required")
+		return
+	}
+
+	var req CreateOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeBindingError(c, err)
+		return
+	}
+
+	result, err := h.OrderService.CreateOrder(service.CreateOrderInput{
+		UserID:         userID,
+		CoinSymbol:     req.CoinSymbol,
+		Side:           req.Side,
+		OrderType:      req.OrderType,
+		Price:          req.Price,
+		Amount:         req.Amount,
+		QuoteAmount:    req.QuoteAmount,
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+
+	// PENDING은 "주문은 있는데 그 뒤를 durable하게 알지 못한다"이다. 200은 "접수됐다"는
+	// 거짓이 되고 503은 "없다"는 거짓이 되므로 202를 쓴다.
+	if result.Outcome == model.OrderIdempotencyOutcomePending {
+		httpapi.WriteData(c, http.StatusAccepted, gin.H{
+			"order_id":          result.Order.ID,
+			"status":            string(result.Outcome),
+			"idempotent_replay": result.Replay,
+		})
+		return
+	}
+
+	body := gin.H{"message": "order accepted", "order_id": result.Order.ID}
+	if result.Replay {
+		body["idempotent_replay"] = true
+	}
+	httpapi.WriteData(c, http.StatusOK, body)
+}
+```
+
+키 형식 오류는 서비스가 `ErrorKindValidation`으로 내는데 `serviceErrorStatus`는 그것을
+422로 매핑한다. **키 누락은 400이어야 하므로** 핸들러에서 먼저 검사한다.
+
+```go
+	if strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
+		httpapi.WriteError(c, http.StatusBadRequest, httpapi.CodeBadRequest, "Idempotency-Key header is required")
+		return
+	}
+```
+
+- [ ] **Step 4: 통과 확인**
+
+```powershell
+$env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
+go test ./internal/handler -run IntegrationCreateOrderHandler -v -p 1
+```
+
+- [ ] **Step 5: 커밋**
+
+권장 subject: `feat(api): 주문 생성 HTTP 계약에 멱등성 키 반영`
+
+**커버하는 검증**: 1, 2, 5
+
+---
+
+### Task 7: 지표와 monitor
+
+**Files:**
+- Modify: `internal/metrics/metrics.go`
+- Create: `internal/service/order_idempotency_monitor.go`
+- Create: `internal/service/order_idempotency_monitor_test.go`
+- Modify: `cmd/main.go`
+
+**Interfaces:**
+- Produces:
+  - `metrics.OrderIdempotencyStalePending`(Gauge), `metrics.OrderIdempotencyMonitorErrorsTotal`
+  - (counter 두 개는 Task 5 Step 0에서 추가됨)
+  - `service.NewOrderIdempotencyMonitor(counter stalePendingCounter)` with `Interval`, `Threshold`
+  - `(*OrderIdempotencyMonitor).Run(ctx)`
+
+- [ ] **Step 1: RED 테스트 작성**
+
+```go
+package service
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type fakeStaleCounter struct {
+	mu     sync.Mutex
+	counts []int64
+	errs   []error
+	calls  int
+}
+
+func (f *fakeStaleCounter) CountStalePending(time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return 0, err
+		}
+	}
+	if len(f.counts) == 0 {
+		return 0, nil
+	}
+	value := f.counts[0]
+	if len(f.counts) > 1 {
+		f.counts = f.counts[1:]
+	}
+	return value, nil
+}
+
+func (f *fakeStaleCounter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// 30초를 먼저 기다리면 재기동 직후 창에서 stale PENDING이 보이지 않는다.
+func TestOrderIdempotencyMonitorQueriesImmediately(t *testing.T) {
+	counter := &fakeStaleCounter{counts: []int64{7}}
+	monitor := NewOrderIdempotencyMonitor(counter)
+	monitor.Interval = time.Hour // ticker가 돌기 전에 첫 조회가 있어야 한다
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { monitor.Run(ctx); close(done) }()
+
+	require.Eventually(t, func() bool { return counter.callCount() >= 1 }, time.Second, 5*time.Millisecond)
+	assert.EqualValues(t, 7, monitor.LastValue())
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("context 취소로 정지하지 않았다")
+	}
+}
+
+// 조회 실패 시 gauge를 0으로 덮으면 "문제가 사라졌다"로 읽힌다. 실제로는 관측이
+// 사라진 것이다.
+func TestOrderIdempotencyMonitorKeepsLastValueOnError(t *testing.T) {
+	counter := &fakeStaleCounter{counts: []int64{5}, errs: []error{nil, errors.New("db down")}}
+	monitor := NewOrderIdempotencyMonitor(counter)
+	monitor.Interval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go monitor.Run(ctx)
+
+	require.Eventually(t, func() bool { return counter.callCount() >= 2 }, time.Second, 5*time.Millisecond)
+	assert.EqualValues(t, 5, monitor.LastValue(), "조회 실패가 gauge를 0으로 덮었다")
+	assert.Positive(t, monitor.ErrorCount())
+}
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `go test ./internal/service -run OrderIdempotencyMonitor -v`
+Expected: FAIL — `undefined: NewOrderIdempotencyMonitor`
+
+- [ ] **Step 3: gauge와 monitor 오류 counter 추가**
+
+Task 5 Step 0에서 counter 두 개는 이미 넣었다. `internal/metrics/metrics.go`에 나머지를
+추가한다.
+
+```go
+	// counter는 "그 순간 코드가 살아 있었다"를 전제한다. 프로세스가 hold 커밋 직후
+	// 죽으면 아무 counter도 오르지 않으므로 gauge가 필요하다.
+	OrderIdempotencyStalePending = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "order_idempotency_stale_pending",
+		Help: "Idempotency records still PENDING past the staleness threshold.",
+	})
+
+	OrderIdempotencyMonitorErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "order_idempotency_monitor_errors_total",
+		Help: "Failed stale-pending queries. The gauge keeps its last value on failure.",
+	})
+```
+
+- [ ] **Step 4: monitor 구현**
+
+```go
+package service
+
+import (
+	"context"
+	"log"
+	"sync/atomic"
+	"time"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
+)
+
+const (
+	defaultStalePendingInterval  = 30 * time.Second
+	defaultStalePendingThreshold = 5 * time.Minute
+)
+
+type stalePendingCounter interface {
+	CountStalePending(olderThan time.Time) (int64, error)
+}
+
+// OrderIdempotencyMonitor는 stale PENDING 수를 gauge로 노출한다.
+//
+// 정산 worker에 얹지 않고 전용 컴포넌트로 둔다 — 책임이 섞이면 한쪽 장애가 다른 쪽
+// 관측을 멈춘다.
+type OrderIdempotencyMonitor struct {
+	counter   stalePendingCounter
+	Interval  time.Duration
+	Threshold time.Duration
+	Logger    *log.Logger
+
+	lastValue atomic.Int64
+	errors    atomic.Int64
+}
+
+func NewOrderIdempotencyMonitor(counter stalePendingCounter) *OrderIdempotencyMonitor {
+	return &OrderIdempotencyMonitor{counter: counter}
+}
+
+func (m *OrderIdempotencyMonitor) LastValue() int64 { return m.lastValue.Load() }
+func (m *OrderIdempotencyMonitor) ErrorCount() int64 { return m.errors.Load() }
+
+// Run은 시작 직후 한 번 조회한 뒤 주기 ticker로 전환한다. 먼저 기다리면 재기동 직후
+// 창에서 stale PENDING이 보이지 않는데, hold 커밋 직후 죽어서 생긴 레코드가 정확히
+// 그 창에 있다.
+func (m *OrderIdempotencyMonitor) Run(ctx context.Context) {
+	m.observe()
+
+	ticker := time.NewTicker(m.interval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.observe()
+		}
+	}
+}
+
+func (m *OrderIdempotencyMonitor) observe() {
+	count, err := m.counter.CountStalePending(time.Now().Add(-m.threshold()))
+	if err != nil {
+		// gauge를 0으로 덮지 않는다. DB가 불안정할 때 0으로 떨어지면 "문제가
+		// 사라졌다"로 읽히지만 실제로는 관측이 사라진 것이다.
+		m.errors.Add(1)
+		metrics.OrderIdempotencyMonitorErrorsTotal.Inc()
+		m.logf("order idempotency monitor: stale pending query failed: %v", err)
+		return
+	}
+	m.lastValue.Store(count)
+	metrics.OrderIdempotencyStalePending.Set(float64(count))
+}
+
+func (m *OrderIdempotencyMonitor) logf(format string, args ...any) {
+	if m.Logger != nil {
+		m.Logger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
+func (m *OrderIdempotencyMonitor) interval() time.Duration {
+	if m.Interval > 0 {
+		return m.Interval
+	}
+	return defaultStalePendingInterval
+}
+
+func (m *OrderIdempotencyMonitor) threshold() time.Duration {
+	if m.Threshold > 0 {
+		return m.Threshold
+	}
+	return defaultStalePendingThreshold
+}
+```
+
+- [ ] **Step 5: `cmd/main.go` 배선**
+
+`reconciliationWorker` 기동 바로 뒤에 넣는다.
+
+```go
+	idempotencyMonitor := service.NewOrderIdempotencyMonitor(
+		repository.NewOrderIdempotencyRepository(config.DB))
+	go idempotencyMonitor.Run(backgroundCtx)
+```
+
+- [ ] **Step 6: 통과 확인**
+
+```powershell
+go test ./internal/service -run OrderIdempotencyMonitor -count=20 -race -v
+go build ./...
+go vet ./...
+```
+
+- [ ] **Step 7: 커밋**
+
+권장 subject: `feat(order): 멱등성 지표와 stale PENDING monitor 추가`
+
+**커버하는 검증**: 9b
+
+---
+
+### Task 8: 통합 검증
+
+**Files:**
+- Create: `internal/service/order_idempotency_integration_test.go`
+
+**Interfaces:**
+- Consumes: Task 1~7 전체
+
+- [ ] **Step 1: 하니스와 동시성 검증 작성**
+
+핵심은 **판정 기준**이다. 주문 상태가 아니라 **`ORDER_HOLD` 원장 건수**와
+**fake engine의 `TrySubmitOrder` 호출 수**로 판정한다.
+
+```go
+// countingEngine은 엔진 제출 횟수를 센다. 원장만 보면 "hold 1회 · 엔진 제출 2회"를
+// 놓친다 — owner/follower 분리가 없으면 정확히 그 상태가 된다.
+type countingEngine struct {
+	*matching.MatchingEngine
+	mu      sync.Mutex
+	submits int
+}
+
+func (e *countingEngine) TrySubmitOrder(order *matching.Order, within time.Duration) bool {
+	e.mu.Lock()
+	e.submits++
+	e.mu.Unlock()
+	return e.MatchingEngine.TrySubmitOrder(order, within)
+}
+
+func (e *countingEngine) submitCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.submits
+}
+
+func holdEntryCount(t *testing.T, db *gorm.DB, userID uint) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&model.LedgerEntry{}).
+		Where("user_id = ? AND entry_type = ?", userID, model.LedgerEntryTypeOrderHold).
+		Count(&count).Error)
+	return count
+}
+
+// 검증 4. 애플리케이션 lock 없이 DB UNIQUE가 직렬화한다.
+func TestIntegrationOrderIdempotencyConcurrentSameKeyCreatesOneOrder(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(60)
+	defer cleanupServiceUsers(t, db, userID)
+	seedKRWWallet(t, db, userID, decimal.NewFromInt(100_000_000))
+
+	engine := &countingEngine{MatchingEngine: matching.NewMatchingEngine()}
+	engine.Start()
+	svc := newIdempotentOrderService(db, engine)
+
+	const concurrency = 100
+	results := make([]*CreateOrderResult, concurrency)
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = svc.CreateOrder(CreateOrderInput{
+				UserID: userID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
+				Price: "100", Amount: "1", IdempotencyKey: "concurrent-key",
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var orderID uint
+	for i := range results {
+		require.NoError(t, errs[i], "goroutine %d", i)
+		require.NotNil(t, results[i])
+		if orderID == 0 {
+			orderID = results[i].Order.ID
+		}
+		assert.Equal(t, orderID, results[i].Order.ID, "goroutine %d가 다른 주문을 받았다", i)
+	}
+
+	// 판정은 상태가 아니라 원장 건수와 엔진 제출 횟수다.
+	// 원장만 보면 "hold 1회 · 엔진 제출 2회"를 놓친다.
+	assert.EqualValues(t, 1, holdEntryCount(t, db, userID), "hold가 두 번 잡혔다")
+	assert.Equal(t, 1, engine.submitCount(), "엔진에 두 번 제출됐다")
+
+	var orders int64
+	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", userID).Count(&orders).Error)
+	assert.EqualValues(t, 1, orders)
+}
+
+// 검증 7b. HoldBatch는 잔액 부족을 격리하고 나머지와 함께 커밋하므로,
+// 명시적으로 지우지 않으면 실패한 요청의 키까지 커밋된다.
+func TestIntegrationOrderIdempotencyMixedBatchDoesNotConsumeFailedKey(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	richID := serviceTestUserID(61)
+	poorID := serviceTestUserID(62)
+	defer cleanupServiceUsers(t, db, richID, poorID)
+	seedKRWWallet(t, db, richID, decimal.NewFromInt(100_000_000))
+	seedKRWWallet(t, db, poorID, decimal.Zero) // 잔액 부족
+
+	engine := &countingEngine{MatchingEngine: matching.NewMatchingEngine()}
+	engine.Start()
+	svc := newIdempotentOrderService(db, engine)
+
+	var wg sync.WaitGroup
+	var poorErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = svc.CreateOrder(CreateOrderInput{
+			UserID: richID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
+			Price: "100", Amount: "1", IdempotencyKey: "rich-key",
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		_, poorErr = svc.CreateOrder(CreateOrderInput{
+			UserID: poorID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
+			Price: "100", Amount: "1", IdempotencyKey: "poor-key",
+		})
+	}()
+	wg.Wait()
+
+	require.Error(t, poorErr, "잔액 부족이 성공했다")
+
+	idemRepo := repository.NewOrderIdempotencyRepository(db)
+	failed, err := idemRepo.FindByUserKeys([]repository.UserKeyPair{{UserID: poorID, Key: "poor-key"}})
+	require.NoError(t, err)
+	assert.Empty(t, failed, "검증 실패한 요청의 키가 커밋됐다 — 사용자가 그 키를 다시 쓸 수 없다")
+
+	kept, err := idemRepo.FindByUserKeys([]repository.UserKeyPair{{UserID: richID, Key: "rich-key"}})
+	require.NoError(t, err)
+	assert.Len(t, kept, 1, "성공한 요청의 키까지 지워졌다")
+
+	// 같은 키로 다시 시도하면 이번엔 성공해야 한다.
+	seedKRWWallet(t, db, poorID, decimal.NewFromInt(100_000_000))
+	retry, err := svc.CreateOrder(CreateOrderInput{
+		UserID: poorID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
+		Price: "100", Amount: "1", IdempotencyKey: "poor-key",
+	})
+	require.NoError(t, err)
+	assert.False(t, retry.Replay, "재사용 가능해야 할 키가 replay로 처리됐다")
+}
+```
+
+나머지 7개는 같은 하니스 위에서 다음 단언을 갖는다. **실패 주입은 B-1의
+`blockableOutboxRepo` 패턴을 따라 repository wrapper**로 한다.
+
+| 테스트 | 준비 | 단언 |
+|---|---|---|
+| `...SameBatchSameKey` (4b) | `HoldCoordinator.BatchSize`를 키워 두 요청이 한 배치에 들어가게 함 | 두 결과의 `Order.ID` 동일, `holdEntryCount == 1`, `engine.submitCount() == 1` |
+| `...AllFailingBatchCleansKeys` (7c) | 잔액 0인 사용자 2명이 한 배치 | 두 키 모두 `FindByUserKeys`가 빈 결과, 주문 0건 |
+| `...RejectedReplaysSameOrder` (8) | `TrySubmitOrder`가 항상 false인 fake engine | 첫 호출 503, 레코드 `outcome=REJECTED`, 같은 키 재호출이 **같은 `order_id`**, 주문 1건, `holdEntryCount == 1` |
+| `...CompensationIsAtomic` (8b) | 보상 트랜잭션의 `UpdateOrderExecution`에서 오류를 던지는 wrapper | hold가 풀리지 않음(지갑 `locked_balance` 불변) **AND** `outcome == PENDING` — 부분 반영 0 |
+| `...UnknownUpdateFailureKeepsPending` (8d) | 보상 실패 + `UpdateOutcome`도 실패하는 wrapper | `outcome == PENDING`, 주문 1건, `OrderIdempotencyOutcomeUpdateFailuresTotal` 증가 |
+| `...AcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `UpdateOutcome`만 실패하는 wrapper | `outcome == PENDING`, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, `engine.submitCount() == 1` |
+| `...StalePendingIsObserved` (8g) | hold 커밋 후 `UpdateOutcome`을 건너뛰고, 레코드의 `updated_at`을 1시간 전으로 밀어 프로세스 종료를 모사 | `NewOrderIdempotencyMonitor(repo)`의 `Run`을 짧은 `Interval`로 돌린 뒤 `LastValue() >= 1` |
+
+`8f`(`PENDING` 창의 재요청 → 202)는 Task 6의 handler 테스트에서 `outcome`을 `PENDING`으로
+고정한 뒤 재요청해 **202**를 확인한다.
+
+- [ ] **Step 2: 각 테스트를 RED로 확인한 뒤 통과시킨다**
+
+각 시나리오마다 관련 구현을 되돌려 실패를 먼저 본다. 특히:
+- owner/follower 분리를 제거하면 `submitCount()`가 2가 되는지
+- 미커밋 키 정리를 제거하면 실패 키가 남는지
+
+- [ ] **Step 3: 전체 확인**
+
+```powershell
+$env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
+go test -run Integration -v -p 1 ./internal/dbmigration ./internal/repository ./internal/service ./internal/handler
+Remove-Item Env:GOEXCHANGE_TEST_DATABASE_DSN
+go test ./... -race
+```
+
+- [ ] **Step 4: 커밋**
+
+권장 subject: `test(order): 멱등성 키의 동시성·배치·상태 전이 통합 검증`
+
+**커버하는 검증**: 3, 4, 4b, 7b, 7c, 8, 8b, 8c, 8d, 8e, 8f, 8g, 9
+
+---
+
+### Task 9: 프런트 계약
+
+**Repository:** `C:\Users\dksco\OneDrive\Desktop\GoExchange\Go-exchange-front`
+
+**Files:**
+- Modify: `src/lib/api.ts`, `src/lib/api.test.ts`
+- Modify: `src/components/trading/OrderForm.tsx`, `OrderForm.test.tsx`
+
+**Interfaces:**
+- Produces: `createOrder(token, input, idempotencyKey)`
+
+- [ ] **Step 1: RED 테스트 작성**
+
+```ts
+it("createOrder가 Idempotency-Key 헤더를 보낸다", async () => {
+  const fetchMock = vi.fn(async () =>
+    new Response(JSON.stringify({ data: { message: "order accepted", order_id: 1 } }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+
+  await createOrder("token", validInput, "key-1");
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(new Headers(init.headers).get("Idempotency-Key")).toBe("key-1");
+});
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `npm test -- --run src/lib/api.test.ts`
+Expected: FAIL — 인자가 3개가 아니다
+
+- [ ] **Step 3: `api.ts` 구현**
+
+```ts
+export async function createOrder(
+  token: string,
+  input: CreateOrderInput,
+  idempotencyKey: string,
+): Promise<CreateOrderResponse> {
+  return apiRequest<CreateOrderResponse>("/orders", {
+    method: "POST",
+    token,
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(input),
+  });
+}
+```
+
+`apiRequest`가 `options.headers`를 이미 `new Headers(options.headers)`로 받으므로 추가
+변경은 필요 없다.
+
+- [ ] **Step 4: `OrderForm` 키 수명 RED 테스트**
+
+```ts
+// 사용자 주문 시도마다 키를 한 번 생성한다. 네트워크 재시도는 같은 키를 쓰고,
+// 사용자가 다시 제출하면 새 키다(새 주문 의도).
+it("네트워크 재시도는 같은 키를 재사용한다", async () => { /* ... */ });
+it("사용자가 다시 제출하면 새 키를 만든다", async () => { /* ... */ });
+it("202 응답을 실패로 표시하지 않는다", async () => { /* ... */ });
+```
+
+- [ ] **Step 5: `OrderForm` 구현**
+
+`crypto.randomUUID()`로 키를 만들고 `useRef`에 보관한다. 제출 성공·사용자 재제출 시
+새 키로 교체한다.
+
+- [ ] **Step 6: 프런트 게이트**
+
+```powershell
+npm test
+npm run lint
+npm run build
+```
+
+- [ ] **Step 7: 커밋**(프런트 저장소)
+
+권장 subject: `feat(trading): 주문 생성에 멱등성 키 전송`
+
+**커버하는 검증**: 클라이언트 계약
+
+---
+
+### Task 10: E2E와 k6
+
+**Files:**
+- Modify (front): `tests/e2e/exchange.spec.ts`
+- Modify (back): `_workspace/loadtest/order-spike-availability.js`, `_workspace/loadtest/crossing-flood.js`, `_workspace/loadtest/stress-hold3000.js`, `loadtest/order-spike-single-symbol.js`
+
+- [ ] **Step 1: k6 헬퍼 추가**
+
+각 스크립트에 iteration마다 새 키를 만드는 헬퍼를 넣는다.
+
+```js
+// iteration마다 새 키를 만든다. 재사용하면 두 번째부터 전부 replay가 되어
+// 주문이 생성되지 않고 측정이 무의미해진다. 반대로 iteration 안의 재시도마다
+// 새 키를 만들면 멱등성을 전혀 검증하지 못한다.
+function newIdempotencyKey() {
+  return `${__VU}-${__ITER}-${Date.now()}`;
+}
+```
+
+주문 POST의 헤더에 `'Idempotency-Key': key`를 추가하고, 같은 iteration의 재시도에는
+같은 `key` 변수를 쓴다.
+
+- [ ] **Step 2: E2E 중복 제출 시나리오 추가**
+
+```ts
+test("duplicate order submission with the same key creates one order", async ({ request }) => {
+  // 같은 키로 두 번 → 같은 order_id, 두 번째에 idempotent_replay
+  // 주문 목록에 그 주문이 1건
+});
+```
+
+- [ ] **Step 3: 확인**
+
+```powershell
+k6 run _workspace/loadtest/sli-classify.selftest.js
+npx playwright test --grep "idempot|duplicate order"
+```
+
+- [ ] **Step 4: 커밋 두 개**(백엔드·프런트 각각)
+
+권장 백엔드 subject: `test(load): 부하 하니스에 iteration별 멱등성 키 적용`
+권장 프런트 subject: `test(e2e): 같은 키 중복 제출이 주문을 하나만 만드는지 검증`
+
+---
+
+### Task 11: 측정과 문서
+
+**Files:**
+- Create: `docs/benchmarks/36-YYYY-MM-DD-order-idempotency-key.md`
+- Modify: `README.md`, `docs/refactor/README.md`, `docs/ENGINEERING-SUMMARY.md`
+
+- [ ] **Step 1: 로컬 전체 게이트**
+
+```powershell
+$env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
+go test -run Integration -p 1 ./internal/dbmigration ./internal/repository ./internal/service ./internal/handler
+Remove-Item Env:GOEXCHANGE_TEST_DATABASE_DSN
+go test ./... -race
+go vet ./...
+git diff --check
+```
+
+- [ ] **Step 2: push·CI 초록 확인 후 측정 SHA 고정**
+
+- [ ] **Step 3: 유료 GCP 실행 승인 요청**
+
+35번과 같은 topology·게이트. **추가로 비용 실측 항목**을 부하 전후로 기록한다.
+
+```sql
+SELECT pg_size_pretty(pg_relation_size('order_idempotency_keys')) AS table_size,
+       pg_size_pretty(pg_relation_size('order_idempotency_keys_user_key_unique')) AS unique_index,
+       pg_size_pretty(pg_relation_size('order_idempotency_pending_updated_at')) AS partial_index;
+SELECT pg_current_wal_lsn();
+```
+
+- [ ] **Step 4: 산출물 시크릿 게이트**
+
+runbook §7.5 순서를 따른다. `_workspace`·`_artifacts`에는 정리본만 넣는다.
+
+- [ ] **Step 5: 36번 문서 작성**
+
+측정 SHA와 최종 문서 SHA를 구분한다. 인덱스 크기·WAL 증가량을 **기준선으로만** 기록하고
+보존 정책 결정의 근거로 남긴다.
+
+- [ ] **Step 6: 커밋·push·CI**
+
+**커버하는 검증**: 10, 11
+
+---
+
+## Plan Completion Gate
+
+- 설계 §6의 27개 검증이 테스트 이름과 원본 출력으로 추적된다
+- 같은 키 동시 100회에서 **`ORDER_HOLD` 1건 AND 엔진 제출 1회**
+- 혼합 배치·전원 실패 배치에서 실패 키가 소비되지 않는다
+- 어떤 outcome UPDATE 실패에서도 중복 주문이 없고 `PENDING`이 유지된다
+- `REJECTED` 기록이 보상 트랜잭션과 함께 커밋/롤백된다
+- migration 008이 카탈로그 검증으로 잘못된 동명 인덱스를 막고, 실패 시 version 8을 남기지 않는다
+- monitor가 시작 직후 1회 조회하고, 조회 실패가 gauge를 0으로 덮지 않는다
+- 프런트·E2E·k6가 모두 키를 보내고, k6는 iteration마다 새 키를 쓴다
+- 인덱스 크기·WAL 증가량이 기록됐다
+- VM 4대가 TERMINATED이고 backend/frontend CI가 모두 PASS다
