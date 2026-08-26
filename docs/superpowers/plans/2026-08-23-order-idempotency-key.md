@@ -1709,6 +1709,12 @@ Expected: FAIL — `unknown field IdempotencyKey`
 
 - [ ] **Step 3: 키 검증·지문·follower 분기 구현**
 
+`BuildOrderWithRegistry`를 **구문 파싱(`parseOrderRequest`)** 과 **시장 정책 검증
+(`validateMarketPolicy`)** 으로 쪼갠다. `CreateOrder`는 파싱만 먼저 하고, 정책은 새 키에만
+적용한다 — 정책은 시간이 지나 바뀌므로, 주문 생성 뒤 시장이 멈추면 같은 키의 정상 재시도가
+replay 대신 4xx로 끝난다. `BuildOrderWithRegistry`는 두 함수를 순서대로 부르는 얇은 껍데기로
+남겨 기존 호출부(테스트 포함)를 그대로 둔다.
+
 ```go
 const maxIdempotencyKeyLength = 128
 
@@ -1729,7 +1735,9 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		return nil, err
 	}
 
-	order, err := s.BuildOrder(input)
+	// 구문 파싱만 먼저 한다. 시장 정책은 시간이 지나 바뀌므로, 정책 검증을 여기서 하면
+	// 이미 커밋된 요청의 재시도가 정책 변경 하나로 replay 대신 4xx가 된다.
+	order, err := parseOrderRequest(input)
 	if err != nil {
 		return nil, err
 	}
@@ -1753,11 +1761,22 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		Key: key, Fingerprint: fingerprint, Version: CurrentOrderFingerprintVersion,
 	}
 
+	// 여기부터는 "지금 새 주문을 받아도 되는가"를 본다. 어느 검사에 걸리든 거절 직전에
+	// 기존 키를 확인한다 — 이미 결정된 요청의 결과를 지금의 상황으로 덮어쓰면 안 된다.
+	// 정상 경로(새 키)에서는 조회하지 않으므로 왕복이 늘지 않는다.
+	if err := validateMarketPolicy(order, s.marketRulesRegistry()); err != nil {
+		return s.rejectUnlessReplay(order.UserID, key, fingerprintInput, err)
+	}
+
+	// 엔진이 없으면 주문을 받을 수 없다. hold부터 잡으면 주문·자금이 처리될 경로 없이
+	// 영구히 묶인다 — 주문에는 취소와 달리 command outbox가 없다.
+	if s.MatchingEngine == nil {
+		return s.rejectUnlessReplay(order.UserID, key, fingerprintInput,
+			NewUnavailableErrorf("matching engine is not configured"))
+	}
+
 	// 입장 게이트: 엔진 유입이 포화면 DB 작업 전에 빠른 거절(503).
-	if s.MatchingEngine != nil && !s.MatchingEngine.IsIntakeAdmissible(order.CoinSymbol) {
-		// 게이트가 닫혀도 이미 결정된 요청의 결과는 돌려줘야 한다. 여기서 무조건 503을
-		// 내면 ACCEPTED된 요청의 재시도가 replay 대신 503을, 다른 지문이 409 대신 503을
-		// 받는다 — 포화 여부가 멱등성 계약을 덮어쓴다. 새 키만 거절한다.
+	if !s.MatchingEngine.IsIntakeAdmissible(order.CoinSymbol) {
 		replay, err := s.replayExistingKey(order.UserID, key, fingerprintInput)
 		if err != nil {
 			return nil, err
@@ -1775,23 +1794,39 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		return nil, err
 	}
 
-	// follower는 엔진에 제출하지 않는다. 다만 follower에는 두 종류가 있다.
+	// follower는 엔진에 제출하지 않는다. 제출하면 hold는 한 번인데 주문이 두 번 들어간다.
 	if res.Role == holdRoleFollower {
-		return s.followerResult(res, fingerprint)
+		return s.followerResult(res, fingerprintInput)
 	}
+	order = res.Order
 
-	if s.MatchingEngine != nil {
-		submitted := s.MatchingEngine.TrySubmitOrder(/* 기존 인자 */, s.acceptanceTimeout())
-		if !submitted {
-			return nil, s.rejectAcceptedOrderWithIdempotency(order, idem.RecordID)
-		}
-		// 엔진 접수 성공 — ACCEPTED로 전이한다. 실패하면 PENDING에 머문다.
-		if err := s.OrderIdempotencyRepository.UpdateOutcome(
-			idem.RecordID, model.OrderIdempotencyOutcomeAccepted,
-		); err != nil {
-			metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
-			log.Printf("order idempotency: ACCEPTED update failed for record %d: %v", idem.RecordID, err)
-		}
+	// 바운디드 핸드오프: 매칭 처리량에 응답이 매달리지 않게. 주문은 이미
+	// 영속화+홀드로 내구·정합 확정 상태다. 바운드 내 접수 못 하면(레이스로 포화)
+	// 보상으로 홀드를 풀고 REJECTED로 종결한 뒤 503.
+	submitted := s.MatchingEngine.TrySubmitOrder(&matching.Order{
+		ID:                order.ID,
+		UserID:            order.UserID,
+		CoinSymbol:        order.CoinSymbol,
+		Side:              order.Side,
+		Price:             order.Price,
+		Amount:            order.Amount,
+		QuoteAmount:       matchingQuoteAmountForOrder(order),
+		CreatedAt:         order.CreatedAt,
+		EnqueuedAt:        time.Now(),
+		OrderType:         order.OrderType,
+		FilledAmount:      order.FilledAmount,
+		FilledQuoteAmount: order.FilledQuoteAmount,
+	}, s.acceptanceTimeout())
+	if !submitted {
+		metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff").Inc()
+		return nil, s.rejectAcceptedOrderWithIdempotency(order, idem.RecordID)
+	}
+	// 엔진 접수 성공 — ACCEPTED로 전이한다. 실패하면 PENDING에 머문다(재요청은 202).
+	if err := s.OrderIdempotencyRepository.UpdateOutcome(
+		idem.RecordID, model.OrderIdempotencyOutcomeAccepted,
+	); err != nil {
+		metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
+		log.Printf("order idempotency: ACCEPTED update failed for record %d: %v", idem.RecordID, err)
 	}
 
 	return &CreateOrderResult{Order: order, Outcome: model.OrderIdempotencyOutcomeAccepted}, nil
@@ -1816,6 +1851,23 @@ func (s *OrderService) followerResult(res holdResult, in OrderFingerprintInput) 
 		}, nil
 	}
 	return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
+}
+
+// rejectUnlessReplay는 거절 직전의 마지막 확인이다. 기존 키면 저장된 결과를 돌려주고,
+// 새 키면 주어진 거절 사유를 그대로 낸다.
+//
+// 조회는 거절할 때만 한다. 요청마다 미리 조회하면 정상 경로에 SELECT가 하나 는다.
+func (s *OrderService) rejectUnlessReplay(
+	userID uint, key string, in OrderFingerprintInput, rejection error,
+) (*CreateOrderResult, error) {
+	replay, err := s.replayExistingKey(userID, key, in)
+	if err != nil {
+		return nil, err
+	}
+	if replay != nil {
+		return replay, nil
+	}
+	return nil, rejection
 }
 
 // replayExistingKey는 이미 커밋된 키가 있으면 그 결과를 돌려준다. 없으면 (nil, nil)이다.

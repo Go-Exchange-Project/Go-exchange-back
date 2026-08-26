@@ -89,9 +89,9 @@ func TestIntegrationCreateOrderReplaysWhileIntakeSaturated(t *testing.T) {
 	assert.EqualValues(t, 1, engine.submits.Load())
 }
 
-// 엔진이 없으면 주문은 영속화·홀드까지만 됐다. DB의 outcome이 PENDING인데 ACCEPTED를
-// 돌려주면 응답과 저장된 상태가 어긋나고, 재시도가 200과 202를 오간다.
-func TestIntegrationCreateOrderWithoutEngineReportsPending(t *testing.T) {
+// 엔진이 없으면 주문을 받을 수 없다. hold부터 잡으면 그 주문과 자금은 처리될 경로 없이
+// 영구히 묶인다 — 주문에는 취소와 달리 command outbox가 없다.
+func TestIntegrationCreateOrderWithoutEngineIsUnavailable(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	userID := serviceTestUserID(786)
 	defer cleanupServiceUsers(t, db, userID)
@@ -102,11 +102,81 @@ func TestIntegrationCreateOrderWithoutEngineReportsPending(t *testing.T) {
 		repository.NewOrderRepository(db), repository.NewWalletRepository(db), nil)
 
 	result, err := orderService.CreateOrder(idemOrderInput(userID, "no-engine-key", "1"))
-	require.NoError(t, err)
-	assert.Equal(t, model.OrderIdempotencyOutcomePending, result.Outcome)
+	require.Error(t, err)
+	assert.Nil(t, result)
 
-	var record model.OrderIdempotencyKey
-	require.NoError(t, db.Where("user_id = ?", userID).First(&record).Error)
-	assert.Equal(t, model.OrderIdempotencyOutcomePending, record.Outcome,
-		"응답 outcome과 저장된 outcome이 어긋났다")
+	kind, ok := DomainErrorKind(err)
+	require.True(t, ok)
+	assert.Equal(t, ErrorKindUnavailable, kind)
+
+	assert.EqualValues(t, 0, countOrders(t, db, userID), "처리될 경로가 없는 주문이 생성됐다")
+	assert.EqualValues(t, 0, countIdemKeys(t, db, userID), "키가 소비됐다 — 재시도가 막힌다")
+
+	var wallet model.Wallet
+	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
+		First(&wallet).Error)
+	assert.True(t, wallet.LockedBalance.IsZero(), "자금이 묶였다: locked=%s", wallet.LockedBalance)
+}
+
+// 시장 정책은 시간이 지나 바뀐다. 이미 커밋된 요청의 재시도는 그 변경과 무관하게 저장된
+// 결과를 돌려줘야 한다 — 정책 검증이 기존 키 조회보다 앞서면 정상 재시도가 4xx가 된다.
+func TestIntegrationCreateOrderReplaysAfterMarketPolicyTightens(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(787)
+	defer cleanupServiceUsers(t, db, userID)
+	defer cleanupIdemKeys(t, db, userID)
+	seedIdemBuyerWallet(t, db, userID, 10000)
+
+	engine := &countingAcceptanceEngine{
+		fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true},
+	}
+	orderService := NewOrderService(
+		repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+	orderService.MarketRules = idemMarketRules(t, "ACTIVE")
+
+	first, err := orderService.CreateOrder(idemOrderInput(userID, "policy-key", "1"))
+	require.NoError(t, err)
+
+	// 주문이 접수된 뒤 시장이 멈췄다.
+	orderService.MarketRules = idemMarketRules(t, "HALTED")
+
+	// 같은 키·같은 본문은 저장된 결과를 그대로 받는다.
+	replay, err := orderService.CreateOrder(idemOrderInput(userID, "policy-key", "1"))
+	require.NoError(t, err, "정책이 바뀌었다고 기존 키의 재시도가 거절됐다")
+	assert.True(t, replay.Replay)
+	assert.Equal(t, first.Order.ID, replay.Order.ID)
+
+	// 같은 키·다른 본문은 정책 오류가 아니라 키 충돌로 거절된다.
+	conflict, err := orderService.CreateOrder(idemOrderInput(userID, "policy-key", "2"))
+	require.Error(t, err)
+	assert.Nil(t, conflict)
+	assert.Contains(t, err.Error(), "idempotency key was used with a different request")
+
+	// 새 키는 지금 정책으로 거절된다 — 정책이 무력화되면 안 된다. 멈춘 시장도
+	// ConflictError(409)이므로 오류 종류가 아니라 사유로 구분한다.
+	fresh, err := orderService.CreateOrder(idemOrderInput(userID, "fresh-policy-key", "1"))
+	require.Error(t, err)
+	assert.Nil(t, fresh)
+	assert.Contains(t, err.Error(), "market is not accepting orders")
+
+	assert.EqualValues(t, 1, countOrders(t, db, userID))
+	assert.EqualValues(t, 1, engine.submits.Load())
+}
+
+func idemMarketRules(t *testing.T, status string) *MarketRulesRegistry {
+	t.Helper()
+	registry, err := NewMarketRulesRegistryFromConfig(MarketRulesConfig{
+		MinOrderNotional:        "1",
+		FeeRate:                 "0.0005",
+		DefaultMarketStatus:     "ACTIVE",
+		DefaultMinOrderQuantity: "0.00000001",
+		DefaultBaseQuantityStep: "0.00000001",
+		Markets: map[string]MarketRulesMarketConfig{
+			"btc": {TradingStatus: status},
+		},
+		TickRules:   []MarketRulesTickConfig{{UpperBound: "1000", TickSize: "1"}},
+		MaxTickSize: "10",
+	})
+	require.NoError(t, err)
+	return registry
 }
