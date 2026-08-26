@@ -973,6 +973,42 @@ func TestIntegrationOrderIdempotencyStateChangesRejectZeroRows(t *testing.T) {
 		err := repo.DeleteByIDs([]uint64{missingID})
 		require.Error(t, err)
 	})
+
+	// 0은 "지울 것이 없다"가 아니라 ID 전달이 깨졌다는 신호다. 조용히 버리면 그 키가
+	// PENDING으로 남는다 — 이 메서드가 막으려던 바로 그 상태다.
+	t.Run("DeleteByIDs는 0 ID를 거부한다", func(t *testing.T) {
+		require.Error(t, repo.DeleteByIDs([]uint64{0}))
+
+		record := seedIdemRecord(userID, "with-zero")
+		_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+		require.NoError(t, err)
+
+		require.Error(t, repo.DeleteByIDs([]uint64{record.ID, 0}),
+			"0이 섞였는데 실제 ID만 지우고 성공했다")
+
+		var count int64
+		require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+			Where("id = ?", record.ID).Count(&count).Error)
+		assert.EqualValues(t, 1, count, "0을 버리고 실제 행을 지웠다")
+	})
+
+	// 부분 누락에서 error를 돌려주는 것만으로는 부족하다. 호출자 트랜잭션 안에서
+	// 실제로 지워진 행까지 함께 롤백되어야 "키를 소비하지 않는다"가 성립한다.
+	t.Run("호출자 트랜잭션에서 부분 삭제가 롤백된다", func(t *testing.T) {
+		record := seedIdemRecord(userID, "rollback")
+		_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+		require.NoError(t, err)
+
+		txErr := db.Transaction(func(tx *gorm.DB) error {
+			return repo.WithTx(tx).DeleteByIDs([]uint64{record.ID, missingID})
+		})
+		require.Error(t, txErr)
+
+		var count int64
+		require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+			Where("id = ?", record.ID).Count(&count).Error)
+		assert.EqualValues(t, 1, count, "부분 삭제가 롤백되지 않았다")
+	})
 }
 
 func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
@@ -1174,10 +1210,21 @@ func (r *OrderIdempotencyRepository) UpdateOutcome(id uint64, outcome model.Orde
 // 사용자의 재시도를 영구히 막습니다 — 검증 실패는 키를 소비하지 않는다는 계약이 깨집니다.
 // 이 메서드는 호출자의 트랜잭션 안에서 실행되므로, 오류를 돌려주면 부분 삭제도 롤백됩니다.
 func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
-	deduped := dedupeNonzeroUint64(ids)
-	if len(deduped) == 0 {
+	if len(ids) == 0 {
 		return nil
 	}
+
+	// 0은 걸러내지 않고 오류로 만든다. 여기 오는 값은 모두 방금 삽입한 레코드의 ID이므로,
+	// 0이 섞였다는 것은 ID 전달이 깨졌다는 뜻이다. 조용히 버리면 그 키가 PENDING으로 남아
+	// "검증 실패는 키를 소비하지 않는다"는 계약이 다시 소리 없이 깨진다.
+	for _, id := range ids {
+		if id == 0 {
+			return fmt.Errorf("refusing to delete idempotency keys: id 0 in %d ids", len(ids))
+		}
+	}
+
+	// 0은 위에서 걸렀으므로 여기서는 중복 제거만 한다.
+	deduped := dedupeNonzeroUint64(ids)
 
 	result := r.DB.Where("id IN ?", deduped).Delete(&model.OrderIdempotencyKey{})
 	if result.Error != nil {
@@ -1208,8 +1255,12 @@ $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=
 go test ./internal/repository -run IntegrationOrderIdempotency -v -p 1
 ```
 
-Expected: 8개 PASS
+Expected: 8개 PASS(서브테스트 6개 포함)
 
+> `DeleteByIDs`에 들어오는 값은 모두 방금 삽입한 레코드의 ID다. **0은 걸러내지 말고
+> 오류로 만든다** — 조용히 버리면 ID 전달이 깨진 키가 `PENDING`으로 남아, 이 메서드가
+> 막으려던 상태가 그대로 발생한다. 빈 슬라이스만 no-op이다.
+>
 > 상태 변경 메서드는 **0행 변경을 성공으로 돌려주면 안 된다**. 잘못된 ID로도 DB 오류가
 > 나지 않으므로, `RowsAffected` 검사가 빠지면 "주문은 커밋됐는데 키에 `order_id`가 없는"
 > 상태나 "검증 실패 키가 `PENDING`으로 소비된" 상태를 아무도 관측하지 못한다.

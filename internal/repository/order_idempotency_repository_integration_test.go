@@ -215,6 +215,42 @@ func TestIntegrationOrderIdempotencyStateChangesRejectZeroRows(t *testing.T) {
 		err := repo.DeleteByIDs([]uint64{missingID})
 		require.Error(t, err)
 	})
+
+	// 0은 "지울 것이 없다"가 아니라 ID 전달이 깨졌다는 신호다. 조용히 버리면 그 키가
+	// PENDING으로 남는다 — 이 메서드가 막으려던 바로 그 상태다.
+	t.Run("DeleteByIDs는 0 ID를 거부한다", func(t *testing.T) {
+		require.Error(t, repo.DeleteByIDs([]uint64{0}))
+
+		record := seedIdemRecord(userID, "with-zero")
+		_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+		require.NoError(t, err)
+
+		require.Error(t, repo.DeleteByIDs([]uint64{record.ID, 0}),
+			"0이 섞였는데 실제 ID만 지우고 성공했다")
+
+		var count int64
+		require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+			Where("id = ?", record.ID).Count(&count).Error)
+		assert.EqualValues(t, 1, count, "0을 버리고 실제 행을 지웠다")
+	})
+
+	// 부분 누락에서 error를 돌려주는 것만으로는 부족하다. 호출자 트랜잭션 안에서
+	// 실제로 지워진 행까지 함께 롤백되어야 "키를 소비하지 않는다"가 성립한다.
+	t.Run("호출자 트랜잭션에서 부분 삭제가 롤백된다", func(t *testing.T) {
+		record := seedIdemRecord(userID, "rollback")
+		_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+		require.NoError(t, err)
+
+		txErr := db.Transaction(func(tx *gorm.DB) error {
+			return repo.WithTx(tx).DeleteByIDs([]uint64{record.ID, missingID})
+		})
+		require.Error(t, txErr)
+
+		var count int64
+		require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+			Where("id = ?", record.ID).Count(&count).Error)
+		assert.EqualValues(t, 1, count, "부분 삭제가 롤백되지 않았다")
+	})
 }
 
 func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {

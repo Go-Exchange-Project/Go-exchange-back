@@ -150,10 +150,21 @@ func (r *OrderIdempotencyRepository) UpdateOutcome(id uint64, outcome model.Orde
 // 사용자의 재시도를 영구히 막습니다 — 검증 실패는 키를 소비하지 않는다는 계약이 깨집니다.
 // 이 메서드는 호출자의 트랜잭션 안에서 실행되므로, 오류를 돌려주면 부분 삭제도 롤백됩니다.
 func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
-	deduped := dedupeNonzeroUint64(ids)
-	if len(deduped) == 0 {
+	if len(ids) == 0 {
 		return nil
 	}
+
+	// 0은 걸러내지 않고 오류로 만든다. 여기 오는 값은 모두 방금 삽입한 레코드의 ID이므로,
+	// 0이 섞였다는 것은 ID 전달이 깨졌다는 뜻이다. 조용히 버리면 그 키가 PENDING으로 남아
+	// "검증 실패는 키를 소비하지 않는다"는 계약이 다시 소리 없이 깨진다.
+	for _, id := range ids {
+		if id == 0 {
+			return fmt.Errorf("refusing to delete idempotency keys: id 0 in %d ids", len(ids))
+		}
+	}
+
+	// 0은 위에서 걸렀으므로 여기서는 중복 제거만 한다.
+	deduped := dedupeNonzeroUint64(ids)
 
 	result := r.DB.Where("id IN ?", deduped).Delete(&model.OrderIdempotencyKey{})
 	if result.Error != nil {
