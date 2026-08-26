@@ -299,7 +299,17 @@ func (c *HoldCoordinator) HoldBatch(reqs []holdRequest) ([]holdResult, error) {
 		return nil, err
 	}
 
-	// 같은 배치의 중복 요청은 leader의 결과를 그대로 받는다. 엔진 제출은 owner만 한다.
+	applyFollowerResults(results, followers)
+	return results, nil
+}
+
+// applyFollowerResults는 같은 배치의 중복 요청에 leader의 결과를 복사한다.
+// 엔진 제출은 owner만 하므로 follower는 결과만 공유한다.
+//
+// 이때 Existing은 nil로 남을 수 있다. leader가 이번 배치에서 주문을 만든 경우에는
+// 저장된 레코드를 읽어 온 적이 없기 때문이다. 호출자는 Existing이 아니라 Role로
+// follower를 판정해야 한다.
+func applyFollowerResults(results []holdResult, followers map[int]int) {
 	for i, leader := range followers {
 		results[i] = holdResult{
 			Order:    results[leader].Order,
@@ -308,7 +318,6 @@ func (c *HoldCoordinator) HoldBatch(reqs []holdRequest) ([]holdResult, error) {
 			Existing: results[leader].Existing,
 		}
 	}
-	return results, nil
 }
 
 // claimIdempotencyKeys는 owner 후보의 키를 먼저 INSERT하고, 실제로 삽입된 것만 돌려준다.
@@ -454,8 +463,8 @@ func (c *HoldCoordinator) processBatch(reqs []holdRequest) {
 	if err != nil {
 		metrics.HoldBatchFallbacksTotal.Inc()
 		c.logf("hold batch of %d failed, falling back to per-order: %v", len(reqs), err)
-		for i := range reqs {
-			reqs[i].resultCh <- c.persistAndHoldOne(reqs[i])
+		for i, res := range c.fallbackPerRequest(reqs) {
+			reqs[i].resultCh <- res
 		}
 		return
 	}
@@ -463,6 +472,25 @@ func (c *HoldCoordinator) processBatch(reqs []holdRequest) {
 	for i := range reqs {
 		reqs[i].resultCh <- results[i]
 	}
+}
+
+// fallbackPerRequest는 배치 트랜잭션이 실패했을 때 요청을 하나씩 처리한다.
+//
+// 여기서도 먼저 그룹화한다. 요청을 전부 독립 처리하면 배치가 내렸을 판정이 뒤집힌다 —
+// 같은 키의 앞 요청이 검증 실패로 롤백되면 뒤의 다른 지문 요청이 409 대신 owner가 되어
+// 주문을 만든다. owner만 단건 처리하고, follower는 결과를 복사하며, conflict는 409로 둔다.
+func (c *HoldCoordinator) fallbackPerRequest(reqs []holdRequest) []holdResult {
+	owners, followers, conflicts := groupIdempotentRequests(reqs)
+	results := make([]holdResult, len(reqs))
+
+	for _, i := range conflicts {
+		results[i] = holdResult{Err: NewConflictErrorf("idempotency key reused with a different request")}
+	}
+	for _, i := range owners {
+		results[i] = c.persistAndHoldOne(reqs[i])
+	}
+	applyFollowerResults(results, followers)
+	return results
 }
 
 // persistAndHoldOne은 배치 트랜잭션이 실패했을 때의 단건 폴백이다.

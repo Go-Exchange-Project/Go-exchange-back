@@ -1579,6 +1579,31 @@ for _, ph := range passing {
 단건 경로에서는 검증 실패가 트랜잭션 전체를 롤백하므로 키도 함께 사라진다 — 배치 경로의
 `DeleteByIDs`와 같은 효과다. 롤백 시 `order.ID`와 `idem.RecordID`를 0으로 되돌린다.
 
+**폴백도 먼저 그룹화한다.** 요청을 전부 독립 처리하면 배치가 내렸을 판정이 뒤집힌다 —
+같은 키의 앞 요청이 검증 실패로 롤백되면, 뒤의 다른 지문 요청이 409 대신 owner가 되어
+주문을 만든다.
+
+```go
+// fallbackPerRequest는 배치 트랜잭션이 실패했을 때 요청을 하나씩 처리한다.
+//
+// 여기서도 먼저 그룹화한다. 요청을 전부 독립 처리하면 배치가 내렸을 판정이 뒤집힌다 —
+// 같은 키의 앞 요청이 검증 실패로 롤백되면 뒤의 다른 지문 요청이 409 대신 owner가 되어
+// 주문을 만든다. owner만 단건 처리하고, follower는 결과를 복사하며, conflict는 409로 둔다.
+func (c *HoldCoordinator) fallbackPerRequest(reqs []holdRequest) []holdResult {
+	owners, followers, conflicts := groupIdempotentRequests(reqs)
+	results := make([]holdResult, len(reqs))
+
+	for _, i := range conflicts {
+		results[i] = holdResult{Err: NewConflictErrorf("idempotency key reused with a different request")}
+	}
+	for _, i := range owners {
+		results[i] = c.persistAndHoldOne(reqs[i])
+	}
+	applyFollowerResults(results, followers)
+	return results
+}
+```
+
 - [ ] **Step 7: 회귀 확인**
 
 Run: `go test ./internal/service -race -p 1`
@@ -1593,6 +1618,7 @@ Expected: 기존 hold coordinator 테스트 전부 PASS
 | `SameKeyDifferentFingerprintConflicts` | 하나만 성공, 나머지는 `ErrorKindConflict`, 주문 1건 |
 | `FailedValidationReleasesKey` | 실패한 owner의 키가 **DB에서 사라짐**, 성공한 키는 남음 |
 | `ExistingKeyReturnsStoredRecord` | 재시도가 follower + 저장된 `OrderID`를 받고 새 주문 없음 |
+| `FallbackKeepsIdempotencyGrouping` | 폴백에서도 다른 지문은 409, 중복은 follower, 실패 키는 소비되지 않음 |
 
 - [ ] **Step 8: 커밋**
 
@@ -1726,9 +1752,9 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		return nil, err
 	}
 
-	// follower는 엔진에 제출하지 않는다. 저장된 결과를 그대로 돌려준다.
+	// follower는 엔진에 제출하지 않는다. 다만 follower에는 두 종류가 있다.
 	if res.Role == holdRoleFollower {
-		return s.replayResult(res.Existing, fingerprint)
+		return s.followerResult(res, fingerprint)
 	}
 
 	if s.MatchingEngine != nil {
@@ -1746,6 +1772,27 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 	}
 
 	return &CreateOrderResult{Order: order, Outcome: model.OrderIdempotencyOutcomeAccepted}, nil
+}
+
+// followerResult는 follower 두 종류를 가른다.
+//
+//   - Existing != nil: 이전 요청이 이미 커밋한 키다. 저장된 레코드로 replay한다.
+//   - Existing == nil && Order != nil: **같은 배치**의 중복이다. leader가 이번에 주문을
+//     만들었으므로 저장된 레코드를 읽어 온 적이 없다. 엔진 제출 없이 202 PENDING이다.
+//     여기서 replayResult를 부르면 정상적인 중복 요청이 503이 된다.
+//   - 그 외: 결과를 만들지 못한 것이므로 503이다.
+func (s *OrderService) followerResult(res holdResult, fingerprint string) (*CreateOrderResult, error) {
+	if res.Existing != nil {
+		return s.replayResult(res.Existing, fingerprint)
+	}
+	if res.Order != nil {
+		return &CreateOrderResult{
+			Order:   res.Order,
+			Replay:  true,
+			Outcome: model.OrderIdempotencyOutcomePending,
+		}, nil
+	}
+	return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
 }
 
 // replayResult는 저장된 결과로 응답을 재구성한다. 지문이 다르면 409다.
@@ -1825,6 +1872,14 @@ go test ./internal/service -race
 - [ ] **Step 7: 커밋**
 
 권장 subject: `feat(order): 주문 생성에 멱등성 키 계약 적용`
+
+> **같은 배치 중복은 503이 아니다.** `HoldBatch`는 같은 배치의 follower에 leader의
+> `Order`만 복사하고 `Existing`은 nil로 남긴다(레코드를 읽어 온 적이 없다). 이 경우를
+> `replayResult`로 보내면 `record == nil` 분기에 걸려 정상 요청이 503이 된다.
+>
+> 통합 테스트로 고정한다: 같은 키·같은 지문 2건을 **한 배치에 확실히 들어가게** 제출하면
+> owner는 202, follower도 **503 없이 202 PENDING**이고, `ORDER_HOLD` 원장 1건,
+> fake engine의 `TrySubmitOrder` 호출 수는 **1**이다.
 
 **커버하는 검증**: 1, 2, 7
 
