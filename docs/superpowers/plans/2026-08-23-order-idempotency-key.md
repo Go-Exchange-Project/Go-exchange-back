@@ -1734,7 +1734,9 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		return nil, err
 	}
 
-	fingerprint, err := ComputeOrderFingerprint(OrderFingerprintInput{
+	// 지문 입력은 그대로 들고 다닌다. 기존 레코드는 저장된 버전의 규칙으로 다시 계산해야
+	// 하므로, 현재 버전으로 계산한 문자열 하나만으로는 비교할 수 없다.
+	fingerprintInput := OrderFingerprintInput{
 		UserID:      order.UserID,
 		CoinSymbol:  order.CoinSymbol,
 		Side:        string(order.Side),
@@ -1742,13 +1744,31 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		Price:       order.Price,
 		Amount:      order.Amount,
 		QuoteAmount: order.QuoteAmount,
-	}, CurrentOrderFingerprintVersion)
+	}
+	fingerprint, err := ComputeOrderFingerprint(fingerprintInput, CurrentOrderFingerprintVersion)
 	if err != nil {
 		return nil, err
 	}
-	idem := &idempotencyContext{Key: key, Fingerprint: fingerprint, Version: CurrentOrderFingerprintVersion}
+	idem := &idempotencyContext{
+		Key: key, Fingerprint: fingerprint, Version: CurrentOrderFingerprintVersion,
+	}
 
-	// ... 기존 유입 게이트 ...
+	// 입장 게이트: 엔진 유입이 포화면 DB 작업 전에 빠른 거절(503).
+	if s.MatchingEngine != nil && !s.MatchingEngine.IsIntakeAdmissible(order.CoinSymbol) {
+		// 게이트가 닫혀도 이미 결정된 요청의 결과는 돌려줘야 한다. 여기서 무조건 503을
+		// 내면 ACCEPTED된 요청의 재시도가 replay 대신 503을, 다른 지문이 409 대신 503을
+		// 받는다 — 포화 여부가 멱등성 계약을 덮어쓴다. 새 키만 거절한다.
+		replay, err := s.replayExistingKey(order.UserID, key, fingerprintInput)
+		if err != nil {
+			return nil, err
+		}
+		if replay != nil {
+			return replay, nil
+		}
+
+		metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_gate").Inc()
+		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
+	}
 
 	res, err := s.holdWithIdempotency(order, idem)
 	if err != nil {
@@ -1780,13 +1800,13 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 // followerResult는 follower 두 종류를 가른다.
 //
 //   - Existing != nil: 이전 요청이 이미 커밋한 키다. 저장된 레코드로 replay한다.
-//   - Existing == nil && Order != nil: **같은 배치**의 중복이다. leader가 이번에 주문을
-//     만들었으므로 저장된 레코드를 읽어 온 적이 없다. 엔진 제출 없이 202 PENDING이다.
+//   - Existing == nil && Order != nil: 같은 배치의 중복이다. leader가 이번에 주문을
+//     만들었으므로 별도로 조회해 온 레코드가 없다. 엔진 제출 없이 202 PENDING이다.
 //     여기서 replayResult를 부르면 정상적인 중복 요청이 503이 된다.
 //   - 그 외: 결과를 만들지 못한 것이므로 503이다.
-func (s *OrderService) followerResult(res holdResult, fingerprint string) (*CreateOrderResult, error) {
+func (s *OrderService) followerResult(res holdResult, in OrderFingerprintInput) (*CreateOrderResult, error) {
 	if res.Existing != nil {
-		return s.replayResult(res.Existing, fingerprint)
+		return s.replayResult(res.Existing, in)
 	}
 	if res.Order != nil {
 		return &CreateOrderResult{
@@ -1798,12 +1818,38 @@ func (s *OrderService) followerResult(res holdResult, fingerprint string) (*Crea
 	return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
 }
 
+// replayExistingKey는 이미 커밋된 키가 있으면 그 결과를 돌려준다. 없으면 (nil, nil)이다.
+func (s *OrderService) replayExistingKey(userID uint, key string, in OrderFingerprintInput) (*CreateOrderResult, error) {
+	found, err := s.OrderIdempotencyRepository.FindByUserKeys(
+		[]repository.UserKeyPair{{UserID: userID, Key: key}})
+	if err != nil {
+		// raw error를 그대로 내면 serviceErrorStatus의 default가 400으로 매핑한다.
+		return nil, NewUnavailableErrorf("idempotency lookup failed, please retry")
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	return s.replayResult(&found[0], in)
+}
+
 // replayResult는 저장된 결과로 응답을 재구성한다. 지문이 다르면 409다.
-func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, fingerprint string) (*CreateOrderResult, error) {
+//
+// 지문은 **레코드에 저장된 버전의 규칙으로** 다시 계산한다. 현재 버전으로만 비교하면
+// 버전을 올리는 배포 하나로 기존 키의 정상 재시도가 전부 409가 된다.
+func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, in OrderFingerprintInput) (*CreateOrderResult, error) {
 	if record == nil {
 		return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
 	}
-	if record.Fingerprint != fingerprint {
+
+	stored, err := ComputeOrderFingerprint(in, record.FingerprintVersion)
+	if err != nil {
+		// 이 서버가 모르는 버전으로 저장된 레코드다(더 새 서버가 썼다). 비교할 수 없으므로
+		// 409로 단정하지 않는다 — 정상 재시도일 수 있다.
+		return nil, NewUnavailableErrorf(
+			"idempotency record uses fingerprint version %d, which this server cannot verify",
+			record.FingerprintVersion)
+	}
+	if record.Fingerprint != stored {
 		return nil, NewConflictErrorf("idempotency key was used with a different request")
 	}
 
@@ -1822,11 +1868,14 @@ func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, fingerpri
 // 한 트랜잭션에 넣는다. outcome을 밖에 두면 "hold는 풀렸는데 outcome은 PENDING"인
 // 상태가 생기고, 재요청이 202를 받아 아직 진행 중인 것처럼 보인다.
 func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, recordID uint64) error {
+	// 트랜잭션이 롤백된 이유가 outcome 갱신 실패인지 구분한다. 그러지 않으면 REJECTED
+	// 기록 실패가 counter에 잡히지 않고, 뒤이은 UNKNOWN이 성공하면 아무 흔적도 남지 않는다.
+	rejectedUpdateFailed := false
+
 	err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := s.OrderRepository.WithTx(tx)
 		walletRepo := s.WalletRepository.WithTx(tx)
 		ledgerRepo := s.LedgerRepository.WithTx(tx)
-		idemRepo := s.OrderIdempotencyRepository.WithTx(tx)
 
 		if err := releaseInitialHold(walletRepo, ledgerRepo, order); err != nil {
 			return err
@@ -1836,10 +1885,18 @@ func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, re
 		); err != nil {
 			return err
 		}
-		return idemRepo.UpdateOutcome(recordID, model.OrderIdempotencyOutcomeRejected)
+		if err := s.OrderIdempotencyRepository.WithTx(tx).UpdateOutcome(
+			recordID, model.OrderIdempotencyOutcomeRejected); err != nil {
+			rejectedUpdateFailed = true
+			return err
+		}
+		return nil
 	})
 	if err == nil {
 		return NewUnavailableErrorf("order intake is saturated, please retry shortly")
+	}
+	if rejectedUpdateFailed {
+		metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
 	}
 
 	// 보상 실패 — hold가 잡힌 채 남는다. UNKNOWN은 best-effort 기록이다.
@@ -1856,6 +1913,13 @@ func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, re
 	// 400으로 매핑한다(CancelOrder에서 e0ef22a로 고친 것과 같은 클래스).
 	return NewUnavailableErrorf(
 		"order intake saturated and hold release failed for order %d, retry is safe with the same key", order.ID)
+}
+
+func (s *OrderService) acceptanceTimeout() time.Duration {
+	if s.AcceptanceTimeout > 0 {
+		return s.AcceptanceTimeout
+	}
+	return defaultAcceptanceTimeout
 }
 ```
 
@@ -2017,24 +2081,43 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
+	// 네 outcome을 모두 분기한다. PENDING만 특별 처리하고 나머지를 200으로 흘리면
+	// REJECTED·UNKNOWN 재요청이 "order accepted"로 표시된다 — 접수되지 않은 주문을
+	// 접수됐다고 말하는 것이다.
+	switch result.Outcome {
+	case model.OrderIdempotencyOutcomeAccepted:
+		body := gin.H{"message": "order accepted", "order_id": result.Order.ID}
+		if result.Replay {
+			body["idempotent_replay"] = true
+		}
+		httpapi.WriteData(c, http.StatusOK, body)
+
 	// PENDING은 "주문은 있는데 그 뒤를 durable하게 알지 못한다"이다. 200은 "접수됐다"는
 	// 거짓이 되고 503은 "없다"는 거짓이 되므로 202를 쓴다.
-	if result.Outcome == model.OrderIdempotencyOutcomePending {
+	case model.OrderIdempotencyOutcomePending:
 		httpapi.WriteData(c, http.StatusAccepted, gin.H{
 			"order_id":          result.Order.ID,
 			"status":            string(result.Outcome),
 			"idempotent_replay": result.Replay,
 		})
-		return
-	}
 
-	body := gin.H{"message": "order accepted", "order_id": result.Order.ID}
-	if result.Replay {
-		body["idempotent_replay"] = true
+	// REJECTED는 "접수되지 않았고 되돌렸다", UNKNOWN은 "되돌리다 실패했다"이다. 둘 다
+	// 성공이 아니므로 503이되, order_id는 준다 — 클라이언트가 상태를 조회할 수 있어야 한다.
+	case model.OrderIdempotencyOutcomeRejected, model.OrderIdempotencyOutcomeUnknown:
+		httpapi.WriteErrorWithData(c, http.StatusServiceUnavailable, httpapi.CodeUnavailable,
+			"order was not accepted, retry is safe with the same key",
+			gin.H{"order_id": result.Order.ID, "status": string(result.Outcome)})
+
+	default:
+		httpapi.WriteError(c, http.StatusInternalServerError, httpapi.CodeInternal,
+			"unknown idempotency outcome")
 	}
-	httpapi.WriteData(c, http.StatusOK, body)
 }
 ```
+
+> `httpapi`에 데이터를 함께 싣는 오류 응답 헬퍼가 없으면 기존 `WriteError` 시그니처를
+> 확인하고, 없을 때는 같은 파일에 최소한으로 추가한다. **네 outcome을 모두 덮는 handler
+> 테스트가 필요하다** — 특히 `REJECTED`·`UNKNOWN`이 200이 아니라 `503 + order_id`인지.
 
 키 형식 오류는 서비스가 `ErrorKindValidation`으로 내는데 `serviceErrorStatus`는 그것을
 422로 매핑한다. **키 누락은 400이어야 하므로** 핸들러에서 먼저 검사한다.
@@ -2462,17 +2545,34 @@ func TestIntegrationOrderIdempotencyMixedBatchDoesNotConsumeFailedKey(t *testing
 }
 ```
 
-나머지 7개는 같은 하니스 위에서 다음 단언을 갖는다. **실패 주입은 B-1의
-`blockableOutboxRepo` 패턴을 따라 repository wrapper**로 한다.
+나머지 7개는 같은 하니스 위에서 다음 단언을 갖는다.
+
+> **실패 주입은 repository wrapper로 할 수 없다.** `OrderService`의 저장소 필드는 인터페이스가
+> 아니라 concrete pointer(`*repository.OrderRepository` 등)라, B-1의 `blockableOutboxRepo`
+> 패턴을 그대로 쓰려면 운영 코드를 인터페이스로 추상화해야 한다. 테스트 하나 때문에 운영
+> 경로를 추상화하는 대신, **테스트용 PostgreSQL trigger**로 특정 UPDATE에서만 오류를
+> 던진다(테스트 끝에 `DROP TRIGGER`). 예:
+>
+> ```sql
+> CREATE FUNCTION fail_order_reject() RETURNS trigger AS $$
+> BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql;
+>
+> CREATE TRIGGER fail_order_reject_trg BEFORE UPDATE ON orders
+> FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.id = <order_id>)
+> EXECUTE FUNCTION fail_order_reject();
+> ```
+>
+> `order_idempotency_keys`의 `outcome` 전이도 같은 방식으로 막는다(`NEW.outcome = 'REJECTED'`,
+> `'UNKNOWN'`, `'ACCEPTED'`). 주문 ID·레코드 ID로 조건을 좁혀 다른 테스트에 영향을 주지 않는다.
 
 | 테스트 | 준비 | 단언 |
 |---|---|---|
 | `...SameBatchSameKey` (4b) | `HoldCoordinator.BatchSize`를 키워 두 요청이 한 배치에 들어가게 함 | 두 결과의 `Order.ID` 동일, `holdEntryCount == 1`, `engine.submitCount() == 1` |
 | `...AllFailingBatchCleansKeys` (7c) | 잔액 0인 사용자 2명이 한 배치 | 두 키 모두 `FindByUserKeys`가 빈 결과, 주문 0건 |
 | `...RejectedReplaysSameOrder` (8) | `TrySubmitOrder`가 항상 false인 fake engine | 첫 호출 503, 레코드 `outcome=REJECTED`, 같은 키 재호출이 **같은 `order_id`**, 주문 1건, `holdEntryCount == 1` |
-| `...CompensationIsAtomic` (8b) | 보상 트랜잭션의 `UpdateOrderExecution`에서 오류를 던지는 wrapper | hold가 풀리지 않음(지갑 `locked_balance` 불변) **AND** `outcome == PENDING` — 부분 반영 0 |
-| `...UnknownUpdateFailureKeepsPending` (8d) | 보상 실패 + `UpdateOutcome`도 실패하는 wrapper | `outcome == PENDING`, 주문 1건, `OrderIdempotencyOutcomeUpdateFailuresTotal` 증가 |
-| `...AcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `UpdateOutcome`만 실패하는 wrapper | `outcome == PENDING`, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, `engine.submitCount() == 1` |
+| `...CompensationIsAtomic` (8b) | `orders`의 `REJECTED` UPDATE에서만 실패하는 trigger | hold가 풀리지 않음(지갑 `locked_balance` 불변) **AND** 주문이 `REJECTED`가 아님 — 부분 반영 0. outcome은 트랜잭션 밖 best-effort 기록이 성공하므로 `UNKNOWN`이다(`PENDING`이 아니다) |
+| `...UnknownUpdateFailureKeepsPending` (8d) | `orders` REJECTED UPDATE와 `outcome='UNKNOWN'` UPDATE를 모두 막는 trigger | `outcome == PENDING`(UNKNOWN 기록까지 실패한 경우다), 주문 1건, `OrderIdempotencyOutcomeUpdateFailuresTotal` 증가 |
+| `...AcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `outcome='ACCEPTED'` UPDATE만 막는 trigger | `outcome == PENDING`, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, `engine.submitCount() == 1` |
 | `...StalePendingIsObserved` (8g) | hold 커밋 후 `UpdateOutcome`을 건너뛰고, 레코드의 `updated_at`을 1시간 전으로 밀어 프로세스 종료를 모사 | `NewOrderIdempotencyMonitor(repo)`의 `Run`을 짧은 `Interval`로 돌린 뒤 `LastValue() >= 1` |
 
 `8f`(`PENDING` 창의 재요청 → 202)는 Task 6의 handler 테스트에서 `outcome`을 `PENDING`으로

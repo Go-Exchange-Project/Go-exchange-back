@@ -31,7 +31,9 @@ var testIdemKeySeq atomic.Uint64
 // 유지한다. 이 테스트들은 키 계약이 아니라 주문·홀드 동작을 보므로 키는 자동으로 채운다.
 func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, error) {
 	if input.IdempotencyKey == "" {
-		input.IdempotencyKey = fmt.Sprintf("test-key-%d", testIdemKeySeq.Add(1))
+		// 공유 테스트 DB에는 이전 실행의 키가 남는다. 순번만 쓰면 실행마다 1부터 다시
+		// 시작해 같은 키가 쌓이고, (user_id, key) UNIQUE 밖의 검사가 그 중복에 걸린다.
+		input.IdempotencyKey = fmt.Sprintf("test-key-%d-%d", time.Now().UnixNano(), testIdemKeySeq.Add(1))
 	}
 	result, err := svc.CreateOrder(input)
 	if err != nil {
@@ -50,6 +52,11 @@ func cleanupServiceUsers(t *testing.T, db *gorm.DB, userIDs ...uint) {
 	if len(userIDs) == 0 {
 		return
 	}
+
+	// 주문 생성이 멱등성 키를 남기므로 함께 지운다. 남겨 두면 공유 DB가 계속 커지고,
+	// 스키마를 검사하는 테스트가 이전 실행의 행에 걸린다.
+	require.NoError(t, db.Where("user_id IN ?", userIDs).
+		Delete(&model.OrderIdempotencyKey{}).Error)
 
 	var orders []model.Order
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Find(&orders).Error)
