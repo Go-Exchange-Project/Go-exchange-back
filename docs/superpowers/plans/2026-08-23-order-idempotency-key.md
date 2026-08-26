@@ -1989,7 +1989,9 @@ var testIdemKeySeq atomic.Uint64
 
 func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, error) {
 	if input.IdempotencyKey == "" {
-		input.IdempotencyKey = fmt.Sprintf("test-key-%d", testIdemKeySeq.Add(1))
+		// 공유 테스트 DB에는 이전 실행의 키가 남는다. 순번만 쓰면 실행마다 1부터 다시
+		// 시작해 같은 키가 쌓이고, (user_id, key) UNIQUE 밖의 검사가 그 중복에 걸린다.
+		input.IdempotencyKey = fmt.Sprintf("test-key-%d-%d", time.Now().UnixNano(), testIdemKeySeq.Add(1))
 	}
 	result, err := svc.CreateOrder(input)
 	if err != nil {
@@ -1997,6 +1999,16 @@ func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, e
 	}
 	return result.Order, nil
 }
+```
+
+**`cleanupServiceUsers`도 함께 고친다.** 주문 생성이 이제 항상 멱등성 키를 남기므로, 기존
+정리 헬퍼는 불완전해졌다. 남겨 두면 공유 DB가 계속 커지고, 스키마를 검사하는 다른 테스트가
+이전 실행의 행에 걸린다(실제로 `dbmigration`의 전역 UNIQUE 검사가 이 중복으로 실패했다).
+
+```go
+	// 주문 생성이 멱등성 키를 남기므로 함께 지운다.
+	require.NoError(t, db.Where("user_id IN ?", userIDs).
+		Delete(&model.OrderIdempotencyKey{}).Error)
 ```
 
 - [ ] **Step 5b: 계약 통합 테스트 작성**
@@ -2602,16 +2614,29 @@ func TestIntegrationOrderIdempotencyMixedBatchDoesNotConsumeFailedKey(t *testing
 > **실패 주입은 repository wrapper로 할 수 없다.** `OrderService`의 저장소 필드는 인터페이스가
 > 아니라 concrete pointer(`*repository.OrderRepository` 등)라, B-1의 `blockableOutboxRepo`
 > 패턴을 그대로 쓰려면 운영 코드를 인터페이스로 추상화해야 한다. 테스트 하나 때문에 운영
-> 경로를 추상화하는 대신, **테스트용 PostgreSQL trigger**로 특정 UPDATE에서만 오류를
-> 던진다(테스트 끝에 `DROP TRIGGER`). 예:
+> 경로를 추상화하는 대신, **테스트용 PostgreSQL trigger**로 특정 UPDATE에서만 오류를 던진다.
 >
-> ```sql
-> CREATE FUNCTION fail_order_reject() RETURNS trigger AS $$
-> BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql;
+> **trigger 함수도 영구 객체다.** 이름을 고정하면 다음 실행의 `CREATE FUNCTION`이 충돌하고,
+> `DROP TRIGGER`만 하면 함수가 공유 DB에 계속 쌓인다. 테스트마다 고유한 이름을 쓰고
+> cleanup에서 **trigger와 function을 모두** 지운다.
 >
-> CREATE TRIGGER fail_order_reject_trg BEFORE UPDATE ON orders
-> FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.id = <order_id>)
-> EXECUTE FUNCTION fail_order_reject();
+> ```go
+> suffix := fmt.Sprintf("%d", time.Now().UnixNano()) // 테스트마다 고유
+> fn := "fail_order_reject_" + suffix
+> trg := fn + "_trg"
+>
+> require.NoError(t, db.Exec(fmt.Sprintf(`
+> CREATE FUNCTION %s() RETURNS trigger AS $$
+> BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql`, fn)).Error)
+> require.NoError(t, db.Exec(fmt.Sprintf(`
+> CREATE TRIGGER %s BEFORE UPDATE ON orders
+> FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.id = %d)
+> EXECUTE FUNCTION %s()`, trg, orderID, fn)).Error)
+>
+> t.Cleanup(func() {
+> 	require.NoError(t, db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON orders`, trg)).Error)
+> 	require.NoError(t, db.Exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn)).Error)
+> })
 > ```
 >
 > `order_idempotency_keys`의 `outcome` 전이도 같은 방식으로 막는다(`NEW.outcome = 'REJECTED'`,
