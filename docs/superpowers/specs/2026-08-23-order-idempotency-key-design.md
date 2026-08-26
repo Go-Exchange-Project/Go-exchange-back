@@ -320,8 +320,9 @@ follower의 응답은 어느 쪽 follower인지에 따라 다르다.
 
 - **기존 레코드를 따라가는 follower**: 조회한 레코드의 `outcome`을 읽어 replay한다(§3.2).
   owner가 아직 제출 중이면 `PENDING` → **202**, 이미 접수됐으면 `ACCEPTED` → **200**이다.
-- **같은 배치의 follower**: 읽어 올 레코드가 없다. leader가 방금 커밋한 상태가 곧
-  `PENDING`이므로 그대로 `PENDING` → **202**를 돌려준다.
+- **같은 배치의 follower**: 별도로 조회해 온 `Existing` 레코드가 없다(행 자체는 leader의
+  트랜잭션에서 함께 커밋됐다). 방금 커밋된 상태가 `PENDING`임을 알고 있으므로 그대로
+  `PENDING` → **202**를 돌려준다.
 
 어느 쪽이든 follower는 owner를 기다리지 않는다 — 기다리면 배치 지연이 요청 지연으로
 전파되고, 202가 그 상태를 정직하게 표현한다.
