@@ -2628,15 +2628,18 @@ func TestIntegrationOrderIdempotencyMixedBatchDoesNotConsumeFailedKey(t *testing
 > require.NoError(t, db.Exec(fmt.Sprintf(`
 > CREATE FUNCTION %s() RETURNS trigger AS $$
 > BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql`, fn)).Error)
-> require.NoError(t, db.Exec(fmt.Sprintf(`
-> CREATE TRIGGER %s BEFORE UPDATE ON orders
-> FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.id = %d)
-> EXECUTE FUNCTION %s()`, trg, orderID, fn)).Error)
 >
+> // 함수 생성 직후에 등록한다. 트리거 생성이 실패하면 require.NoError가 테스트를
+> // 중단하므로, 뒤에 등록하면 함수가 공유 DB에 그대로 남는다.
 > t.Cleanup(func() {
 > 	require.NoError(t, db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON orders`, trg)).Error)
 > 	require.NoError(t, db.Exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn)).Error)
 > })
+>
+> require.NoError(t, db.Exec(fmt.Sprintf(`
+> CREATE TRIGGER %s BEFORE UPDATE ON orders
+> FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.id = %d)
+> EXECUTE FUNCTION %s()`, trg, orderID, fn)).Error)
 > ```
 >
 > `order_idempotency_keys`의 `outcome` 전이도 같은 방식으로 막는다(`NEW.outcome = 'REJECTED'`,
