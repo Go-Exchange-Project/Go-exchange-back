@@ -1878,8 +1878,12 @@ go test ./internal/service -race
 > `replayResult`로 보내면 `record == nil` 분기에 걸려 정상 요청이 503이 된다.
 >
 > 통합 테스트로 고정한다: 같은 키·같은 지문 2건을 **한 배치에 확실히 들어가게** 제출하면
-> owner는 202, follower도 **503 없이 202 PENDING**이고, `ORDER_HOLD` 원장 1건,
-> fake engine의 `TrySubmitOrder` 호출 수는 **1**이다.
+> owner는 엔진 제출까지 마치고 `Outcome=ACCEPTED`(핸들러에서 **200**), 같은 배치
+> follower는 **503 없이** `Outcome=PENDING`(핸들러에서 **202**)이다. `ORDER_HOLD` 원장은
+> 1건, fake engine의 `TrySubmitOrder` 호출 수는 **1**이다.
+>
+> 서비스 계층 테스트에서는 HTTP 코드가 아니라 `CreateOrderResult.Outcome`을 단언한다 —
+> 상태 매핑은 Task 6 핸들러의 책임이다.
 
 **커버하는 검증**: 1, 2, 7
 
