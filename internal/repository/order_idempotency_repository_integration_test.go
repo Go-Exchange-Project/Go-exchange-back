@@ -1,0 +1,221 @@
+package repository
+
+import (
+	"testing"
+	"time"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+func uniqueIdemUserID() uint {
+	return uint(time.Now().UnixNano() % 1_000_000_000)
+}
+
+func seedIdemRecord(userID uint, key string) *model.OrderIdempotencyKey {
+	return &model.OrderIdempotencyKey{
+		UserID:             userID,
+		IdempotencyKey:     key,
+		Fingerprint:        "fp-" + key,
+		FingerprintVersion: 1,
+		// outcome은 NOT NULL이다. 비워 두면 GORM이 빈 문자열을 넣어 CHECK에 걸린다.
+		Outcome: model.OrderIdempotencyOutcomePending,
+	}
+}
+
+func cleanupIdemRecords(t *testing.T, db *gorm.DB, userID uint) {
+	t.Helper()
+	require.NoError(t, db.Where("user_id = ?", userID).Delete(&model.OrderIdempotencyKey{}).Error)
+}
+
+// 배치 INSERT는 "어느 것이 실제로 들어갔는지"를 한 왕복에 알려줘야 한다.
+// 요청마다 INSERT하면 배치의 존재 이유(왕복 절감)가 사라진다.
+func TestIntegrationOrderIdempotencyInsertNewReturnsOnlyInserted(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	first := seedIdemRecord(userID, "k1")
+	inserted, err := repo.InsertNew([]*model.OrderIdempotencyKey{first})
+	require.NoError(t, err)
+	require.Len(t, inserted, 1)
+	assert.Equal(t, first.ID, inserted[0])
+
+	// 같은 키 재시도 + 새 키 → 새 키만 들어간다.
+	dup := seedIdemRecord(userID, "k1")
+	fresh := seedIdemRecord(userID, "k2")
+	inserted, err = repo.InsertNew([]*model.OrderIdempotencyKey{dup, fresh})
+	require.NoError(t, err)
+	require.Len(t, inserted, 1)
+
+	// ID는 실제로 들어간 레코드에 붙어야 한다. 반환 행을 슬라이스 순서대로 채우면
+	// 충돌한 dup이 fresh의 ID를 갖고, follower가 owner의 행을 가리키게 된다.
+	assert.Zero(t, dup.ID, "삽입되지 않은 레코드에 ID가 채워졌다")
+	assert.NotZero(t, fresh.ID, "삽입된 레코드에 ID가 채워지지 않았다")
+	assert.Equal(t, fresh.ID, inserted[0])
+
+	var count int64
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+		Where("user_id = ?", userID).Count(&count).Error)
+	assert.EqualValues(t, 2, count)
+}
+
+// 같은 배치에 같은 키가 두 번 오면 한 건만 들어가고, ID는 그중 하나에만 붙어야 한다.
+// 둘 다 ID를 받으면 뒤쪽 요청이 owner처럼 행동해 엔진에 두 번 제출된다.
+func TestIntegrationOrderIdempotencyInsertNewDeduplicatesWithinBatch(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	first := seedIdemRecord(userID, "same")
+	second := seedIdemRecord(userID, "same")
+	inserted, err := repo.InsertNew([]*model.OrderIdempotencyKey{first, second})
+	require.NoError(t, err)
+
+	require.Len(t, inserted, 1)
+	assert.NotZero(t, first.ID)
+	assert.Zero(t, second.ID, "같은 배치의 중복 요청이 owner가 됐다")
+	assert.Equal(t, first.ID, inserted[0])
+
+	var count int64
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+		Where("user_id = ?", userID).Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+}
+
+// 다른 사용자의 같은 키는 충돌하지 않는다. 전역 UNIQUE였다면 여기서 막힌다.
+func TestIntegrationOrderIdempotencyKeyScopeIsPerUser(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userA := uniqueIdemUserID()
+	userB := userA + 1
+	defer cleanupIdemRecords(t, db, userA)
+	defer cleanupIdemRecords(t, db, userB)
+
+	inserted, err := repo.InsertNew([]*model.OrderIdempotencyKey{
+		seedIdemRecord(userA, "shared"),
+		seedIdemRecord(userB, "shared"),
+	})
+	require.NoError(t, err)
+	assert.Len(t, inserted, 2)
+}
+
+func TestIntegrationOrderIdempotencyFindByUserKeys(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{
+		seedIdemRecord(userID, "k1"), seedIdemRecord(userID, "k2"),
+	})
+	require.NoError(t, err)
+
+	found, err := repo.FindByUserKeys([]UserKeyPair{{UserID: userID, Key: "k1"}})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "k1", found[0].IdempotencyKey)
+	assert.Equal(t, 1, found[0].FingerprintVersion)
+
+	empty, err := repo.FindByUserKeys(nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// outcome과 updated_at은 한 UPDATE 문에서 함께 바뀌어야 한다.
+func TestIntegrationOrderIdempotencyOutcomeUpdatesTouchUpdatedAt(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	record := seedIdemRecord(userID, "k1")
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+	require.NoError(t, err)
+
+	var before model.OrderIdempotencyKey
+	require.NoError(t, db.First(&before, record.ID).Error)
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, repo.SetOrderAndOutcome(record.ID, 4242, model.OrderIdempotencyOutcomePending))
+
+	var afterSet model.OrderIdempotencyKey
+	require.NoError(t, db.First(&afterSet, record.ID).Error)
+	require.NotNil(t, afterSet.OrderID)
+	assert.EqualValues(t, 4242, *afterSet.OrderID)
+	assert.Equal(t, model.OrderIdempotencyOutcomePending, afterSet.Outcome)
+	assert.True(t, afterSet.UpdatedAt.After(before.UpdatedAt), "updated_at이 함께 갱신되지 않았다")
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, repo.UpdateOutcome(record.ID, model.OrderIdempotencyOutcomeAccepted))
+
+	var afterOutcome model.OrderIdempotencyKey
+	require.NoError(t, db.First(&afterOutcome, record.ID).Error)
+	assert.Equal(t, model.OrderIdempotencyOutcomeAccepted, afterOutcome.Outcome)
+	assert.True(t, afterOutcome.UpdatedAt.After(afterSet.UpdatedAt))
+}
+
+// hold 검증에 실패한 미커밋 키는 지워야 재사용할 수 있다.
+func TestIntegrationOrderIdempotencyDeleteByIDs(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	keep := seedIdemRecord(userID, "keep")
+	drop := seedIdemRecord(userID, "drop")
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{keep, drop})
+	require.NoError(t, err)
+
+	require.NoError(t, repo.DeleteByIDs([]uint64{drop.ID}))
+	require.NoError(t, repo.DeleteByIDs(nil))
+
+	found, err := repo.FindByUserKeys([]UserKeyPair{
+		{UserID: userID, Key: "keep"}, {UserID: userID, Key: "drop"},
+	})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "keep", found[0].IdempotencyKey)
+}
+
+func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	stale := seedIdemRecord(userID, "stale")
+	fresh := seedIdemRecord(userID, "fresh")
+	done := seedIdemRecord(userID, "done")
+	_, err := repo.InsertNew([]*model.OrderIdempotencyKey{stale, fresh, done})
+	require.NoError(t, err)
+
+	require.NoError(t, repo.SetOrderAndOutcome(stale.ID, 1, model.OrderIdempotencyOutcomePending))
+	require.NoError(t, repo.SetOrderAndOutcome(fresh.ID, 2, model.OrderIdempotencyOutcomePending))
+	require.NoError(t, repo.SetOrderAndOutcome(done.ID, 3, model.OrderIdempotencyOutcomeAccepted))
+
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", stale.ID).
+		Update("updated_at", time.Now().Add(-time.Hour)).Error)
+
+	before, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+
+	// 다른 테스트 데이터가 섞일 수 있어 절대값이 아니라 증분으로 본다.
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", fresh.ID).
+		Update("updated_at", time.Now().Add(-time.Hour)).Error)
+	after, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+
+	assert.Equal(t, before+1, after, "PENDING이면서 임계보다 오래된 것만 세야 한다")
+
+	// ACCEPTED는 아무리 오래돼도 잡히지 않는다.
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", done.ID).
+		Update("updated_at", time.Now().Add(-time.Hour)).Error)
+	withDone, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, after, withDone, "PENDING이 아닌 레코드가 gauge에 잡혔다")
+}

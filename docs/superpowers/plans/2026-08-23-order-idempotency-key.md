@@ -759,7 +759,6 @@ Expected: 정적 1개 + 카탈로그 5개 서브테스트 + 실패 케이스 4�
 package repository
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -809,12 +808,41 @@ func TestIntegrationOrderIdempotencyInsertNewReturnsOnlyInserted(t *testing.T) {
 	inserted, err = repo.InsertNew([]*model.OrderIdempotencyKey{dup, fresh})
 	require.NoError(t, err)
 	require.Len(t, inserted, 1)
+
+	// ID는 실제로 들어간 레코드에 붙어야 한다. 반환 행을 슬라이스 순서대로 채우면
+	// 충돌한 dup이 fresh의 ID를 갖고, follower가 owner의 행을 가리키게 된다.
+	assert.Zero(t, dup.ID, "삽입되지 않은 레코드에 ID가 채워졌다")
+	assert.NotZero(t, fresh.ID, "삽입된 레코드에 ID가 채워지지 않았다")
 	assert.Equal(t, fresh.ID, inserted[0])
 
 	var count int64
 	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
 		Where("user_id = ?", userID).Count(&count).Error)
 	assert.EqualValues(t, 2, count)
+}
+
+// 같은 배치에 같은 키가 두 번 오면 한 건만 들어가고, ID는 그중 하나에만 붙어야 한다.
+// 둘 다 ID를 받으면 뒤쪽 요청이 owner처럼 행동해 엔진에 두 번 제출된다.
+func TestIntegrationOrderIdempotencyInsertNewDeduplicatesWithinBatch(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	first := seedIdemRecord(userID, "same")
+	second := seedIdemRecord(userID, "same")
+	inserted, err := repo.InsertNew([]*model.OrderIdempotencyKey{first, second})
+	require.NoError(t, err)
+
+	require.Len(t, inserted, 1)
+	assert.NotZero(t, first.ID)
+	assert.Zero(t, second.ID, "같은 배치의 중복 요청이 owner가 됐다")
+	assert.Equal(t, first.ID, inserted[0])
+
+	var count int64
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).
+		Where("user_id = ?", userID).Count(&count).Error)
+	assert.EqualValues(t, 1, count)
 }
 
 // 다른 사용자의 같은 키는 충돌하지 않는다. 전역 UNIQUE였다면 여기서 막힌다.
@@ -934,14 +962,20 @@ func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
 	before, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
 	require.NoError(t, err)
 
-	// 이 사용자 범위에서 stale은 1건뿐이다(다른 테스트 데이터가 섞일 수 있어 증분으로 본다).
+	// 다른 테스트 데이터가 섞일 수 있어 절대값이 아니라 증분으로 본다.
 	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", fresh.ID).
 		Update("updated_at", time.Now().Add(-time.Hour)).Error)
 	after, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
 	require.NoError(t, err)
 
 	assert.Equal(t, before+1, after, "PENDING이면서 임계보다 오래된 것만 세야 한다")
-	_ = fmt.Sprint(userID)
+
+	// ACCEPTED는 아무리 오래돼도 잡히지 않는다.
+	require.NoError(t, db.Model(&model.OrderIdempotencyKey{}).Where("id = ?", done.ID).
+		Update("updated_at", time.Now().Add(-time.Hour)).Error)
+	withDone, err := repo.CountStalePending(time.Now().Add(-30 * time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, after, withDone, "PENDING이 아닌 레코드가 gauge에 잡혔다")
 }
 ```
 
@@ -956,11 +990,11 @@ Expected: FAIL — `undefined: NewOrderIdempotencyRepository`
 package repository
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type OrderIdempotencyRepository struct {
@@ -984,24 +1018,57 @@ func (r *OrderIdempotencyRepository) WithTx(tx *gorm.DB) *OrderIdempotencyReposi
 //
 // 반환되지 않은 요청은 기존 키(follower)입니다. 요청마다 INSERT하면 배치의 존재
 // 이유(왕복 절감)가 사라지므로 ON CONFLICT DO NOTHING + RETURNING을 씁니다.
+//
+// GORM의 Create(&records)를 쓰지 않는 이유: DO NOTHING으로 일부 행이 빠지면 반환 행 수가
+// 구조체 수보다 적은데, GORM은 반환 행을 슬라이스 **순서대로** 채운다. 그러면 충돌해서
+// 삽입되지 않은 앞쪽 구조체가 뒤쪽 행의 ID를 갖게 되고, follower가 owner의 ID를 들고
+// 다니게 된다(통합 테스트로 실제 확인). 그래서 (user_id, idempotency_key)로 명시적으로
+// 되짚어 채운다.
 func (r *OrderIdempotencyRepository) InsertNew(records []*model.OrderIdempotencyKey) ([]uint64, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
 
-	result := r.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "user_id"}, {Name: "idempotency_key"}},
-		DoNothing: true,
-	}).Create(&records)
-	if result.Error != nil {
-		return nil, result.Error
+	placeholders := make([]string, 0, len(records))
+	args := make([]any, 0, len(records)*5)
+	for _, record := range records {
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?)")
+		args = append(args, record.UserID, record.IdempotencyKey,
+			record.Fingerprint, record.FingerprintVersion, record.Outcome)
 	}
 
-	inserted := make([]uint64, 0, len(records))
+	// created_at·updated_at은 DB 기본값(now())에 맡긴다.
+	query := `
+INSERT INTO order_idempotency_keys (user_id, idempotency_key, fingerprint, fingerprint_version, outcome)
+VALUES ` + strings.Join(placeholders, ", ") + `
+ON CONFLICT (user_id, idempotency_key) DO NOTHING
+RETURNING id, user_id, idempotency_key`
+
+	var rows []struct {
+		ID             uint64
+		UserID         uint
+		IdempotencyKey string
+	}
+	if err := r.DB.Raw(query, args...).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	byKey := make(map[UserKeyPair]uint64, len(rows))
+	for _, row := range rows {
+		byKey[UserKeyPair{UserID: row.UserID, Key: row.IdempotencyKey}] = row.ID
+	}
+
+	inserted := make([]uint64, 0, len(rows))
 	for _, record := range records {
-		if record.ID != 0 {
-			inserted = append(inserted, record.ID)
+		id, ok := byKey[UserKeyPair{UserID: record.UserID, Key: record.IdempotencyKey}]
+		if !ok {
+			continue
 		}
+		// 같은 배치에 같은 키가 두 번 있으면 한 행만 삽입된다. 그 ID는 앞선 구조체가
+		// 이미 가져갔으므로 뒤쪽 구조체는 follower로 남겨 둔다.
+		delete(byKey, UserKeyPair{UserID: record.UserID, Key: record.IdempotencyKey})
+		record.ID = id
+		inserted = append(inserted, id)
 	}
 	return inserted, nil
 }
@@ -1069,11 +1136,16 @@ $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=
 go test ./internal/repository -run IntegrationOrderIdempotency -v -p 1
 ```
 
-Expected: 6개 PASS
+Expected: 7개 PASS
 
-> `InsertNew`가 `ON CONFLICT DO NOTHING`에서 삽입되지 않은 행의 `ID`를 0으로 남기는지
-> 이 테스트가 확인한다. GORM 버전에 따라 다르면 `Returning` clause를 명시적으로 붙이고
-> 반환 ID를 대조하는 방식으로 바꾼다 — **동작을 가정하지 말고 테스트로 고정한다.**
+> **확인 결과(가정이 깨진 지점):** GORM의 `Create(&records)` + `OnConflict{DoNothing}`은
+> 삽입되지 않은 행의 `ID`를 0으로 남기지 **않는다**. 반환 행 수가 구조체 수보다 적으면
+> 반환 행을 슬라이스 **순서대로** 채우므로, 충돌한 앞쪽 구조체가 뒤쪽 행의 ID를 가져간다
+> (`dup.ID = fresh의 ID`, `fresh.ID = 0`). follower가 owner의 행을 가리키게 되므로
+> Task 4·5의 owner/follower 판정이 통째로 어긋난다.
+>
+> 그래서 명시적 `INSERT ... ON CONFLICT DO NOTHING RETURNING id, user_id, idempotency_key`로
+> 바꾸고, 반환 행을 `(user_id, idempotency_key)`로 되짚어 구조체에 채운다.
 
 - [ ] **Step 5: 커밋**
 
