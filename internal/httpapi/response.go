@@ -56,6 +56,25 @@ func WriteError(c *gin.Context, status int, code string, message string) {
 	}})
 }
 
+// ErrorDetailResponse는 오류에 조회용 데이터를 함께 싣는다. 실패했지만 클라이언트가
+// 상태를 확인할 식별자는 있어야 하는 경우가 있다 — 주문이 REJECTED/UNKNOWN으로 끝나도
+// order_id는 존재한다.
+type ErrorDetailResponse struct {
+	Error Error       `json:"error"`
+	Data  interface{} `json:"data"`
+}
+
+func WriteErrorWithData(c *gin.Context, status int, code string, message string, data interface{}) {
+	setRetryAfterForOverload(c, status)
+	c.JSON(status, ErrorDetailResponse{
+		Error: Error{
+			Code:    normalizeCode(code),
+			Message: normalizeMessage(message),
+		},
+		Data: data,
+	})
+}
+
 func AbortWithError(c *gin.Context, status int, code string, message string) {
 	setRetryAfterForOverload(c, status)
 	c.AbortWithStatusJSON(status, ErrorResponse{Error: Error{

@@ -47,6 +47,14 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
+	// 키 누락은 400이다. 서비스는 키 형식 오류를 ErrorKindValidation으로 내는데
+	// serviceErrorStatus가 그것을 422로 매핑하므로, 여기서 먼저 본다.
+	if strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
+		httpapi.WriteError(c, http.StatusBadRequest, httpapi.CodeBadRequest,
+			"Idempotency-Key header is required")
+		return
+	}
+
 	result, err := h.OrderService.CreateOrder(service.CreateOrderInput{
 		UserID:         userID,
 		CoinSymbol:     req.CoinSymbol,
@@ -62,10 +70,37 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	httpapi.WriteData(c, http.StatusOK, gin.H{
-		"message":  "order accepted",
-		"order_id": result.Order.ID,
-	})
+	// 네 outcome을 모두 분기한다. PENDING만 특별 처리하고 나머지를 200으로 흘리면
+	// REJECTED·UNKNOWN 재요청이 "order accepted"로 표시된다 — 접수되지 않은 주문을
+	// 접수됐다고 말하는 것이다.
+	switch result.Outcome {
+	case model.OrderIdempotencyOutcomeAccepted:
+		body := gin.H{"message": "order accepted", "order_id": result.Order.ID}
+		if result.Replay {
+			body["idempotent_replay"] = true
+		}
+		httpapi.WriteData(c, http.StatusOK, body)
+
+	// PENDING은 "주문은 있는데 그 뒤를 durable하게 알지 못한다"이다. 200은 "접수됐다"는
+	// 거짓이 되고 503은 "없다"는 거짓이 되므로 202를 쓴다.
+	case model.OrderIdempotencyOutcomePending:
+		httpapi.WriteData(c, http.StatusAccepted, gin.H{
+			"order_id":          result.Order.ID,
+			"status":            string(result.Outcome),
+			"idempotent_replay": result.Replay,
+		})
+
+	// REJECTED는 "접수되지 않았고 되돌렸다", UNKNOWN은 "되돌리다 실패했다"이다. 둘 다
+	// 성공이 아니므로 503이되, order_id는 준다 — 클라이언트가 상태를 조회할 수 있어야 한다.
+	case model.OrderIdempotencyOutcomeRejected, model.OrderIdempotencyOutcomeUnknown:
+		httpapi.WriteErrorWithData(c, http.StatusServiceUnavailable, httpapi.CodeUnavailable,
+			"order was not accepted, retry is safe with the same key",
+			gin.H{"order_id": result.Order.ID, "status": string(result.Outcome)})
+
+	default:
+		httpapi.WriteError(c, http.StatusInternalServerError, httpapi.CodeInternal,
+			"unknown idempotency outcome")
+	}
 }
 
 func (h *OrderHandler) ListOrders(c *gin.Context) {
