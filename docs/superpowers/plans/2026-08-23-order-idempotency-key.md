@@ -1289,6 +1289,8 @@ Expected: 8개 PASS(서브테스트 6개 포함)
 **Files:**
 - Modify: `internal/service/hold_coordinator.go`
 - Create: `internal/service/hold_coordinator_idempotency_test.go`
+- Create: `internal/service/hold_coordinator_idempotency_integration_test.go`
+- Modify: `cmd/main.go` (코디네이터에 `IdemRepo` 배선)
 
 **Interfaces:**
 - Consumes: Task 1 지문, Task 3 repository
@@ -1368,6 +1370,20 @@ func TestGroupIdempotentRequestsIsDeterministic(t *testing.T) {
 		require.Equal(t, followers, f, "%d회차 follower가 달라졌다", i)
 		require.Equal(t, conflicts, c, "%d회차 conflict가 달라졌다", i)
 	}
+}
+
+// 키 없는 요청은 그룹화 대상이 아니다 — 전부 owner로 남아야 한다.
+func TestGroupIdempotentRequestsKeepsUnkeyedRequestsAsOwners(t *testing.T) {
+	reqs := []holdRequest{
+		{order: &model.Order{UserID: 1}},
+		{order: &model.Order{UserID: 1}},
+	}
+
+	owners, followers, conflicts := groupIdempotentRequests(reqs)
+
+	assert.Equal(t, []int{0, 1}, owners)
+	assert.Empty(t, followers)
+	assert.Empty(t, conflicts)
 }
 ```
 
@@ -1451,7 +1467,7 @@ func groupIdempotentRequests(reqs []holdRequest) (owners []int, followers map[in
 - [ ] **Step 4: 통과 확인**
 
 Run: `go test ./internal/service -run GroupIdempotentRequests -v`
-Expected: 3개 PASS
+Expected: 4개 PASS
 
 - [ ] **Step 5: `HoldBatch`에 트랜잭션 순서 반영**
 
@@ -1513,7 +1529,15 @@ if len(lookup) > 0 {
 }
 ```
 
-hold 검증 루프는 `insertedOwners`만 순회하도록 바꾸고, 실패한 요청의 키를 모은다.
+실제 구현에서는 이 단계를 `claimIdempotencyKeys(tx, reqs, owners, results)`로 뽑았다.
+반환값이 `activeOwners`(실제로 키를 선점한 인덱스)이고, 지갑 키 수집과 hold 검증 루프는
+이 목록만 순회한다. 기존 키로 밀려난 요청은 `results[i] = {Role: follower, Existing: record}`로
+채워져 배치에서 빠진다.
+
+> 충돌한 키가 곧바로 조회되지 않으면(다른 트랜잭션이 지운 경우) 조용히 넘어가지 않고
+> 오류를 낸다. 넘어가면 그 요청은 결과가 채워지지 않은 채 남는다.
+
+hold 검증 루프는 실패한 요청의 키를 모은다.
 
 ```go
 // 4) hold 검증에 실패한 owner의 키는 이번 트랜잭션에서 지운다.
@@ -1548,14 +1572,27 @@ for _, ph := range passing {
 
 - [ ] **Step 6: fallback 경로 반영**
 
-`processBatch`의 fallback은 `persistAndHold`를 호출한다. 같은 순서를 적용한
-`persistAndHoldWithIdempotency(db, orderRepo, walletRepo, ledgerRepo, idemRepo, req)`로 바꾸고,
-`HoldBatch` 실패가 키를 소비하지 않는지(트랜잭션 롤백) 확인한다.
+`processBatch`의 fallback은 `persistAndHold`를 호출한다. 같은 순서를 적용한 메서드
+`(*HoldCoordinator).persistAndHoldOne(req holdRequest) holdResult`로 바꾼다(코디네이터의
+필드를 그대로 쓰므로 인자 6개를 다시 넘기지 않는다).
+
+단건 경로에서는 검증 실패가 트랜잭션 전체를 롤백하므로 키도 함께 사라진다 — 배치 경로의
+`DeleteByIDs`와 같은 효과다. 롤백 시 `order.ID`와 `idem.RecordID`를 0으로 되돌린다.
 
 - [ ] **Step 7: 회귀 확인**
 
-Run: `go test ./internal/service -race`
+Run: `go test ./internal/service -race -p 1`
 Expected: 기존 hold coordinator 테스트 전부 PASS
+
+배치 경로의 owner/follower 판정은 단위 테스트만으로는 증명되지 않는다. 통합 테스트 4개를
+`hold_coordinator_idempotency_integration_test.go`에 둔다.
+
+| 테스트 | 확인하는 것 |
+|---|---|
+| `SameKeyCreatesOneOrder` | 주문 1건, 키 1건, **hold 1회**(locked=100.05), follower가 leader의 주문을 받음 |
+| `SameKeyDifferentFingerprintConflicts` | 하나만 성공, 나머지는 `ErrorKindConflict`, 주문 1건 |
+| `FailedValidationReleasesKey` | 실패한 owner의 키가 **DB에서 사라짐**, 성공한 키는 남음 |
+| `ExistingKeyReturnsStoredRecord` | 재시도가 follower + 저장된 `OrderID`를 받고 새 주문 없음 |
 
 - [ ] **Step 8: 커밋**
 

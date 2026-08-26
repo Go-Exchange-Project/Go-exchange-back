@@ -230,7 +230,7 @@ func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	seedReconciliationLedgerEntry(t, db, buyerID, model.KRWAssetSymbol, decimal.NewFromInt(10000), decimal.Zero, decimal.NewFromInt(10000), decimal.Zero)
 	seedReconciliationLedgerEntry(t, db, poorBuyerID, model.KRWAssetSymbol, decimal.NewFromInt(10), decimal.Zero, decimal.NewFromInt(10), decimal.Zero)
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 0)
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 0)
 	go coordinator.Run()
 	defer coordinator.Shutdown()
 

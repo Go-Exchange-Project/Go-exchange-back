@@ -60,7 +60,7 @@ func TestIntegrationHoldBatchMatchesSequentialSingleHold(t *testing.T) {
 	seqOrders := holdEquivalenceOrders(seqBuyer, seqSeller)
 
 	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo}
-	results, err := coordinator.HoldBatch(batchOrders)
+	results, err := coordinator.HoldBatch(holdRequestsFor(batchOrders))
 	require.NoError(t, err)
 	require.Len(t, results, 3)
 	for i, r := range results {
@@ -115,7 +115,7 @@ func TestIntegrationHoldBatchIsolatesInsufficientFunds(t *testing.T) {
 	}
 
 	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo}
-	results, err := coordinator.HoldBatch(orders)
+	results, err := coordinator.HoldBatch(holdRequestsFor(orders))
 	require.NoError(t, err, "부분 실패는 배치 자체를 실패시키지 않는다")
 	require.Len(t, results, 3)
 
@@ -182,7 +182,7 @@ func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T) {
 
 	batchOrders := mkOrders(batchUser)
 	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo}
-	results, err := coordinator.HoldBatch(batchOrders)
+	results, err := coordinator.HoldBatch(holdRequestsFor(batchOrders))
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 
@@ -226,7 +226,7 @@ func TestIntegrationHoldCoordinatorSubmitHolds(t *testing.T) {
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 	seedHoldWallets(t, db, buyerID, sellerID)
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 0)
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 0)
 	go coordinator.Run()
 	defer coordinator.Shutdown()
 
@@ -284,7 +284,7 @@ func TestIntegrationHoldCoordinatorFallsBackOnBatchError(t *testing.T) {
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 2)
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 2)
 	require.NoError(t, sqlDB.Close(), "DB 커넥션을 닫아 배치·폴백 모두 실패하게 만든다")
 
 	before := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
@@ -327,7 +327,7 @@ func TestIntegrationHoldCoordinatorShutdownDrains(t *testing.T) {
 		UserID: buyerID, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero,
 	}).Error)
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, 4)
+	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 4)
 
 	const n = 20
 	reqs := make([]holdRequest, n)
@@ -352,4 +352,14 @@ func TestIntegrationHoldCoordinatorShutdownDrains(t *testing.T) {
 			t.Fatalf("request %d result not signaled — drain lost a request", i)
 		}
 	}
+}
+
+// holdRequestsFor는 멱등성 키 없는 요청으로 감싼다. 이 테스트들은 배치 hold 자체의
+// 등가성·격리를 보므로 키 경로를 타지 않는다.
+func holdRequestsFor(orders []*model.Order) []holdRequest {
+	reqs := make([]holdRequest, len(orders))
+	for i := range orders {
+		reqs[i] = holdRequest{order: orders[i]}
+	}
+	return reqs
 }
