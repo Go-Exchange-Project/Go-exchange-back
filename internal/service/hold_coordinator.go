@@ -499,14 +499,27 @@ func (c *HoldCoordinator) fallbackPerRequest(reqs []holdRequest) []holdResult {
 // 주문·hold를 만든다. 검증 실패는 이 트랜잭션 전체를 롤백하므로 키도 함께 사라진다 —
 // 배치 경로의 DeleteByIDs와 같은 효과다.
 func (c *HoldCoordinator) persistAndHoldOne(req holdRequest) holdResult {
+	return persistAndHoldIdempotent(c.DB, c.OrderRepo, c.WalletRepo, c.LedgerRepo, c.IdemRepo, req)
+}
+
+// persistAndHoldIdempotent는 단건 경로의 본체다. 코디네이터 폴백과, 코디네이터가
+// 배선되지 않은 서비스 경로가 같은 순서를 쓰도록 자유 함수로 둔다.
+func persistAndHoldIdempotent(
+	db *gorm.DB,
+	orderRepo *repository.OrderRepository,
+	walletRepo *repository.WalletRepository,
+	ledgerRepo *repository.LedgerRepository,
+	idemRepo *repository.OrderIdempotencyRepository,
+	req holdRequest,
+) holdResult {
 	if req.idem == nil {
-		err := persistAndHold(c.DB, c.OrderRepo, c.WalletRepo, c.LedgerRepo, req.order)
+		err := persistAndHold(db, orderRepo, walletRepo, ledgerRepo, req.order)
 		return holdResult{Order: req.order, Err: err}
 	}
 
 	var result holdResult
-	err := c.DB.Transaction(func(tx *gorm.DB) error {
-		idemRepo := c.IdemRepo.WithTx(tx)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		txIdemRepo := idemRepo.WithTx(tx)
 		record := &model.OrderIdempotencyKey{
 			UserID:             req.order.UserID,
 			IdempotencyKey:     req.idem.Key,
@@ -514,12 +527,12 @@ func (c *HoldCoordinator) persistAndHoldOne(req holdRequest) holdResult {
 			FingerprintVersion: req.idem.Version,
 			Outcome:            model.OrderIdempotencyOutcomePending,
 		}
-		inserted, err := idemRepo.InsertNew([]*model.OrderIdempotencyKey{record})
+		inserted, err := txIdemRepo.InsertNew([]*model.OrderIdempotencyKey{record})
 		if err != nil {
 			return err
 		}
 		if len(inserted) == 0 {
-			found, err := idemRepo.FindByUserKeys(
+			found, err := txIdemRepo.FindByUserKeys(
 				[]repository.UserKeyPair{{UserID: req.order.UserID, Key: req.idem.Key}})
 			if err != nil {
 				return err
@@ -533,13 +546,13 @@ func (c *HoldCoordinator) persistAndHoldOne(req holdRequest) holdResult {
 		}
 		req.idem.RecordID = record.ID
 
-		if err := c.OrderRepo.WithTx(tx).CreateOrder(req.order); err != nil {
+		if err := orderRepo.WithTx(tx).CreateOrder(req.order); err != nil {
 			return err
 		}
-		if err := holdOrderAssets(c.WalletRepo.WithTx(tx), c.LedgerRepo.WithTx(tx), req.order); err != nil {
+		if err := holdOrderAssets(walletRepo.WithTx(tx), ledgerRepo.WithTx(tx), req.order); err != nil {
 			return err
 		}
-		if err := idemRepo.SetOrderAndOutcome(
+		if err := txIdemRepo.SetOrderAndOutcome(
 			record.ID, req.order.ID, model.OrderIdempotencyOutcomePending); err != nil {
 			return err
 		}

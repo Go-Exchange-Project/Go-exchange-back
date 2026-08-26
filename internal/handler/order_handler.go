@@ -47,14 +47,15 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	order, err := h.OrderService.CreateOrder(service.CreateOrderInput{
-		UserID:      userID,
-		CoinSymbol:  req.CoinSymbol,
-		Side:        req.Side,
-		OrderType:   req.OrderType,
-		Price:       req.Price,
-		Amount:      req.Amount,
-		QuoteAmount: req.QuoteAmount,
+	result, err := h.OrderService.CreateOrder(service.CreateOrderInput{
+		UserID:         userID,
+		CoinSymbol:     req.CoinSymbol,
+		Side:           req.Side,
+		OrderType:      req.OrderType,
+		Price:          req.Price,
+		Amount:         req.Amount,
+		QuoteAmount:    req.QuoteAmount,
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
 	if err != nil {
 		writeServiceError(c, err)
@@ -63,7 +64,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	httpapi.WriteData(c, http.StatusOK, gin.H{
 		"message":  "order accepted",
-		"order_id": order.ID,
+		"order_id": result.Order.ID,
 	})
 }
 

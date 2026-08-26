@@ -32,7 +32,7 @@ func TestIntegrationProcessOrderCancellationReleasesRemainingHoldAndCommitsCance
 	}).Error)
 
 	orderService := newIntegrationOrderService(db, matching.NewMatchingEngine())
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -85,7 +85,7 @@ func TestIntegrationProcessOrderCancellationIsIdempotent(t *testing.T) {
 	}).Error)
 
 	orderService := newIntegrationOrderService(db, matching.NewMatchingEngine())
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -222,7 +222,7 @@ func TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements(t
 	}()
 
 	// 매수 주문(10주, 지정가 100) 오더북 대기.
-	buyOrder, err := orderService.CreateOrder(CreateOrderInput{
+	buyOrder, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     buyerID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -233,7 +233,7 @@ func TestIntegrationCancelDuringInFlightPartialFillProducesNoFailedSettlements(t
 
 	// 매도 주문(4주)이 매수 주문의 일부만 체결 — trade 1건, 잔여 6주는
 	// 오더북에 남는다(부분 체결).
-	_, err = orderService.CreateOrder(CreateOrderInput{
+	_, err = createTestOrder(orderService, CreateOrderInput{
 		UserID:     sellerID,
 		CoinSymbol: "BTC",
 		Side:       "SELL",

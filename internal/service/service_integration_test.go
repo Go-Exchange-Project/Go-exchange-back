@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,23 @@ func openServiceIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
 	return testdb.OpenIntegrationDB(t)
+}
+
+// testIdemKeySeq는 테스트마다 고유한 멱등성 키를 만든다. 같은 키를 재사용하면
+// 서로 다른 주문이 재시도로 오인된다.
+var testIdemKeySeq atomic.Uint64
+
+// createTestOrder는 멱등성 키 계약 도입 전 테스트들이 쓰던 (*model.Order, error) 모양을
+// 유지한다. 이 테스트들은 키 계약이 아니라 주문·홀드 동작을 보므로 키는 자동으로 채운다.
+func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, error) {
+	if input.IdempotencyKey == "" {
+		input.IdempotencyKey = fmt.Sprintf("test-key-%d", testIdemKeySeq.Add(1))
+	}
+	result, err := svc.CreateOrder(input)
+	if err != nil {
+		return nil, err
+	}
+	return result.Order, nil
 }
 
 func serviceTestUserID(offset uint) uint {
@@ -73,7 +91,7 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -123,7 +141,7 @@ func TestIntegrationCreateBuyOrderHoldFailureRollsBackAndDoesNotSubmit(t *testin
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -169,7 +187,7 @@ func TestIntegrationCreateSellOrderHoldsCoin(t *testing.T) {
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "SELL",
@@ -217,7 +235,7 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",

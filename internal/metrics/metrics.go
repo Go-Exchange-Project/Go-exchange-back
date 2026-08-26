@@ -84,6 +84,18 @@ var (
 		Help: "Cancel commands still awaiting the atomic outbox commit after the warning deadline.",
 	})
 
+	// 보상 실패 후 UNKNOWN 기록에 성공한 건수. 실패해서 PENDING에 머문 경우는
+	// 여기 잡히지 않으므로 아래 counter가 함께 필요하다.
+	OrderIdempotencyUnknownTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "order_idempotency_unknown_total",
+		Help: "Order idempotency records marked UNKNOWN after a failed compensation.",
+	})
+
+	OrderIdempotencyOutcomeUpdateFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "order_idempotency_outcome_update_failures_total",
+		Help: "Failed attempts to record ACCEPTED/REJECTED/UNKNOWN on an idempotency record.",
+	})
+
 	SettlementBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "settlement_batch_size",
 		Help:    "Number of trades per committed settlement batch. Stuck at 1 indicates low load or drain not happening.",

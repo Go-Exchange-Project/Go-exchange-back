@@ -3,8 +3,10 @@ package service
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
@@ -24,6 +26,10 @@ type OrderService struct {
 	AcceptanceTimeout time.Duration    // 0이면 defaultAcceptanceTimeout
 	HoldCoordinator   *HoldCoordinator // nil이면 persistAndHold 직접 호출(기존 테스트 경로)
 
+	// OrderIdempotencyRepository는 주문 생성 재시도를 식별한다. nil이면 CreateOrder가
+	// 키를 선점할 수 없다 — NewOrderService가 DB와 함께 채운다.
+	OrderIdempotencyRepository *repository.OrderIdempotencyRepository
+
 	CancelCommandRepository *repository.CancelCommandRepository
 	// CancelCommandWake는 command 커밋 직후 worker를 깨운다. nil이어도 command는
 	// 이미 내구 기록됐으므로 worker의 polling이 복구한다.
@@ -38,13 +44,35 @@ const (
 )
 
 type CreateOrderInput struct {
-	UserID      uint
-	CoinSymbol  string
-	Side        string
-	OrderType   string
-	Price       string
-	Amount      string
-	QuoteAmount string
+	UserID         uint
+	CoinSymbol     string
+	Side           string
+	OrderType      string
+	Price          string
+	Amount         string
+	QuoteAmount    string
+	IdempotencyKey string
+}
+
+// CreateOrderResult는 "무엇이 일어났는지"까지 담는다. Replay는 이 요청이 새 주문을
+// 만들지 않았다는 뜻이고, Outcome은 서버가 durable하게 아는 마지막 상태다.
+type CreateOrderResult struct {
+	Order   *model.Order
+	Replay  bool
+	Outcome model.OrderIdempotencyOutcome
+}
+
+const maxIdempotencyKeyLength = 128
+
+// 계약은 "공백 제외 1~128자"다. len()은 바이트를 세므로 멀티바이트 키에서 DB CHECK의
+// length()(문자 수)와 단위가 어긋난다. 두 곳이 같은 단위를 쓰도록 rune으로 센다.
+func normalizeIdempotencyKey(raw string) (string, error) {
+	key := strings.TrimSpace(raw)
+	if key == "" || utf8.RuneCountInString(key) > maxIdempotencyKeyLength {
+		return "", NewValidationErrorf(
+			"idempotency_key is required and must be 1..%d characters", maxIdempotencyKeyLength)
+	}
+	return key, nil
 }
 
 type CancelOrderInput struct {
@@ -93,6 +121,7 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 		service.TradeRepository = repository.NewTradeRepository(repo.DB)
 		service.LedgerRepository = repository.NewLedgerRepository(repo.DB)
 		service.CancelCommandRepository = repository.NewCancelCommandRepository(repo.DB)
+		service.OrderIdempotencyRepository = repository.NewOrderIdempotencyRepository(repo.DB)
 	}
 	return service
 }
@@ -111,10 +140,31 @@ func persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, walletRe
 	})
 }
 
-func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error) {
+func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, error) {
+	key, err := normalizeIdempotencyKey(input.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+
 	order, err := s.BuildOrder(input)
 	if err != nil {
 		return nil, err
+	}
+
+	fingerprint, err := ComputeOrderFingerprint(OrderFingerprintInput{
+		UserID:      order.UserID,
+		CoinSymbol:  order.CoinSymbol,
+		Side:        string(order.Side),
+		OrderType:   string(order.OrderType),
+		Price:       order.Price,
+		Amount:      order.Amount,
+		QuoteAmount: order.QuoteAmount,
+	}, CurrentOrderFingerprintVersion)
+	if err != nil {
+		return nil, err
+	}
+	idem := &idempotencyContext{
+		Key: key, Fingerprint: fingerprint, Version: CurrentOrderFingerprintVersion,
 	}
 
 	// 입장 게이트: 엔진 유입이 포화면 DB 작업 전에 빠른 거절(503).
@@ -123,18 +173,16 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 		return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
 	}
 
-	// [②] 코디네이터 있으면 배치 경유, 없으면(테스트·미배선) 단건 직접.
-	if s.HoldCoordinator != nil {
-		held, err := s.HoldCoordinator.Submit(order)
-		if err != nil {
-			return nil, err
-		}
-		order = held
-	} else {
-		if err := persistAndHold(s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository, order); err != nil {
-			return nil, err
-		}
+	res, err := s.holdWithIdempotency(order, idem)
+	if err != nil {
+		return nil, err
 	}
+
+	// follower는 엔진에 제출하지 않는다. 제출하면 hold는 한 번인데 주문이 두 번 들어간다.
+	if res.Role == holdRoleFollower {
+		return s.followerResult(res, fingerprint)
+	}
+	order = res.Order
 
 	// 바운디드 핸드오프: 매칭 처리량에 응답이 매달리지 않게. 주문은 이미
 	// 영속화+홀드로 내구·정합 확정 상태다. 바운드 내 접수 못 하면(레이스로 포화)
@@ -156,14 +204,108 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*model.Order, error)
 		}, s.acceptanceTimeout())
 		if !submitted {
 			metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff").Inc()
-			if rerr := s.rejectAcceptedOrder(order); rerr != nil {
-				return nil, fmt.Errorf("order intake saturated and hold release failed for order %d: %w", order.ID, rerr)
-			}
-			return nil, NewUnavailableErrorf("order intake is saturated, please retry shortly")
+			return nil, s.rejectAcceptedOrderWithIdempotency(order, idem.RecordID)
+		}
+		// 엔진 접수 성공 — ACCEPTED로 전이한다. 실패하면 PENDING에 머문다(재요청은 202).
+		if err := s.OrderIdempotencyRepository.UpdateOutcome(
+			idem.RecordID, model.OrderIdempotencyOutcomeAccepted,
+		); err != nil {
+			metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
+			log.Printf("order idempotency: ACCEPTED update failed for record %d: %v", idem.RecordID, err)
 		}
 	}
 
-	return order, nil
+	return &CreateOrderResult{Order: order, Outcome: model.OrderIdempotencyOutcomeAccepted}, nil
+}
+
+// holdWithIdempotency는 코디네이터가 있으면 배치로, 없으면(테스트·미배선) 같은 순서를
+// 지키는 단건 경로로 hold한다. 어느 쪽이든 키를 먼저 선점한다.
+func (s *OrderService) holdWithIdempotency(order *model.Order, idem *idempotencyContext) (holdResult, error) {
+	if s.HoldCoordinator != nil {
+		return s.HoldCoordinator.SubmitWithIdempotency(order, idem)
+	}
+	res := persistAndHoldIdempotent(
+		s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository,
+		s.OrderIdempotencyRepository, holdRequest{order: order, idem: idem},
+	)
+	return res, res.Err
+}
+
+// followerResult는 follower 두 종류를 가른다.
+//
+//   - Existing != nil: 이전 요청이 이미 커밋한 키다. 저장된 레코드로 replay한다.
+//   - Existing == nil && Order != nil: 같은 배치의 중복이다. leader가 이번에 주문을
+//     만들었으므로 별도로 조회해 온 레코드가 없다. 엔진 제출 없이 202 PENDING이다.
+//     여기서 replayResult를 부르면 정상적인 중복 요청이 503이 된다.
+//   - 그 외: 결과를 만들지 못한 것이므로 503이다.
+func (s *OrderService) followerResult(res holdResult, fingerprint string) (*CreateOrderResult, error) {
+	if res.Existing != nil {
+		return s.replayResult(res.Existing, fingerprint)
+	}
+	if res.Order != nil {
+		return &CreateOrderResult{
+			Order:   res.Order,
+			Replay:  true,
+			Outcome: model.OrderIdempotencyOutcomePending,
+		}, nil
+	}
+	return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
+}
+
+// replayResult는 저장된 결과로 응답을 재구성한다. 지문이 다르면 409다.
+func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, fingerprint string) (*CreateOrderResult, error) {
+	if record == nil {
+		return nil, NewUnavailableErrorf("idempotency record is unavailable, please retry")
+	}
+	if record.Fingerprint != fingerprint {
+		return nil, NewConflictErrorf("idempotency key was used with a different request")
+	}
+
+	order := &model.Order{}
+	if record.OrderID != nil {
+		order.ID = *record.OrderID
+	}
+	return &CreateOrderResult{Order: order, Replay: true, Outcome: record.Outcome}, nil
+}
+
+// rejectAcceptedOrderWithIdempotency는 hold 해제·주문 REJECTED·outcome REJECTED를
+// 한 트랜잭션에 넣는다. outcome을 밖에 두면 "hold는 풀렸는데 outcome은 PENDING"인
+// 상태가 생기고, 재요청이 202를 받아 아직 진행 중인 것처럼 보인다.
+func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, recordID uint64) error {
+	err := s.OrderRepository.DB.Transaction(func(tx *gorm.DB) error {
+		orderRepo := s.OrderRepository.WithTx(tx)
+		walletRepo := s.WalletRepository.WithTx(tx)
+		ledgerRepo := s.LedgerRepository.WithTx(tx)
+
+		if err := releaseInitialHold(walletRepo, ledgerRepo, order); err != nil {
+			return err
+		}
+		if err := orderRepo.UpdateOrderExecution(
+			order.ID, order.FilledAmount, order.FilledQuoteAmount, model.OrderStatusRejected,
+		); err != nil {
+			return err
+		}
+		return s.OrderIdempotencyRepository.WithTx(tx).UpdateOutcome(
+			recordID, model.OrderIdempotencyOutcomeRejected)
+	})
+	if err == nil {
+		return NewUnavailableErrorf("order intake is saturated, please retry shortly")
+	}
+
+	// 보상 실패 — hold가 잡힌 채 남는다. UNKNOWN은 best-effort 기록이다.
+	if uerr := s.OrderIdempotencyRepository.UpdateOutcome(
+		recordID, model.OrderIdempotencyOutcomeUnknown,
+	); uerr != nil {
+		metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
+		log.Printf("order idempotency: UNKNOWN update failed for record %d: %v", recordID, uerr)
+	} else {
+		metrics.OrderIdempotencyUnknownTotal.Inc()
+	}
+
+	// 요청자 잘못이 아니다. raw error를 그대로 내면 serviceErrorStatus의 default가
+	// 400으로 매핑한다(CancelOrder에서 e0ef22a로 고친 것과 같은 클래스).
+	return NewUnavailableErrorf(
+		"order intake saturated and hold release failed for order %d, retry is safe with the same key", order.ID)
 }
 
 func (s *OrderService) acceptanceTimeout() time.Duration {

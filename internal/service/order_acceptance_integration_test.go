@@ -58,7 +58,7 @@ func TestIntegrationCreateOrderSubmitsWhenIntakeHasRoom(t *testing.T) {
 	fakeEngine := &fakeAcceptanceEngine{admissible: true, submitSucceeds: true}
 	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), fakeEngine)
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -101,7 +101,7 @@ func TestIntegrationCreateOrderFastRejectsWhenIntakeSaturated(t *testing.T) {
 
 	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_gate"))
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -151,7 +151,7 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 
 	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff"))
 
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
 		CoinSymbol: "BTC",
 		Side:       "BUY",
@@ -239,7 +239,7 @@ func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	orderService.HoldCoordinator = coordinator
 
 	// 정상: 코디네이터 경유 홀드 성공.
-	order, err := orderService.CreateOrder(CreateOrderInput{
+	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID: buyerID, CoinSymbol: "BTC", Side: "BUY", Price: "5000", Amount: "1",
 	})
 	require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	assert.True(t, krwWallet.LockedBalance.Equal(decimal.RequireFromString("5002.5")))
 
 	// 잔고 부족: 코디네이터 경유라도 홀드 실패는 ConflictError(409)로 전파, 주문 미생성.
-	poorOrder, err := orderService.CreateOrder(CreateOrderInput{
+	poorOrder, err := createTestOrder(orderService, CreateOrderInput{
 		UserID: poorBuyerID, CoinSymbol: "BTC", Side: "BUY", Price: "5000", Amount: "1",
 	})
 	require.Error(t, err)

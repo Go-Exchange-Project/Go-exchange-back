@@ -1632,7 +1632,10 @@ Expected: 기존 hold coordinator 테스트 전부 PASS
 
 **Files:**
 - Modify: `internal/service/order_service.go`
-- Modify: `internal/service/service_integration_test.go`
+- Modify: `internal/metrics/metrics.go`
+- Modify: `internal/handler/order_handler.go` (새 반환 타입에 맞춘 최소 변경, 상태 매핑은 Task 6)
+- Modify: `internal/service/service_integration_test.go` (+ acceptance·cancellation 통합 테스트)
+- Create: `internal/service/order_idempotency_service_integration_test.go`
 
 **Interfaces:**
 - Consumes: Task 1·3·4
@@ -1858,8 +1861,44 @@ func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, re
 
 - [ ] **Step 5: 기존 통합 테스트를 새 계약으로 갱신**
 
-`service_integration_test.go`의 `CreateOrder` 호출부에 `IdempotencyKey`를 추가하고,
-반환이 `*CreateOrderResult`가 된 것을 반영한다. 각 호출에 고유 키를 준다.
+기존 호출부 13곳은 키 계약이 아니라 주문·홀드 동작을 본다. 호출마다 손으로 키를 넣는 대신
+`service_integration_test.go`에 헬퍼를 두고 `orderService.CreateOrder(CreateOrderInput{` →
+`createTestOrder(orderService, CreateOrderInput{`로 바꾼다. 반환 모양이 그대로라 나머지
+코드는 손대지 않는다.
+
+```go
+// testIdemKeySeq는 테스트마다 고유한 멱등성 키를 만든다. 같은 키를 재사용하면
+// 서로 다른 주문이 재시도로 오인된다.
+var testIdemKeySeq atomic.Uint64
+
+func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, error) {
+	if input.IdempotencyKey == "" {
+		input.IdempotencyKey = fmt.Sprintf("test-key-%d", testIdemKeySeq.Add(1))
+	}
+	result, err := svc.CreateOrder(input)
+	if err != nil {
+		return nil, err
+	}
+	return result.Order, nil
+}
+```
+
+- [ ] **Step 5b: 계약 통합 테스트 작성**
+
+`order_idempotency_service_integration_test.go`에 넣는다. 엔진 제출 횟수를 세는
+`countingAcceptanceEngine`이 필요하다 — 상태만 보면 "두 번 제출됐지만 결과가 같아 보이는"
+경우를 구분할 수 없다.
+
+| 테스트 | 확인하는 것 |
+|---|---|
+| `RetryWithSameKeyReplays` | 재시도가 `Replay=true`·같은 `order_id`, **엔진 제출 1회**, `ORDER_HOLD` 1건 |
+| `SameKeyDifferentRequestConflicts` | 409, 주문 1건, 원래 주문 무변경 |
+| `FailedValidationDoesNotConsumeKey` | 잔고 부족 실패 후 키가 DB에 없고, 잔고를 채우면 같은 키로 성공 |
+| `SameBatchDuplicateIsNotUnavailable` | owner `ACCEPTED` + follower `PENDING`(**503 없음**), 엔진 제출 1회, `ORDER_HOLD` 1건 |
+
+마지막 테스트는 `BatchSize=2`, `FlushInterval=2s`로 두 요청이 같은 배치에 들어가게 한 뒤
+goroutine 2개로 같은 키를 동시에 보낸다. 도착 순서는 정해지지 않으므로 "owner 1건 +
+follower 1건"으로 판정한다.
 
 - [ ] **Step 6: 통과 확인**
 

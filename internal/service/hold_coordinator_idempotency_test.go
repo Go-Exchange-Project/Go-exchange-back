@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -77,4 +78,37 @@ func TestGroupIdempotentRequestsKeepsUnkeyedRequestsAsOwners(t *testing.T) {
 	assert.Equal(t, []int{0, 1}, owners)
 	assert.Empty(t, followers)
 	assert.Empty(t, conflicts)
+}
+
+func TestCreateOrderRequiresIdempotencyKey(t *testing.T) {
+	svc := &OrderService{}
+
+	for name, key := range map[string]string{
+		"빈 값":   "",
+		"공백":    "   ",
+		"초과 길이": strings.Repeat("k", 129),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := svc.CreateOrder(CreateOrderInput{
+				UserID: 1, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
+				Price: "100", Amount: "1", IdempotencyKey: key,
+			})
+			require.Error(t, err)
+			assert.Nil(t, result)
+			kind, ok := DomainErrorKind(err)
+			require.True(t, ok)
+			assert.Equal(t, ErrorKindValidation, kind)
+		})
+	}
+}
+
+// 128자 계약은 문자 수 기준이다. len()으로 세면 128자 한글 키가 384바이트라 거절돼
+// DB CHECK(length() = 문자 수)와 어긋난다.
+func TestNormalizeIdempotencyKeyCountsCharactersNotBytes(t *testing.T) {
+	key, err := normalizeIdempotencyKey(strings.Repeat("가", 128))
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("가", 128), key)
+
+	_, err = normalizeIdempotencyKey(strings.Repeat("가", 129))
+	require.Error(t, err)
 }
