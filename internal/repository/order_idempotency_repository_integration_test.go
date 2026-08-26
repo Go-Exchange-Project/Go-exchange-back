@@ -182,6 +182,41 @@ func TestIntegrationOrderIdempotencyDeleteByIDs(t *testing.T) {
 	assert.Equal(t, "keep", found[0].IdempotencyKey)
 }
 
+// 0행 변경을 성공으로 돌려주면 호출자는 계약이 깨진 것을 알 수 없다.
+// DB 오류가 나지 않는 경로라 오직 RowsAffected 검사만이 이를 잡는다.
+func TestIntegrationOrderIdempotencyStateChangesRejectZeroRows(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	const missingID = uint64(1 << 62)
+
+	t.Run("SetOrderAndOutcome은 없는 ID에서 실패한다", func(t *testing.T) {
+		err := repo.SetOrderAndOutcome(missingID, 1, model.OrderIdempotencyOutcomeAccepted)
+		require.Error(t, err)
+	})
+
+	t.Run("UpdateOutcome은 없는 ID에서 실패한다", func(t *testing.T) {
+		err := repo.UpdateOutcome(missingID, model.OrderIdempotencyOutcomeAccepted)
+		require.Error(t, err)
+	})
+
+	t.Run("DeleteByIDs는 일부만 존재하면 실패한다", func(t *testing.T) {
+		record := seedIdemRecord(userID, "partial")
+		_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+		require.NoError(t, err)
+
+		err = repo.DeleteByIDs([]uint64{record.ID, missingID})
+		require.Error(t, err, "요청한 키 중 하나가 없는데 성공으로 처리됐다")
+	})
+
+	t.Run("DeleteByIDs는 전부 없으면 실패한다", func(t *testing.T) {
+		err := repo.DeleteByIDs([]uint64{missingID})
+		require.Error(t, err)
+	})
+}
+
 func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
 	db := openRepositoryIntegrationDB(t)
 	repo := NewOrderIdempotencyRepository(db)

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -99,34 +100,70 @@ func (r *OrderIdempotencyRepository) FindByUserKeys(pairs []UserKeyPair) ([]mode
 }
 
 // SetOrderAndOutcome은 order_id·outcome·updated_at을 한 UPDATE 문에서 갱신합니다.
+//
+// 0행 변경은 성공이 아니라 오류입니다. 대상 행이 없는데 성공을 돌려주면 주문·hold는
+// 커밋됐는데 키에 order_id가 연결되지 않은 채로 남고, 호출자는 그 사실을 알지 못합니다.
 func (r *OrderIdempotencyRepository) SetOrderAndOutcome(id uint64, orderID uint, outcome model.OrderIdempotencyOutcome) error {
-	return r.DB.Model(&model.OrderIdempotencyKey{}).
+	result := r.DB.Model(&model.OrderIdempotencyKey{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
 			"order_id":   orderID,
 			"outcome":    outcome,
 			"updated_at": time.Now().UTC(),
-		}).Error
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("set order and outcome affected %d rows for idempotency key %d, expected 1",
+			result.RowsAffected, id)
+	}
+	return nil
 }
 
 // UpdateOutcome은 outcome과 updated_at을 한 UPDATE 문에서 갱신합니다.
 // outcome이 바뀌면 부분 인덱스에서 빠지고, updated_at은 전이 시각을 보존합니다.
+//
+// SetOrderAndOutcome과 같은 이유로 0행 변경은 오류입니다. 성공으로 처리하면 outcome
+// 전이가 유실됐는데 실패 counter도 오르지 않아 관측조차 되지 않습니다.
 func (r *OrderIdempotencyRepository) UpdateOutcome(id uint64, outcome model.OrderIdempotencyOutcome) error {
-	return r.DB.Model(&model.OrderIdempotencyKey{}).
+	result := r.DB.Model(&model.OrderIdempotencyKey{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
 			"outcome":    outcome,
 			"updated_at": time.Now().UTC(),
-		}).Error
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("update outcome affected %d rows for idempotency key %d, expected 1",
+			result.RowsAffected, id)
+	}
+	return nil
 }
 
 // DeleteByIDs는 이번 트랜잭션에서 삽입했지만 hold 검증에 실패한 키를 지웁니다.
 // 커밋된 주문을 가리키는 키에는 절대 쓰지 않습니다.
+//
+// 요청한 수만큼 지워지지 않으면 오류입니다. 지우지 못한 키는 PENDING으로 남아 그
+// 사용자의 재시도를 영구히 막습니다 — 검증 실패는 키를 소비하지 않는다는 계약이 깨집니다.
+// 이 메서드는 호출자의 트랜잭션 안에서 실행되므로, 오류를 돌려주면 부분 삭제도 롤백됩니다.
 func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
-	if len(ids) == 0 {
+	deduped := dedupeNonzeroUint64(ids)
+	if len(deduped) == 0 {
 		return nil
 	}
-	return r.DB.Where("id IN ?", ids).Delete(&model.OrderIdempotencyKey{}).Error
+
+	result := r.DB.Where("id IN ?", deduped).Delete(&model.OrderIdempotencyKey{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if int(result.RowsAffected) != len(deduped) {
+		return fmt.Errorf("delete idempotency keys removed %d rows, expected %d",
+			result.RowsAffected, len(deduped))
+	}
+	return nil
 }
 
 // CountStalePending은 stale PENDING gauge의 원천입니다.

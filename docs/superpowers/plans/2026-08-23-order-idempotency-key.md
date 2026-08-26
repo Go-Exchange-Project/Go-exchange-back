@@ -940,6 +940,41 @@ func TestIntegrationOrderIdempotencyDeleteByIDs(t *testing.T) {
 	assert.Equal(t, "keep", found[0].IdempotencyKey)
 }
 
+// 0행 변경을 성공으로 돌려주면 호출자는 계약이 깨진 것을 알 수 없다.
+// DB 오류가 나지 않는 경로라 오직 RowsAffected 검사만이 이를 잡는다.
+func TestIntegrationOrderIdempotencyStateChangesRejectZeroRows(t *testing.T) {
+	db := openRepositoryIntegrationDB(t)
+	repo := NewOrderIdempotencyRepository(db)
+	userID := uniqueIdemUserID()
+	defer cleanupIdemRecords(t, db, userID)
+
+	const missingID = uint64(1 << 62)
+
+	t.Run("SetOrderAndOutcome은 없는 ID에서 실패한다", func(t *testing.T) {
+		err := repo.SetOrderAndOutcome(missingID, 1, model.OrderIdempotencyOutcomeAccepted)
+		require.Error(t, err)
+	})
+
+	t.Run("UpdateOutcome은 없는 ID에서 실패한다", func(t *testing.T) {
+		err := repo.UpdateOutcome(missingID, model.OrderIdempotencyOutcomeAccepted)
+		require.Error(t, err)
+	})
+
+	t.Run("DeleteByIDs는 일부만 존재하면 실패한다", func(t *testing.T) {
+		record := seedIdemRecord(userID, "partial")
+		_, err := repo.InsertNew([]*model.OrderIdempotencyKey{record})
+		require.NoError(t, err)
+
+		err = repo.DeleteByIDs([]uint64{record.ID, missingID})
+		require.Error(t, err, "요청한 키 중 하나가 없는데 성공으로 처리됐다")
+	})
+
+	t.Run("DeleteByIDs는 전부 없으면 실패한다", func(t *testing.T) {
+		err := repo.DeleteByIDs([]uint64{missingID})
+		require.Error(t, err)
+	})
+}
+
 func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
 	db := openRepositoryIntegrationDB(t)
 	repo := NewOrderIdempotencyRepository(db)
@@ -990,6 +1025,7 @@ Expected: FAIL — `undefined: NewOrderIdempotencyRepository`
 package repository
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -1088,34 +1124,70 @@ func (r *OrderIdempotencyRepository) FindByUserKeys(pairs []UserKeyPair) ([]mode
 }
 
 // SetOrderAndOutcome은 order_id·outcome·updated_at을 한 UPDATE 문에서 갱신합니다.
+//
+// 0행 변경은 성공이 아니라 오류입니다. 대상 행이 없는데 성공을 돌려주면 주문·hold는
+// 커밋됐는데 키에 order_id가 연결되지 않은 채로 남고, 호출자는 그 사실을 알지 못합니다.
 func (r *OrderIdempotencyRepository) SetOrderAndOutcome(id uint64, orderID uint, outcome model.OrderIdempotencyOutcome) error {
-	return r.DB.Model(&model.OrderIdempotencyKey{}).
+	result := r.DB.Model(&model.OrderIdempotencyKey{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
 			"order_id":   orderID,
 			"outcome":    outcome,
 			"updated_at": time.Now().UTC(),
-		}).Error
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("set order and outcome affected %d rows for idempotency key %d, expected 1",
+			result.RowsAffected, id)
+	}
+	return nil
 }
 
 // UpdateOutcome은 outcome과 updated_at을 한 UPDATE 문에서 갱신합니다.
 // outcome이 바뀌면 부분 인덱스에서 빠지고, updated_at은 전이 시각을 보존합니다.
+//
+// SetOrderAndOutcome과 같은 이유로 0행 변경은 오류입니다. 성공으로 처리하면 outcome
+// 전이가 유실됐는데 실패 counter도 오르지 않아 관측조차 되지 않습니다.
 func (r *OrderIdempotencyRepository) UpdateOutcome(id uint64, outcome model.OrderIdempotencyOutcome) error {
-	return r.DB.Model(&model.OrderIdempotencyKey{}).
+	result := r.DB.Model(&model.OrderIdempotencyKey{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
 			"outcome":    outcome,
 			"updated_at": time.Now().UTC(),
-		}).Error
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("update outcome affected %d rows for idempotency key %d, expected 1",
+			result.RowsAffected, id)
+	}
+	return nil
 }
 
 // DeleteByIDs는 이번 트랜잭션에서 삽입했지만 hold 검증에 실패한 키를 지웁니다.
 // 커밋된 주문을 가리키는 키에는 절대 쓰지 않습니다.
+//
+// 요청한 수만큼 지워지지 않으면 오류입니다. 지우지 못한 키는 PENDING으로 남아 그
+// 사용자의 재시도를 영구히 막습니다 — 검증 실패는 키를 소비하지 않는다는 계약이 깨집니다.
+// 이 메서드는 호출자의 트랜잭션 안에서 실행되므로, 오류를 돌려주면 부분 삭제도 롤백됩니다.
 func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
-	if len(ids) == 0 {
+	deduped := dedupeNonzeroUint64(ids)
+	if len(deduped) == 0 {
 		return nil
 	}
-	return r.DB.Where("id IN ?", ids).Delete(&model.OrderIdempotencyKey{}).Error
+
+	result := r.DB.Where("id IN ?", deduped).Delete(&model.OrderIdempotencyKey{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if int(result.RowsAffected) != len(deduped) {
+		return fmt.Errorf("delete idempotency keys removed %d rows, expected %d",
+			result.RowsAffected, len(deduped))
+	}
+	return nil
 }
 
 // CountStalePending은 stale PENDING gauge의 원천입니다.
@@ -1136,7 +1208,13 @@ $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=
 go test ./internal/repository -run IntegrationOrderIdempotency -v -p 1
 ```
 
-Expected: 7개 PASS
+Expected: 8개 PASS
+
+> 상태 변경 메서드는 **0행 변경을 성공으로 돌려주면 안 된다**. 잘못된 ID로도 DB 오류가
+> 나지 않으므로, `RowsAffected` 검사가 빠지면 "주문은 커밋됐는데 키에 `order_id`가 없는"
+> 상태나 "검증 실패 키가 `PENDING`으로 소비된" 상태를 아무도 관측하지 못한다.
+> `SetOrderAndOutcome`·`UpdateOutcome`은 정확히 1행, `DeleteByIDs`는 요청한 ID 수만큼
+> 지워지지 않으면 error다.
 
 > **확인 결과(가정이 깨진 지점):** GORM의 `Create(&records)` + `OnConflict{DoNothing}`은
 > 삽입되지 않은 행의 `ID`를 0으로 남기지 **않는다**. 반환 행 수가 구조체 수보다 적으면
