@@ -2659,23 +2659,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// failFrom은 "그 호출부터 계속 실패한다"는 뜻이다. 한 번만 실패시키면 다음 조회가
+// 값을 되돌려 놓아서, gauge를 0으로 덮는 회귀를 테스트가 놓친다(변이로 확인).
 type fakeStaleCounter struct {
-	mu     sync.Mutex
-	counts []int64
-	errs   []error
-	calls  int
+	mu       sync.Mutex
+	counts   []int64
+	failFrom int
+	calls    int
+	lastArgs []time.Time
 }
 
-func (f *fakeStaleCounter) CountStalePending(time.Time) (int64, error) {
+func (f *fakeStaleCounter) CountStalePending(olderThan time.Time) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	if len(f.errs) > 0 {
-		err := f.errs[0]
-		f.errs = f.errs[1:]
-		if err != nil {
-			return 0, err
-		}
+	f.lastArgs = append(f.lastArgs, olderThan)
+	if f.failFrom > 0 && f.calls >= f.failFrom {
+		return 0, errors.New("db down")
 	}
 	if len(f.counts) == 0 {
 		return 0, nil
@@ -2693,7 +2693,16 @@ func (f *fakeStaleCounter) callCount() int {
 	return f.calls
 }
 
-// 30초를 먼저 기다리면 재기동 직후 창에서 stale PENDING이 보이지 않는다.
+func (f *fakeStaleCounter) firstArg(t *testing.T) time.Time {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	require.NotEmpty(t, f.lastArgs)
+	return f.lastArgs[0]
+}
+
+// 30초를 먼저 기다리면 재기동 직후 창에서 stale PENDING이 보이지 않는다. hold 커밋
+// 직후 죽어서 생긴 레코드가 정확히 그 창에 있다.
 func TestOrderIdempotencyMonitorQueriesImmediately(t *testing.T) {
 	counter := &fakeStaleCounter{counts: []int64{7}}
 	monitor := NewOrderIdempotencyMonitor(counter)
@@ -2717,7 +2726,9 @@ func TestOrderIdempotencyMonitorQueriesImmediately(t *testing.T) {
 // 조회 실패 시 gauge를 0으로 덮으면 "문제가 사라졌다"로 읽힌다. 실제로는 관측이
 // 사라진 것이다.
 func TestOrderIdempotencyMonitorKeepsLastValueOnError(t *testing.T) {
-	counter := &fakeStaleCounter{counts: []int64{5}, errs: []error{nil, errors.New("db down")}}
+	// 첫 조회만 성공하고 그 뒤로는 계속 실패한다. 값이 되돌아올 기회를 주지 않아야
+	// "실패 시 0으로 덮는" 회귀가 드러난다.
+	counter := &fakeStaleCounter{counts: []int64{5}, failFrom: 2}
 	monitor := NewOrderIdempotencyMonitor(counter)
 	monitor.Interval = 10 * time.Millisecond
 
@@ -2725,9 +2736,28 @@ func TestOrderIdempotencyMonitorKeepsLastValueOnError(t *testing.T) {
 	defer cancel()
 	go monitor.Run(ctx)
 
-	require.Eventually(t, func() bool { return counter.callCount() >= 2 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return counter.callCount() >= 4 }, time.Second, 5*time.Millisecond)
 	assert.EqualValues(t, 5, monitor.LastValue(), "조회 실패가 gauge를 0으로 덮었다")
 	assert.Positive(t, monitor.ErrorCount())
+}
+
+// 임계 이전 시각으로 조회해야 "오래된 PENDING"만 잡힌다. time.Now()를 그대로 넘기면
+// 정상 진행 중인 레코드까지 세어 gauge가 항상 0이 아니게 된다.
+func TestOrderIdempotencyMonitorQueriesOlderThanThreshold(t *testing.T) {
+	counter := &fakeStaleCounter{counts: []int64{0}}
+	monitor := NewOrderIdempotencyMonitor(counter)
+	monitor.Interval = time.Hour
+	monitor.Threshold = 10 * time.Minute
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go monitor.Run(ctx)
+
+	require.Eventually(t, func() bool { return counter.callCount() >= 1 }, time.Second, 5*time.Millisecond)
+
+	elapsed := time.Since(counter.firstArg(t))
+	assert.Greater(t, elapsed, 9*time.Minute, "임계보다 최근 시각으로 조회했다")
+	assert.Less(t, elapsed, 11*time.Minute)
 }
 ```
 
@@ -2797,6 +2827,7 @@ func NewOrderIdempotencyMonitor(counter stalePendingCounter) *OrderIdempotencyMo
 }
 
 func (m *OrderIdempotencyMonitor) LastValue() int64 { return m.lastValue.Load() }
+
 func (m *OrderIdempotencyMonitor) ErrorCount() int64 { return m.errors.Load() }
 
 // Run은 시작 직후 한 번 조회한 뒤 주기 ticker로 전환한다. 먼저 기다리면 재기동 직후
@@ -2871,6 +2902,22 @@ go test ./internal/service -run OrderIdempotencyMonitor -count=20 -race -v
 go build ./...
 go vet ./...
 ```
+
+조회가 `order_idempotency_pending_updated_at`을 실제로 쓰는지 확인한다. 테이블이 비어 있으면
+planner가 seq scan을 고르므로 `enable_seqscan = off`로 강제해 **경로가 존재하는지**를 본다.
+
+```sql
+SET enable_seqscan = off;
+EXPLAIN SELECT count(*) FROM order_idempotency_keys
+WHERE outcome = 'PENDING' AND updated_at < now() - interval '5 minutes';
+```
+
+기대: `Index Only Scan using order_idempotency_pending_updated_at`, `Index Cond`에는
+`updated_at`만 남는다(`outcome` 조건은 부분 인덱스 predicate가 흡수한다).
+
+> **실패 주입 fake는 "한 번만 실패"로 만들면 안 된다.** 다음 주기 조회가 값을 되돌려
+> 놓아 "실패 시 gauge를 0으로 덮는" 회귀를 놓친다(변이로 확인했다). `failFrom`처럼
+> **그 호출부터 계속 실패**하도록 만든다.
 
 - [ ] **Step 7: 커밋**
 

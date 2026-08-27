@@ -253,6 +253,12 @@ func main() {
 	}
 	go reconciliationWorker.Run(backgroundCtx)
 
+	// hold 커밋 직후 프로세스가 죽으면 어떤 counter도 오르지 않는다. 남은 PENDING을
+	// 주기 조회해 gauge로 노출한다 — 그 창의 유일한 관측 수단이다.
+	idempotencyMonitor := service.NewOrderIdempotencyMonitor(
+		repository.NewOrderIdempotencyRepository(config.DB))
+	go idempotencyMonitor.Run(backgroundCtx)
+
 	go func() {
 		for snapshot := range me.SnapshotCh {
 			snapshotJSON, _ := json.Marshal(map[string]interface{}{

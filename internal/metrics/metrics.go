@@ -96,6 +96,18 @@ var (
 		Help: "Failed attempts to record ACCEPTED/REJECTED/UNKNOWN on an idempotency record.",
 	})
 
+	// counter는 "그 순간 코드가 살아 있었다"를 전제한다. 프로세스가 hold 커밋 직후
+	// 죽으면 아무 counter도 오르지 않으므로 gauge가 필요하다.
+	OrderIdempotencyStalePending = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "order_idempotency_stale_pending",
+		Help: "Idempotency records still PENDING past the staleness threshold.",
+	})
+
+	OrderIdempotencyMonitorErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "order_idempotency_monitor_errors_total",
+		Help: "Failed stale-pending queries. The gauge keeps its last value on failure.",
+	})
+
 	SettlementBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "settlement_batch_size",
 		Help:    "Number of trades per committed settlement batch. Stuck at 1 indicates low load or drain not happening.",
