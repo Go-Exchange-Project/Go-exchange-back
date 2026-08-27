@@ -230,7 +230,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 	}, s.acceptanceTimeout())
 	if !submitted {
 		metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff").Inc()
-		return nil, s.rejectAcceptedOrderWithIdempotency(order, idem.RecordID)
+		return s.rejectAcceptedOrderWithIdempotency(order, idem.RecordID)
 	}
 	// 엔진 접수 성공 — ACCEPTED로 전이한다. 실패하면 PENDING에 머문다(재요청은 202).
 	if err := s.OrderIdempotencyRepository.UpdateOutcome(
@@ -339,7 +339,13 @@ func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, in OrderF
 // rejectAcceptedOrderWithIdempotency는 hold 해제·주문 REJECTED·outcome REJECTED를
 // 한 트랜잭션에 넣는다. outcome을 밖에 두면 "hold는 풀렸는데 outcome은 PENDING"인
 // 상태가 생기고, 재요청이 202를 받아 아직 진행 중인 것처럼 보인다.
-func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, recordID uint64) error {
+//
+// 오류와 함께 결과도 돌려준다. 이 시점에는 주문 행이 이미 존재하므로, 실패해도
+// order_id와 durable outcome은 알려줄 수 있어야 한다 — 저장된 결과의 재요청만
+// order_id를 받고 최초 실패는 못 받으면 같은 상태가 두 가지 응답으로 보인다.
+func (s *OrderService) rejectAcceptedOrderWithIdempotency(
+	order *model.Order, recordID uint64,
+) (*CreateOrderResult, error) {
 	// 트랜잭션이 롤백된 이유가 outcome 갱신 실패인지 구분한다. 그러지 않으면 REJECTED
 	// 기록 실패가 counter에 잡히지 않고, 뒤이은 UNKNOWN이 성공하면 아무 흔적도 남지 않는다.
 	rejectedUpdateFailed := false
@@ -365,25 +371,30 @@ func (s *OrderService) rejectAcceptedOrderWithIdempotency(order *model.Order, re
 		return nil
 	})
 	if err == nil {
-		return NewUnavailableErrorf("order intake is saturated, please retry shortly")
+		return &CreateOrderResult{Order: order, Outcome: model.OrderIdempotencyOutcomeRejected},
+			NewUnavailableErrorf("order intake is saturated, please retry shortly")
 	}
 	if rejectedUpdateFailed {
 		metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
 	}
 
 	// 보상 실패 — hold가 잡힌 채 남는다. UNKNOWN은 best-effort 기록이다.
+	outcome := model.OrderIdempotencyOutcomeUnknown
 	if uerr := s.OrderIdempotencyRepository.UpdateOutcome(
 		recordID, model.OrderIdempotencyOutcomeUnknown,
 	); uerr != nil {
 		metrics.OrderIdempotencyOutcomeUpdateFailuresTotal.Inc()
 		log.Printf("order idempotency: UNKNOWN update failed for record %d: %v", recordID, uerr)
+		// 기록이 실패했으므로 DB는 여전히 PENDING이다. 응답이 UNKNOWN이라고 말하면
+		// 저장된 상태와 어긋난다.
+		outcome = model.OrderIdempotencyOutcomePending
 	} else {
 		metrics.OrderIdempotencyUnknownTotal.Inc()
 	}
 
 	// 요청자 잘못이 아니다. raw error를 그대로 내면 serviceErrorStatus의 default가
 	// 400으로 매핑한다(CancelOrder에서 e0ef22a로 고친 것과 같은 클래스).
-	return NewUnavailableErrorf(
+	return &CreateOrderResult{Order: order, Outcome: outcome}, NewUnavailableErrorf(
 		"order intake saturated and hold release failed for order %d, retry is safe with the same key", order.ID)
 }
 

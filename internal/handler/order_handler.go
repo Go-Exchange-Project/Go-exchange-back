@@ -66,6 +66,15 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
 	if err != nil {
+		// 실패해도 주문 행이 이미 있으면 order_id와 durable outcome을 함께 준다.
+		// 저장된 결과의 재요청만 order_id를 받고 최초 실패는 못 받으면, 같은 상태가
+		// 두 가지 응답으로 보인다.
+		if result != nil && result.Order != nil {
+			status := serviceErrorStatus(err)
+			httpapi.WriteErrorWithData(c, status, errorCodeForStatus(status), err.Error(),
+				gin.H{"order_id": result.Order.ID, "status": string(result.Outcome)})
+			return
+		}
 		writeServiceError(c, err)
 		return
 	}
@@ -392,7 +401,6 @@ func serviceErrorStatus(err error) int {
 		return http.StatusBadRequest
 	}
 }
-
 
 func errorCodeForStatus(status int) string {
 	return httpapi.CodeForStatus(status)

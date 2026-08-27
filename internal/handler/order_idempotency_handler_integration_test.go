@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
@@ -93,14 +94,27 @@ func postOrder(t *testing.T, handler *OrderHandler, userID uint, key string, bod
 	return recorder
 }
 
-// orderIDOf는 성공 응답(data)과 오류 응답(error+data) 양쪽에서 order_id를 꺼낸다.
+// orderResponse는 성공 응답(data)과 오류 응답(error+data)을 같은 모양으로 읽는다.
+type idemOrderResponse struct {
+	Data  map[string]any `json:"data"`
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func decodeOrderResponse(t *testing.T, recorder *httptest.ResponseRecorder) idemOrderResponse {
+	t.Helper()
+
+	var body idemOrderResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body), "body=%s", recorder.Body.String())
+	return body
+}
+
 func orderIDOf(t *testing.T, recorder *httptest.ResponseRecorder) uint64 {
 	t.Helper()
 
-	var body struct {
-		Data map[string]any `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body), "body=%s", recorder.Body.String())
+	body := decodeOrderResponse(t, recorder)
 	require.Contains(t, body.Data, "order_id", "body=%s", recorder.Body.String())
 
 	id, ok := body.Data["order_id"].(float64)
@@ -138,8 +152,12 @@ func TestIntegrationCreateOrderHandlerReplaysSameKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, second.Code, "body=%s", second.Body.String())
 
 	assert.Equal(t, orderIDOf(t, first), orderIDOf(t, second))
-	assert.Contains(t, second.Body.String(), "idempotent_replay")
-	assert.NotContains(t, first.Body.String(), "idempotent_replay", "최초 요청에 replay 표시가 붙었다")
+
+	// 필드 존재만 보면 false여도 통과한다. 값까지 확인한다.
+	assert.Equal(t, true, decodeOrderResponse(t, second).Data["idempotent_replay"],
+		"body=%s", second.Body.String())
+	assert.NotContains(t, decodeOrderResponse(t, first).Data, "idempotent_replay",
+		"최초 요청에 replay 표시가 붙었다")
 }
 
 func TestIntegrationCreateOrderHandlerRejectsReusedKeyWithDifferentBody(t *testing.T) {
@@ -191,6 +209,104 @@ func TestIntegrationCreateOrderHandlerMapsOutcomeToStatus(t *testing.T) {
 
 			// 어떤 상태든 order_id는 준다 — 클라이언트가 주문 상태를 조회할 수 있어야 한다.
 			assert.Equal(t, orderIDOf(t, first), orderIDOf(t, replay))
+
+			body := decodeOrderResponse(t, replay)
+			if tc.wantStatus == http.StatusServiceUnavailable {
+				assert.Equal(t, string(tc.outcome), body.Data["status"])
+				assert.Equal(t, httpapi.CodeUnavailable, body.Error.Code)
+				assert.Equal(t, "1", replay.Header().Get("Retry-After"),
+					"503에 Retry-After가 없다")
+				return
+			}
+			assert.Empty(t, replay.Header().Get("Retry-After"))
+			if tc.wantStatus == http.StatusAccepted {
+				assert.Equal(t, string(tc.outcome), body.Data["status"])
+			}
 		})
 	}
+}
+
+// 접수에 실패하는 엔진. 보상 경로를 태우기 위한 최소 더블이다.
+type rejectingEngine struct{ acceptingEngine }
+
+func (rejectingEngine) TrySubmitOrder(*matching.Order, time.Duration) bool { return false }
+
+func newRejectingOrderHandler(db *gorm.DB) *OrderHandler {
+	return NewOrderHandler(service.NewOrderService(
+		repository.NewOrderRepository(db), repository.NewWalletRepository(db), rejectingEngine{}))
+}
+
+// 최초 접수 실패도 order_id를 줘야 한다. 저장된 결과의 재요청만 order_id를 받고 최초
+// 실패는 못 받으면, 같은 상태가 두 가지 응답으로 보인다.
+func TestIntegrationCreateOrderHandlerFirstRejectionReturnsOrderID(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	userID := seedFundedUser(t, db, 919021)
+	handler := newRejectingOrderHandler(db)
+
+	recorder := postOrder(t, handler, userID, "reject-key", validOrderBody())
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code, "body=%s", recorder.Body.String())
+	body := decodeOrderResponse(t, recorder)
+	assert.Equal(t, httpapi.CodeUnavailable, body.Error.Code)
+	assert.Equal(t, string(model.OrderIdempotencyOutcomeRejected), body.Data["status"])
+	assert.Equal(t, "1", recorder.Header().Get("Retry-After"))
+
+	orderID := orderIDOf(t, recorder)
+	require.NotZero(t, orderID)
+
+	// 보상이 끝났으므로 주문은 REJECTED이고 hold는 풀려 있어야 한다.
+	var order model.Order
+	require.NoError(t, db.First(&order, orderID).Error)
+	assert.Equal(t, model.OrderStatusRejected, order.Status)
+
+	var wallet model.Wallet
+	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
+		First(&wallet).Error)
+	assert.True(t, wallet.LockedBalance.IsZero(), "hold가 남았다: %s", wallet.LockedBalance)
+
+	var record model.OrderIdempotencyKey
+	require.NoError(t, db.Where("user_id = ?", userID).First(&record).Error)
+	assert.Equal(t, model.OrderIdempotencyOutcomeRejected, record.Outcome)
+}
+
+// 보상 자체가 실패하면 hold가 남는다. 그래도 응답은 order_id와 durable outcome을 줘야
+// 한다 — 사람이 그 주문을 찾아갈 수 있어야 한다.
+func TestIntegrationCreateOrderHandlerFailedCompensationReportsUnknown(t *testing.T) {
+	db := testdb.OpenIntegrationDB(t)
+	userID := seedFundedUser(t, db, 919022)
+	handler := newRejectingOrderHandler(db)
+
+	// 주문의 REJECTED 전이만 막는다. 보상 트랜잭션이 통째로 롤백되고, 트랜잭션 밖의
+	// UNKNOWN 기록은 성공한다.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	fn := "fail_order_reject_" + suffix
+	trg := fn + "_trg"
+
+	require.NoError(t, db.Exec(fmt.Sprintf(`
+CREATE FUNCTION %s() RETURNS trigger AS $$
+BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql`, fn)).Error)
+
+	// 함수 생성 직후에 등록한다. 트리거 생성이 실패하면 require.NoError가 테스트를
+	// 중단하므로, 뒤에 등록하면 함수가 공유 DB에 그대로 남는다.
+	t.Cleanup(func() {
+		require.NoError(t, db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON orders`, trg)).Error)
+		require.NoError(t, db.Exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn)).Error)
+	})
+
+	require.NoError(t, db.Exec(fmt.Sprintf(`
+CREATE TRIGGER %s BEFORE UPDATE ON orders
+FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.user_id = %d)
+EXECUTE FUNCTION %s()`, trg, userID, fn)).Error)
+
+	recorder := postOrder(t, handler, userID, "unknown-key", validOrderBody())
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code, "body=%s", recorder.Body.String())
+	body := decodeOrderResponse(t, recorder)
+	assert.Equal(t, string(model.OrderIdempotencyOutcomeUnknown), body.Data["status"])
+	require.NotZero(t, orderIDOf(t, recorder))
+
+	var record model.OrderIdempotencyKey
+	require.NoError(t, db.Where("user_id = ?", userID).First(&record).Error)
+	assert.Equal(t, model.OrderIdempotencyOutcomeUnknown, record.Outcome,
+		"보상 실패를 UNKNOWN으로 남기지 않았다")
 }
