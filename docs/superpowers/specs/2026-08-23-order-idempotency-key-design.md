@@ -109,11 +109,32 @@ CreateOrder (order_service.go:114)
 | `PENDING` | 주문·hold는 커밋됐고 **그 뒤의 결과가 durable하게 기록되지 않았다** | **202** `{order_id, status:"PENDING", idempotent_replay:true}` |
 | `ACCEPTED` | 엔진 접수 완료 | **200** `{message, order_id, idempotent_replay:true}` |
 | `REJECTED` | 엔진 접수 실패, hold 해제·`REJECTED` 종결이 **같은 트랜잭션에서 확정됨** | **503** + `order_id` |
-| `UNKNOWN` | 엔진 접수 실패 후 hold 해제까지 실패했고, **그 사실을 기록하는 데 성공했다** | **503** + `order_id` + "주문 조회로 확인" |
+| `UNKNOWN` | 엔진 접수 실패 후 hold 해제까지 실패했고, **그 사실을 기록하는 데 성공했다** | **503** + `order_id` + `status` + "주문 조회로 확인" |
 
 > **`PENDING`은 "아직 진행 중"만 뜻하지 않는다.** 이후 UPDATE가 실패해도 `PENDING`에
 > 머문다 — 즉 `PENDING`은 **"이 시점 이후를 서버가 durable하게 알지 못한다"** 는 뜻이다.
 > 오래된 `PENDING`은 정상 진행이 아니라 **관측 대상**이다(§3.6).
+
+**최초 실패도 같은 응답을 준다.** 저장된 결과의 재요청만 `order_id`를 받고 최초 실패는
+평범한 503을 받으면, 같은 상태가 두 가지 응답으로 보인다. 엔진 접수에 실패하면 서비스가
+결과와 오류를 **함께** 돌려주고, 핸들러는 그 결과로 `order_id`·`status`를 싣는다.
+
+| 최초 접수 실패 | durable outcome | 응답 |
+|---|---|---|
+| 보상 성공(hold 해제·`REJECTED` 확정) | `REJECTED` | **503** + `order_id` + `status:"REJECTED"` |
+| 보상 실패, `UNKNOWN` 기록 성공 | `UNKNOWN` | **503** + `order_id` + `status:"UNKNOWN"` |
+| 보상 실패, `UNKNOWN` 기록도 실패 | `PENDING` | **503** + `order_id` + `status:"PENDING"` |
+
+마지막 줄이 핵심이다. 기록이 실패했으면 DB는 여전히 `PENDING`이므로 응답도 `PENDING`이라고
+말해야 한다 — `UNKNOWN`이라고 하면 저장된 상태보다 앞서 말하는 것이다.
+
+**안내 문구는 outcome별로 다르다.** "같은 키로 재시도하면 된다"고 뭉뚱그리면 안 된다.
+키는 이미 그 결과에 묶여 있어 재시도해도 같은 응답이 돌아온다.
+
+| outcome | 안내 |
+|---|---|
+| `REJECTED` | 되돌리기가 끝났다. **새 주문에는 새 키**가 필요하다 |
+| `UNKNOWN`·`PENDING` | 자동으로 해결되지 않는다. **주문 상태를 먼저 조회**해야 한다 |
 
 | 그 밖의 상황 | 응답 |
 |---|---|

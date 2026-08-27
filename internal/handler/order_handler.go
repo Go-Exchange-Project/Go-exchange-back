@@ -71,7 +71,8 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		// 두 가지 응답으로 보인다.
 		if result != nil && result.Order != nil {
 			status := serviceErrorStatus(err)
-			httpapi.WriteErrorWithData(c, status, errorCodeForStatus(status), err.Error(),
+			httpapi.WriteErrorWithData(c, status, errorCodeForStatus(status),
+				idempotencyFailureMessage(result.Outcome),
 				gin.H{"order_id": result.Order.ID, "status": string(result.Outcome)})
 			return
 		}
@@ -103,12 +104,30 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	// 성공이 아니므로 503이되, order_id는 준다 — 클라이언트가 상태를 조회할 수 있어야 한다.
 	case model.OrderIdempotencyOutcomeRejected, model.OrderIdempotencyOutcomeUnknown:
 		httpapi.WriteErrorWithData(c, http.StatusServiceUnavailable, httpapi.CodeUnavailable,
-			"order was not accepted, retry is safe with the same key",
+			idempotencyFailureMessage(result.Outcome),
 			gin.H{"order_id": result.Order.ID, "status": string(result.Outcome)})
 
 	default:
 		httpapi.WriteError(c, http.StatusInternalServerError, httpapi.CodeInternal,
 			"unknown idempotency outcome")
+	}
+}
+
+// idempotencyFailureMessage는 실패 응답의 안내를 outcome별로 나눈다. 최초 실패와
+// 저장된 결과의 재요청이 같은 문장을 쓰도록 한 곳에서 정한다.
+//
+// "같은 키로 재시도하면 된다"고 뭉뚱그리면 안 된다. 키는 이미 이 결과에 묶여 있어
+// 재시도해도 같은 응답이 돌아온다 — 재시도가 상태를 바꿔 줄 것처럼 안내하면
+// 클라이언트는 해결되지 않는 루프를 돈다.
+func idempotencyFailureMessage(outcome model.OrderIdempotencyOutcome) string {
+	switch outcome {
+	case model.OrderIdempotencyOutcomeRejected:
+		// 보상이 끝나 hold도 풀렸다. 새 주문을 내려면 새 키가 필요하다.
+		return "order was not accepted and the hold was released; use a new idempotency key to place a new order"
+	default:
+		// UNKNOWN·PENDING: 되돌리기가 끝나지 않아 자금이 묶여 있을 수 있다.
+		// 자동으로 해결되지 않으므로 주문 상태를 먼저 확인해야 한다.
+		return "order state could not be finalized; check the order status before acting — retrying with the same key returns this same state"
 	}
 }
 

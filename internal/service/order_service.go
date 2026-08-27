@@ -395,7 +395,7 @@ func (s *OrderService) rejectAcceptedOrderWithIdempotency(
 	// 요청자 잘못이 아니다. raw error를 그대로 내면 serviceErrorStatus의 default가
 	// 400으로 매핑한다(CancelOrder에서 e0ef22a로 고친 것과 같은 클래스).
 	return &CreateOrderResult{Order: order, Outcome: outcome}, NewUnavailableErrorf(
-		"order intake saturated and hold release failed for order %d, retry is safe with the same key", order.ID)
+		"order intake saturated and hold release failed for order %d", order.ID)
 }
 
 func (s *OrderService) acceptanceTimeout() time.Duration {
