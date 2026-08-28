@@ -32,6 +32,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -253,11 +254,7 @@ func main() {
 	}
 	go reconciliationWorker.Run(backgroundCtx)
 
-	// hold 커밋 직후 프로세스가 죽으면 어떤 counter도 오르지 않는다. 남은 PENDING을
-	// 주기 조회해 gauge로 노출한다 — 그 창의 유일한 관측 수단이다.
-	idempotencyMonitor := service.NewOrderIdempotencyMonitor(
-		repository.NewOrderIdempotencyRepository(config.DB))
-	go idempotencyMonitor.Run(backgroundCtx)
+	startOrderIdempotencyMonitor(backgroundCtx, config.DB)
 
 	go func() {
 		for snapshot := range me.SnapshotCh {
@@ -474,6 +471,16 @@ type settlementDependencyGuard interface {
 type cancellationDeferStore interface {
 	RecordFailure(cancelled matching.OrderCancelled, sourceOutboxID uint64, executionErr error) (*model.FailedOrderCancellation, error)
 	EnsureDeferred(cancelled matching.OrderCancelled, sourceOutboxID uint64, reason error) (*model.FailedOrderCancellation, error)
+}
+
+// startOrderIdempotencyMonitor는 hold 커밋 직후 프로세스가 죽어 남은 PENDING을 주기
+// 조회해 gauge로 노출한다 — 그 창에는 어떤 counter도 오르지 않으므로 유일한 관측 수단이다.
+//
+// main() 안에 인라인으로 두면 배선을 검증할 방법이 없어 함수로 뺐다.
+func startOrderIdempotencyMonitor(ctx context.Context, db *gorm.DB) *service.OrderIdempotencyMonitor {
+	monitor := service.NewOrderIdempotencyMonitor(repository.NewOrderIdempotencyRepository(db))
+	go monitor.Run(ctx)
+	return monitor
 }
 
 // 차단 사유를 기록에 남기기 위한 고정 오류(실행 실패와 구분된다).

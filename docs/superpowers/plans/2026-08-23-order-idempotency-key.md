@@ -1239,10 +1239,15 @@ func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
 
 // CountStalePending은 stale PENDING gauge의 원천입니다.
 // order_idempotency_pending_updated_at 부분 인덱스가 이 조회를 받칩니다.
+//
+// outcome은 파라미터가 아니라 SQL 리터럴로 고정합니다. 파라미터로 넘기면 PostgreSQL이
+// generic plan에서 부분 인덱스 predicate(outcome = 'PENDING')와의 일치를 증명하지 못해
+// 인덱스를 쓰지 못합니다. https://www.postgresql.org/docs/17/indexes-partial.html
+// 리터럴과 model.OrderIdempotencyOutcomePending의 일치는 통합 테스트가 고정합니다.
 func (r *OrderIdempotencyRepository) CountStalePending(olderThan time.Time) (int64, error) {
 	var count int64
 	err := r.DB.Model(&model.OrderIdempotencyKey{}).
-		Where("outcome = ? AND updated_at < ?", model.OrderIdempotencyOutcomePending, olderThan).
+		Where("outcome = 'PENDING' AND updated_at < ?", olderThan).
 		Count(&count).Error
 	return count, err
 }
@@ -2651,10 +2656,14 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2712,8 +2721,14 @@ func TestOrderIdempotencyMonitorQueriesImmediately(t *testing.T) {
 	done := make(chan struct{})
 	go func() { monitor.Run(ctx); close(done) }()
 
-	require.Eventually(t, func() bool { return counter.callCount() >= 1 }, time.Second, 5*time.Millisecond)
+	// gauge Set이 observe()의 마지막 동작이므로, gauge가 7이면 조회도 저장도 끝났다.
+	// 호출 수만 기다리면 monitor가 값을 쓰기 전에 단언이 실행될 수 있다.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.OrderIdempotencyStalePending) == 7
+	}, time.Second, 5*time.Millisecond, "조회 결과가 gauge에 반영되지 않았다")
 	assert.EqualValues(t, 7, monitor.LastValue())
+	assert.Equal(t, 1, testutil.CollectAndCount(metrics.OrderIdempotencyStalePending,
+		"order_idempotency_stale_pending"), "지표 이름이 바뀌면 대시보드와 알람이 조용히 끊긴다")
 
 	cancel()
 	select {
@@ -2731,14 +2746,23 @@ func TestOrderIdempotencyMonitorKeepsLastValueOnError(t *testing.T) {
 	counter := &fakeStaleCounter{counts: []int64{5}, failFrom: 2}
 	monitor := NewOrderIdempotencyMonitor(counter)
 	monitor.Interval = 10 * time.Millisecond
+	monitor.Logger = log.New(io.Discard, "", 0) // 10ms 주기 실패 로그가 출력을 뒤덮는다
+	before := testutil.ToFloat64(metrics.OrderIdempotencyMonitorErrorsTotal)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go monitor.Run(ctx)
 
-	require.Eventually(t, func() bool { return counter.callCount() >= 4 }, time.Second, 5*time.Millisecond)
-	assert.EqualValues(t, 5, monitor.LastValue(), "조회 실패가 gauge를 0으로 덮었다")
+	// 실패 counter가 3 오를 때까지 기다린다 — 첫 성공 조회는 이미 지나갔다는 뜻이다.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.OrderIdempotencyMonitorErrorsTotal) >= before+3
+	}, time.Second, 5*time.Millisecond, "조회 실패가 counter에 반영되지 않았다")
+	assert.EqualValues(t, 5, testutil.ToFloat64(metrics.OrderIdempotencyStalePending),
+		"조회 실패가 gauge를 0으로 덮었다")
+	assert.EqualValues(t, 5, monitor.LastValue())
 	assert.Positive(t, monitor.ErrorCount())
+	assert.Equal(t, 1, testutil.CollectAndCount(metrics.OrderIdempotencyMonitorErrorsTotal,
+		"order_idempotency_monitor_errors_total"), "지표 이름이 바뀌면 대시보드와 알람이 조용히 끊긴다")
 }
 
 // 임계 이전 시각으로 조회해야 "오래된 PENDING"만 잡힌다. time.Now()를 그대로 넘기면
@@ -2887,12 +2911,39 @@ func (m *OrderIdempotencyMonitor) threshold() time.Duration {
 
 - [ ] **Step 5: `cmd/main.go` 배선**
 
-`reconciliationWorker` 기동 바로 뒤에 넣는다.
+배선을 `main()` 안에 인라인으로 두면 그 줄을 지워도 어떤 테스트도 깨지지 않는다 —
+구현은 존재하지만 운영에서는 영원히 실행되지 않는 상태가 된다. 함수로 뺀다.
 
 ```go
-	idempotencyMonitor := service.NewOrderIdempotencyMonitor(
-		repository.NewOrderIdempotencyRepository(config.DB))
-	go idempotencyMonitor.Run(backgroundCtx)
+// startOrderIdempotencyMonitor는 hold 커밋 직후 프로세스가 죽어 남은 PENDING을 주기
+// 조회해 gauge로 노출한다 — 그 창에는 어떤 counter도 오르지 않으므로 유일한 관측 수단이다.
+//
+// main() 안에 인라인으로 두면 배선을 검증할 방법이 없어 함수로 뺐다.
+func startOrderIdempotencyMonitor(ctx context.Context, db *gorm.DB) *service.OrderIdempotencyMonitor {
+	monitor := service.NewOrderIdempotencyMonitor(repository.NewOrderIdempotencyRepository(db))
+	go monitor.Run(ctx)
+	return monitor
+}
+```
+
+`reconciliationWorker` 기동 바로 뒤에서 호출한다.
+
+```go
+	startOrderIdempotencyMonitor(backgroundCtx, config.DB)
+```
+
+배선 계약은 `cmd/order_idempotency_wiring_test.go`가 고정한다. 통합 테스트는 실제 DB에
+stale PENDING 한 건을 심고 gauge가 차오르는지 보아 repository 생성·goroutine 기동·gauge
+반영을 한 번에 검증한다. `main()`은 실행해 볼 수 없으므로 호출 자체는 소스로 고정한다.
+
+```go
+func TestMainStartsOrderIdempotencyMonitor(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(source), "startOrderIdempotencyMonitor(backgroundCtx, config.DB)",
+		"main()이 stale PENDING monitor를 기동하지 않는다")
+}
 ```
 
 - [ ] **Step 6: 통과 확인**
@@ -2903,21 +2954,47 @@ go build ./...
 go vet ./...
 ```
 
-조회가 `order_idempotency_pending_updated_at`을 실제로 쓰는지 확인한다. 테이블이 비어 있으면
-planner가 seq scan을 고르므로 `enable_seqscan = off`로 강제해 **경로가 존재하는지**를 본다.
+조회가 `order_idempotency_pending_updated_at`을 실제로 쓰는지 확인한다. 리터럴 EXPLAIN은
+증거가 되지 못한다 — 운영에서는 pgx가 prepared statement를 캐시하므로 **파라미터 값을 모른 채
+세우는 generic plan**을 봐야 한다. 테이블이 비어 있으면 planner가 seq scan을 고르므로
+`enable_seqscan = off`로 **경로가 존재하는지**를 본다.
 
 ```sql
 SET enable_seqscan = off;
-EXPLAIN SELECT count(*) FROM order_idempotency_keys
-WHERE outcome = 'PENDING' AND updated_at < now() - interval '5 minutes';
+SET plan_cache_mode = force_generic_plan;
+
+PREPARE q_literal(timestamptz) AS
+  SELECT count(*) FROM order_idempotency_keys
+  WHERE outcome = 'PENDING' AND updated_at < $1;
+EXPLAIN EXECUTE q_literal(now() - interval '5 minutes');
+
+PREPARE q_param(text, timestamptz) AS
+  SELECT count(*) FROM order_idempotency_keys
+  WHERE outcome = $1 AND updated_at < $2;
+EXPLAIN EXECUTE q_param('PENDING', now() - interval '5 minutes');
 ```
 
-기대: `Index Only Scan using order_idempotency_pending_updated_at`, `Index Cond`에는
+기대: `q_literal`은 `Index Only Scan using order_idempotency_pending_updated_at`, `Index Cond`에는
 `updated_at`만 남는다(`outcome` 조건은 부분 인덱스 predicate가 흡수한다).
+
+> **`outcome`은 파라미터로 넘기면 안 된다.** PostgreSQL은 파라미터화된 조건이 부분 인덱스
+> predicate를 만족함을 증명하지 못한다([공식 문서](https://www.postgresql.org/docs/17/indexes-partial.html)).
+> 실측에서 `q_param`은 `enable_seqscan = off`로 눌러도 Seq Scan(cost 1e10)으로 떨어졌다.
+> `outcome = 'PENDING'`을 SQL 리터럴로 고정하고 `updated_at`만 파라미터로 남긴다. 리터럴과
+> `model.OrderIdempotencyOutcomePending`의 일치는 repository 통합 테스트가 붙잡는다.
 
 > **실패 주입 fake는 "한 번만 실패"로 만들면 안 된다.** 다음 주기 조회가 값을 되돌려
 > 놓아 "실패 시 gauge를 0으로 덮는" 회귀를 놓친다(변이로 확인했다). `failFrom`처럼
 > **그 호출부터 계속 실패**하도록 만든다.
+
+> **`LastValue()`·`ErrorCount()`만 단언하면 지표를 검증한 것이 아니다.** 둘은 내부 복제값이라
+> `Gauge.Set`·`Counter.Inc`를 지워도 통과한다(변이로 확인했다). 프로젝트 기존 패턴대로
+> `testutil.ToFloat64`로 실제 지표를 읽고, `testutil.CollectAndCount(m, "이름")`으로 지표
+> 이름까지 고정한다 — 이름이 바뀌면 대시보드와 알람이 조용히 끊긴다.
+>
+> 대기 조건도 지표로 잡는다. `observe()`의 마지막 동작이 `Gauge.Set`이므로, fake의 호출 수가
+> 아니라 **gauge 값**을 `Eventually`로 기다려야 monitor가 값을 쓰기 전에 단언이 실행되는
+> 경쟁이 사라진다.
 
 - [ ] **Step 7: 커밋**
 

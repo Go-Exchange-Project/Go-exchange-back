@@ -460,7 +460,12 @@ follower의 응답은 어느 쪽 follower인지에 따라 다르다.
 | `OrderHandler.CreateOrder` | 헤더 파싱, 400/409/202 매핑, `idempotent_replay` |
 | `internal/metrics` | `order_idempotency_unknown_total`, `order_idempotency_outcome_update_failures_total`, `order_idempotency_stale_pending`(Gauge), `order_idempotency_monitor_errors_total` |
 | `internal/service/order_idempotency_monitor.go` | **전용 monitor** — 30초 주기 stale `PENDING` 조회로 gauge 갱신. 조회 실패 시 gauge 유지 + 오류 counter |
-| `cmd/main.go` | monitor를 `backgroundCtx`로 시작·종료 |
+| `cmd/main.go` | `startOrderIdempotencyMonitor(backgroundCtx, config.DB)`로 시작·종료 |
+
+> **gauge 조회는 `outcome = 'PENDING'`을 SQL 리터럴로 고정한다.** 파라미터로 넘기면
+> PostgreSQL이 generic plan에서 부분 인덱스 predicate와의 일치를 증명하지 못해
+> `order_idempotency_pending_updated_at`을 쓰지 못한다. 실측에서 파라미터 형태는
+> `enable_seqscan = off`로 눌러도 Seq Scan으로 떨어졌다.
 
 > **이 테이블은 AutoMigrate에 넣지 않는다.** B-1에서 확인한 대로, migration이 만든 UNIQUE를
 > GORM이 자기 명명규칙으로 DROP하려 해 두 번째 부팅부터 실패한다(SQLSTATE 42704).

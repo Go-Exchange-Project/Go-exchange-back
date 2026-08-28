@@ -179,10 +179,15 @@ func (r *OrderIdempotencyRepository) DeleteByIDs(ids []uint64) error {
 
 // CountStalePending은 stale PENDING gauge의 원천입니다.
 // order_idempotency_pending_updated_at 부분 인덱스가 이 조회를 받칩니다.
+//
+// outcome은 파라미터가 아니라 SQL 리터럴로 고정합니다. 파라미터로 넘기면 PostgreSQL이
+// generic plan에서 부분 인덱스 predicate(outcome = 'PENDING')와의 일치를 증명하지 못해
+// 인덱스를 쓰지 못합니다. https://www.postgresql.org/docs/17/indexes-partial.html
+// 리터럴과 model.OrderIdempotencyOutcomePending의 일치는 통합 테스트가 고정합니다.
 func (r *OrderIdempotencyRepository) CountStalePending(olderThan time.Time) (int64, error) {
 	var count int64
 	err := r.DB.Model(&model.OrderIdempotencyKey{}).
-		Where("outcome = ? AND updated_at < ?", model.OrderIdempotencyOutcomePending, olderThan).
+		Where("outcome = 'PENDING' AND updated_at < ?", olderThan).
 		Count(&count).Error
 	return count, err
 }

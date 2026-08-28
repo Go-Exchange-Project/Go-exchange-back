@@ -3,10 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -64,8 +68,14 @@ func TestOrderIdempotencyMonitorQueriesImmediately(t *testing.T) {
 	done := make(chan struct{})
 	go func() { monitor.Run(ctx); close(done) }()
 
-	require.Eventually(t, func() bool { return counter.callCount() >= 1 }, time.Second, 5*time.Millisecond)
+	// gauge Set이 observe()의 마지막 동작이므로, gauge가 7이면 조회도 저장도 끝났다.
+	// 호출 수만 기다리면 monitor가 값을 쓰기 전에 단언이 실행될 수 있다.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.OrderIdempotencyStalePending) == 7
+	}, time.Second, 5*time.Millisecond, "조회 결과가 gauge에 반영되지 않았다")
 	assert.EqualValues(t, 7, monitor.LastValue())
+	assert.Equal(t, 1, testutil.CollectAndCount(metrics.OrderIdempotencyStalePending,
+		"order_idempotency_stale_pending"), "지표 이름이 바뀌면 대시보드와 알람이 조용히 끊긴다")
 
 	cancel()
 	select {
@@ -83,14 +93,23 @@ func TestOrderIdempotencyMonitorKeepsLastValueOnError(t *testing.T) {
 	counter := &fakeStaleCounter{counts: []int64{5}, failFrom: 2}
 	monitor := NewOrderIdempotencyMonitor(counter)
 	monitor.Interval = 10 * time.Millisecond
+	monitor.Logger = log.New(io.Discard, "", 0) // 10ms 주기 실패 로그가 출력을 뒤덮는다
+	before := testutil.ToFloat64(metrics.OrderIdempotencyMonitorErrorsTotal)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go monitor.Run(ctx)
 
-	require.Eventually(t, func() bool { return counter.callCount() >= 4 }, time.Second, 5*time.Millisecond)
-	assert.EqualValues(t, 5, monitor.LastValue(), "조회 실패가 gauge를 0으로 덮었다")
+	// 실패 counter가 3 오를 때까지 기다린다 — 첫 성공 조회는 이미 지나갔다는 뜻이다.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.OrderIdempotencyMonitorErrorsTotal) >= before+3
+	}, time.Second, 5*time.Millisecond, "조회 실패가 counter에 반영되지 않았다")
+	assert.EqualValues(t, 5, testutil.ToFloat64(metrics.OrderIdempotencyStalePending),
+		"조회 실패가 gauge를 0으로 덮었다")
+	assert.EqualValues(t, 5, monitor.LastValue())
 	assert.Positive(t, monitor.ErrorCount())
+	assert.Equal(t, 1, testutil.CollectAndCount(metrics.OrderIdempotencyMonitorErrorsTotal,
+		"order_idempotency_monitor_errors_total"), "지표 이름이 바뀌면 대시보드와 알람이 조용히 끊긴다")
 }
 
 // 임계 이전 시각으로 조회해야 "오래된 PENDING"만 잡힌다. time.Now()를 그대로 넘기면

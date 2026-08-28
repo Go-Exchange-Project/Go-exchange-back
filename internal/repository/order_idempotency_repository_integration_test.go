@@ -254,6 +254,11 @@ func TestIntegrationOrderIdempotencyStateChangesRejectZeroRows(t *testing.T) {
 }
 
 func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
+	// CountStalePending은 부분 인덱스를 쓰려고 outcome을 SQL 리터럴로 고정한다.
+	// 상수가 바뀌면 조회는 조용히 아무것도 세지 않게 되므로 여기서 붙잡는다.
+	require.Equal(t, "PENDING", string(model.OrderIdempotencyOutcomePending),
+		"CountStalePending의 SQL 리터럴 'PENDING'과 상수가 어긋났다")
+
 	db := openRepositoryIntegrationDB(t)
 	repo := NewOrderIdempotencyRepository(db)
 	userID := uniqueIdemUserID()
