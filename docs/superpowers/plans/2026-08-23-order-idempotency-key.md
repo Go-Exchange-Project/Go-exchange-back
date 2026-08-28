@@ -3151,9 +3151,14 @@ func TestIntegrationCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 |---|---|---|
 | `TestIntegrationHoldBatchAllFailingCleansKeys` (7c) | 잔액 0인 사용자 2명이 한 배치 | 두 사용자 모두 키 0건, 주문 0건 |
 | `TestIntegrationCreateOrderRejectedReplaysSameOrder` (8) | `TrySubmitOrder`가 항상 false인 fake engine | 첫 호출이 오류 + `order_id`, 레코드 `outcome=REJECTED`, 같은 키 재호출이 **같은 `order_id`**, 주문 1건, `holdEntryCount == 1`, 제출 1회 |
-| `TestIntegrationCreateOrderCompensationIsAtomic` (8b) | `orders`의 `REJECTED` UPDATE에서만 실패하는 trigger | hold가 풀리지 않음(지갑 `locked_balance` 불변) **AND** 주문이 `REJECTED`가 아님 — 부분 반영 0. outcome은 트랜잭션 밖 best-effort 기록이 성공하므로 `UNKNOWN`이다(`PENDING`이 아니다) |
+| `TestIntegrationCreateOrderCompensationIsAtomic` (8b) | `orders`의 `REJECTED` UPDATE에서만 실패하는 trigger | `locked_balance`가 보상 전 값 **`100.05`와 정확히 같음** **AND** 주문이 `REJECTED`가 아님 — 부분 반영 0. outcome은 트랜잭션 밖 best-effort 기록이 성공하므로 `UNKNOWN`이다(`PENDING`이 아니다) |
+| `TestIntegrationCreateOrderUnknownReplaysSameOrder` (8c) | 8b와 같은 trigger, 같은 키로 재요청 | 같은 `order_id`, `Replay == true`, `Outcome == UNKNOWN`, 주문·키·hold·제출 각각 여전히 1, `locked_balance`도 그대로 |
 | `TestIntegrationCreateOrderUnknownUpdateFailureKeepsPending` (8d) | `orders` REJECTED UPDATE와 `outcome='UNKNOWN'` UPDATE를 모두 막는 trigger | `outcome == PENDING`(UNKNOWN 기록까지 실패한 경우다), 주문 1건, `OrderIdempotencyOutcomeUpdateFailuresTotal` **정확히 +1** |
-| `TestIntegrationCreateOrderAcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `outcome='ACCEPTED'` UPDATE만 막는 trigger | `outcome == PENDING`, counter +1, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, 제출 1회 |
+| `TestIntegrationCreateOrderAcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `outcome='ACCEPTED'` UPDATE만 막는 trigger | **최초 응답 `Outcome == ACCEPTED`**, 저장된 `outcome == PENDING`, counter +1, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, 제출 1회 |
+
+> **`locked_balance != 0`은 부분 해제를 놓친다.** 해제 금액에서 수수료가 빠지는 버그를
+> 넣으면 잔여가 `0.05`로 남아 "0이 아니다"는 통과한다(변이로 확인했다). 보상 전 값과
+> **정확히 같은지**를 본다.
 
 > **8e의 최초 응답은 `ACCEPTED`다.** 엔진이 실제로 접수했으므로 응답은 사실을 말한다.
 > 저장된 outcome만 `PENDING`으로 뒤처지고, 재요청은 202(진행 중)로 내려간다 — 안전한
@@ -3172,6 +3177,13 @@ func TestIntegrationCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 | `nonatomic` | hold 해제를 보상 트랜잭션 **밖에서** 한다 | 8b |
 | `nounknownmetric` | UNKNOWN 기록 실패를 counter에 남기지 않는다 | 8d |
 | `noacceptedmetric` | ACCEPTED 기록 실패를 counter에 남기지 않는다 | 8e |
+| `partialrelease` | hold 해제를 트랜잭션 밖에서 하고 해제 금액에서 수수료를 뺀다 | 8b (`want=100.05 got=0.05`) |
+| `replayoutcome` | replay가 저장된 outcome 대신 항상 `ACCEPTED`를 보고한다 | 8c |
+| `acceptedreportspending` | 접수 성공 응답을 `PENDING`으로 낮춘다 | 8e |
+
+> **공유 테스트 DB에 행을 남기지 않는다.** 7c는 `seedHoldWallets`를 두 번 불러 KRW 0인
+> 사용자 2명을 만드는데, 이때 생기는 임시 buyer도 `cleanupServiceUsers`에 넣어야 한다.
+> 넣지 않으면 실행마다 `wallets`에 4행이 쌓인다. 실행 전후 `wallets` 건수가 같아야 한다.
 
 - [ ] **Step 3: 전체 확인**
 

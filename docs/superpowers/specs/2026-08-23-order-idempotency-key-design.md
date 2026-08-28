@@ -628,7 +628,7 @@ END $$;
 | 7b | **혼합 배치(성공 1 + 잔액 부족 1)** | 실패 키가 **DB에 없고** 재사용 가능. 성공 키는 남음 |
 | 7c | **전원 실패 배치** | 조기 반환 경로에서도 삽입한 키 전부 삭제됨 |
 | 8 | 엔진 접수 실패 후 같은 키 재시도 → **새 주문 없음** | 같은 `order_id`, `outcome=REJECTED`, 주문 1건 |
-| 8b | **보상 성공과 `REJECTED` 기록이 함께 커밋되거나 함께 롤백** | 보상 트랜잭션 중간 실패를 강제 → hold도 안 풀리고 outcome도 `PENDING`(부분 반영 0) |
+| 8b | **보상 성공과 `REJECTED` 기록이 함께 커밋되거나 함께 롤백** | 보상 트랜잭션 중간 실패를 강제 → hold가 보상 전 값 그대로이고 주문도 `REJECTED`가 아니다(부분 반영 0). outcome은 트랜잭션 **밖** best-effort 기록이 성공하므로 `UNKNOWN`이다 — `PENDING`은 그 기록마저 실패한 8d다 |
 | 8c | **hold 해제 실패 → `outcome=UNKNOWN`, 키 유지, 5xx** | 재시도가 같은 `order_id` 반환, hold 중복 0 |
 | 8d | **보상 실패 + `UNKNOWN` UPDATE도 실패 → `PENDING` 유지** | 중복 주문 0, `outcome_update_failures_total` 증가 |
 | 8e | **엔진 접수 성공 후 `ACCEPTED` UPDATE 실패 → `PENDING` 유지** | 같은 키 재요청은 **202**, 주문·hold·엔진 제출 여전히 **각 1** |

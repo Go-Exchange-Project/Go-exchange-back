@@ -10,6 +10,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -32,13 +33,17 @@ func idemRecordOf(t *testing.T, db *gorm.DB, userID uint) model.OrderIdempotency
 	return record
 }
 
-func lockedKRWOf(t *testing.T, db *gorm.DB, userID uint) string {
+func lockedKRWOf(t *testing.T, db *gorm.DB, userID uint) decimal.Decimal {
 	t.Helper()
 	var wallet model.Wallet
 	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
 		First(&wallet).Error)
-	return wallet.LockedBalance.String()
+	return wallet.LockedBalance
 }
+
+// idemOrderInput의 매수 지정가 1건이 잡는 hold: 100(price) * 1(amount) * 1.0005(수수료).
+// 부분 해제를 잡으려면 "0이 아니다"가 아니라 이 값과 같아야 한다.
+var idemExpectedHold = decimal.RequireFromString("100.05")
 
 // 검증 4. 애플리케이션 lock 없이 DB UNIQUE가 직렬화한다. 판정은 주문 상태가 아니라
 // 원장 hold 건수와 엔진 제출 횟수다 — 상태만 보면 "hold 1회·엔진 제출 2회"를 놓친다.
@@ -98,12 +103,15 @@ func TestIntegrationHoldBatchAllFailingCleansKeys(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	first := serviceTestUserID(791)
 	second := serviceTestUserID(792)
-	defer cleanupServiceUsers(t, db, first, second)
+	// seedHoldWallets의 두 번째 인자가 KRW 0이다. 둘 다 0으로 만들려고 두 번 부르는데,
+	// 이때 생기는 임시 buyer 지갑도 정리 대상에 넣어야 공유 DB에 4행이 남지 않는다.
+	firstFiller := serviceTestUserID(793)
+	secondFiller := serviceTestUserID(794)
+	defer cleanupServiceUsers(t, db, first, second, firstFiller, secondFiller)
 	defer cleanupIdemKeys(t, db, first)
 	defer cleanupIdemKeys(t, db, second)
-	// seedHoldWallets의 두 번째 인자가 KRW 0이다. 둘 다 0으로 만들려고 두 번 부른다.
-	seedHoldWallets(t, db, serviceTestUserID(793), first)
-	seedHoldWallets(t, db, serviceTestUserID(794), second)
+	seedHoldWallets(t, db, firstFiller, first)
+	seedHoldWallets(t, db, secondFiller, second)
 
 	coordinator := newIdemHoldCoordinator(db)
 	results, err := coordinator.HoldBatch([]holdRequest{
@@ -179,11 +187,52 @@ func TestIntegrationCreateOrderCompensationIsAtomic(t *testing.T) {
 	require.NoError(t, db.First(&order, result.Order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, order.Status,
 		"주문만 REJECTED로 넘어갔다 — 보상이 부분 반영됐다")
-	assert.NotEqual(t, "0", lockedKRWOf(t, db, userID),
-		"hold만 풀렸다 — 보상이 부분 반영됐다")
+	locked := lockedKRWOf(t, db, userID)
+	assert.True(t, idemExpectedHold.Equal(locked),
+		"hold가 보상 전 값과 다르다 — 부분 해제됐다: want=%s got=%s", idemExpectedHold, locked)
 
 	assert.Equal(t, model.OrderIdempotencyOutcomeUnknown, idemRecordOf(t, db, userID).Outcome,
 		"보상 실패를 UNKNOWN으로 남기지 않았다")
+}
+
+// 검증 8c. UNKNOWN은 사람이 확인해야 하는 상태다. 같은 키 재요청은 그 주문을 그대로
+// 가리켜야 하며, 다시 hold하거나 다시 제출하면 안 된다.
+func TestIntegrationCreateOrderUnknownReplaysSameOrder(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(799)
+	defer cleanupServiceUsers(t, db, userID)
+	defer cleanupIdemKeys(t, db, userID)
+	seedIdemBuyerWallet(t, db, userID, 10000)
+
+	engine := rejectingIdemEngine()
+	orderService := newIdemOrderService(db, engine)
+
+	testdb.BlockUpdate(t, db, "orders",
+		fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
+
+	first, err := orderService.CreateOrder(idemOrderInput(userID, "unknown-replay-key", "1"))
+	require.Error(t, err)
+	require.NotNil(t, first)
+	require.NotZero(t, first.Order.ID)
+	require.Equal(t, model.OrderIdempotencyOutcomeUnknown, first.Outcome)
+
+	replay, err := orderService.CreateOrder(idemOrderInput(userID, "unknown-replay-key", "1"))
+	require.NoError(t, err, "저장된 UNKNOWN 결과의 재요청이 오류가 됐다")
+	require.NotNil(t, replay)
+	assert.True(t, replay.Replay)
+	assert.Equal(t, first.Order.ID, replay.Order.ID, "재요청이 다른 주문을 가리켰다")
+	assert.Equal(t, model.OrderIdempotencyOutcomeUnknown, replay.Outcome,
+		"저장된 UNKNOWN을 그대로 돌려주지 않았다")
+
+	assert.EqualValues(t, 1, countOrders(t, db, userID), "재요청이 새 주문을 만들었다")
+	assert.EqualValues(t, 1, countHoldEntries(t, db, first.Order.ID), "재요청이 다시 hold했다")
+	assert.EqualValues(t, 1, engine.submits.Load(), "재요청이 엔진에 다시 제출됐다")
+	assert.EqualValues(t, 1, countIdemKeys(t, db, userID), "재요청이 키를 하나 더 만들었다")
+
+	// 보상이 실패했으므로 hold는 잡힌 채로 남아 있어야 한다 — 재요청이 이를 바꾸면 안 된다.
+	locked := lockedKRWOf(t, db, userID)
+	assert.True(t, idemExpectedHold.Equal(locked),
+		"재요청이 hold를 건드렸다: want=%s got=%s", idemExpectedHold, locked)
 }
 
 // 검증 8d. UNKNOWN 기록마저 실패하면 durable outcome은 PENDING에 머문다. 이 경로는
@@ -239,6 +288,10 @@ func TestIntegrationCreateOrderAcceptedUpdateFailureKeepsPending(t *testing.T) {
 	first, err := orderService.CreateOrder(idemOrderInput(userID, "accepted-fail-key", "1"))
 	require.NoError(t, err, "ACCEPTED 기록 실패가 접수 자체를 실패시켰다")
 	require.NotZero(t, first.Order.ID)
+	// 엔진이 실제로 접수했으므로 최초 응답은 ACCEPTED다. 저장된 outcome만 뒤처진다 —
+	// 서버가 결과를 정말 모르는 UNKNOWN 경로에서만 응답을 낮춘다.
+	assert.Equal(t, model.OrderIdempotencyOutcomeAccepted, first.Outcome,
+		"엔진이 접수했는데 최초 응답이 ACCEPTED가 아니다")
 	assert.Equal(t, before+1, testutil.ToFloat64(metrics.OrderIdempotencyOutcomeUpdateFailuresTotal),
 		"ACCEPTED 기록 실패가 counter에 잡히지 않았다")
 
