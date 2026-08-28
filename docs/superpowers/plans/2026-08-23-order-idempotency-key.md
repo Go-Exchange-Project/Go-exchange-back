@@ -3015,145 +3015,116 @@ EXPLAIN EXECUTE q_param('PENDING', now() - interval '5 minutes');
 - [ ] **Step 1: 하니스와 동시성 검증 작성**
 
 핵심은 **판정 기준**이다. 주문 상태가 아니라 **`ORDER_HOLD` 원장 건수**와
-**fake engine의 `TrySubmitOrder` 호출 수**로 판정한다.
+**fake engine의 `TrySubmitOrder` 호출 수**로 판정한다 — 상태만 보면 "hold 1회·엔진 제출
+2회"를 놓친다. 엔진 더블과 지갑 시드는 Task 5가 만든 `countingAcceptanceEngine`,
+`seedIdemBuyerWallet`, `idemOrderInput`, `countHoldEntries`를 그대로 쓴다.
 
 ```go
-// countingEngine은 엔진 제출 횟수를 센다. 원장만 보면 "hold 1회 · 엔진 제출 2회"를
-// 놓친다 — owner/follower 분리가 없으면 정확히 그 상태가 된다.
-type countingEngine struct {
-	*matching.MatchingEngine
-	mu      sync.Mutex
-	submits int
+package service
+
+import (
+	"fmt"
+	"sync"
+	"testing"
+
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+func newIdemOrderService(db *gorm.DB, engine *countingAcceptanceEngine) *OrderService {
+	return NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
 }
 
-func (e *countingEngine) TrySubmitOrder(order *matching.Order, within time.Duration) bool {
-	e.mu.Lock()
-	e.submits++
-	e.mu.Unlock()
-	return e.MatchingEngine.TrySubmitOrder(order, within)
+func rejectingIdemEngine() *countingAcceptanceEngine {
+	return &countingAcceptanceEngine{
+		fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: false},
+	}
 }
 
-func (e *countingEngine) submitCount() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.submits
-}
-
-func holdEntryCount(t *testing.T, db *gorm.DB, userID uint) int64 {
+func idemRecordOf(t *testing.T, db *gorm.DB, userID uint) model.OrderIdempotencyKey {
 	t.Helper()
-	var count int64
-	require.NoError(t, db.Model(&model.LedgerEntry{}).
-		Where("user_id = ? AND entry_type = ?", userID, model.LedgerEntryTypeOrderHold).
-		Count(&count).Error)
-	return count
+	var record model.OrderIdempotencyKey
+	require.NoError(t, db.Where("user_id = ?", userID).First(&record).Error)
+	return record
 }
 
-// 검증 4. 애플리케이션 lock 없이 DB UNIQUE가 직렬화한다.
-func TestIntegrationOrderIdempotencyConcurrentSameKeyCreatesOneOrder(t *testing.T) {
-	db := openServiceIntegrationDB(t)
-	userID := serviceTestUserID(60)
-	defer cleanupServiceUsers(t, db, userID)
-	seedKRWWallet(t, db, userID, decimal.NewFromInt(100_000_000))
+func lockedKRWOf(t *testing.T, db *gorm.DB, userID uint) string {
+	t.Helper()
+	var wallet model.Wallet
+	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
+		First(&wallet).Error)
+	return wallet.LockedBalance.String()
+}
 
-	engine := &countingEngine{MatchingEngine: matching.NewMatchingEngine()}
-	engine.Start()
-	svc := newIdempotentOrderService(db, engine)
+// 검증 4. 애플리케이션 lock 없이 DB UNIQUE가 직렬화한다. 판정은 주문 상태가 아니라
+// 원장 hold 건수와 엔진 제출 횟수다 — 상태만 보면 "hold 1회·엔진 제출 2회"를 놓친다.
+func TestIntegrationCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(790)
+	defer cleanupServiceUsers(t, db, userID)
+	defer cleanupIdemKeys(t, db, userID)
+	seedIdemBuyerWallet(t, db, userID, 100_000_000)
+
+	engine := &countingAcceptanceEngine{
+		fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true},
+	}
+	orderService := newIdemOrderService(db, engine)
 
 	const concurrency = 100
 	results := make([]*CreateOrderResult, concurrency)
 	errs := make([]error, concurrency)
-	var wg sync.WaitGroup
 	start := make(chan struct{})
+	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			<-start
-			results[i], errs[i] = svc.CreateOrder(CreateOrderInput{
-				UserID: userID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
-				Price: "100", Amount: "1", IdempotencyKey: "concurrent-key",
-			})
+			<-start // 전부 같은 순간에 출발시켜 UNIQUE 경합을 실제로 만든다
+			results[i], errs[i] = orderService.CreateOrder(idemOrderInput(userID, "concurrent-key", "1"))
 		}(i)
 	}
 	close(start)
 	wg.Wait()
 
+	owners := 0
 	var orderID uint
 	for i := range results {
 		require.NoError(t, errs[i], "goroutine %d", i)
 		require.NotNil(t, results[i])
+		require.NotZero(t, results[i].Order.ID, "goroutine %d가 order_id 없는 결과를 받았다", i)
 		if orderID == 0 {
 			orderID = results[i].Order.ID
 		}
 		assert.Equal(t, orderID, results[i].Order.ID, "goroutine %d가 다른 주문을 받았다", i)
+		if !results[i].Replay {
+			owners++
+		}
 	}
+	assert.Equal(t, 1, owners, "owner가 하나가 아니다")
 
-	// 판정은 상태가 아니라 원장 건수와 엔진 제출 횟수다.
-	// 원장만 보면 "hold 1회 · 엔진 제출 2회"를 놓친다.
-	assert.EqualValues(t, 1, holdEntryCount(t, db, userID), "hold가 두 번 잡혔다")
-	assert.Equal(t, 1, engine.submitCount(), "엔진에 두 번 제출됐다")
-
-	var orders int64
-	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", userID).Count(&orders).Error)
-	assert.EqualValues(t, 1, orders)
-}
-
-// 검증 7b. HoldBatch는 잔액 부족을 격리하고 나머지와 함께 커밋하므로,
-// 명시적으로 지우지 않으면 실패한 요청의 키까지 커밋된다.
-func TestIntegrationOrderIdempotencyMixedBatchDoesNotConsumeFailedKey(t *testing.T) {
-	db := openServiceIntegrationDB(t)
-	richID := serviceTestUserID(61)
-	poorID := serviceTestUserID(62)
-	defer cleanupServiceUsers(t, db, richID, poorID)
-	seedKRWWallet(t, db, richID, decimal.NewFromInt(100_000_000))
-	seedKRWWallet(t, db, poorID, decimal.Zero) // 잔액 부족
-
-	engine := &countingEngine{MatchingEngine: matching.NewMatchingEngine()}
-	engine.Start()
-	svc := newIdempotentOrderService(db, engine)
-
-	var wg sync.WaitGroup
-	var poorErr error
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = svc.CreateOrder(CreateOrderInput{
-			UserID: richID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
-			Price: "100", Amount: "1", IdempotencyKey: "rich-key",
-		})
-	}()
-	go func() {
-		defer wg.Done()
-		_, poorErr = svc.CreateOrder(CreateOrderInput{
-			UserID: poorID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
-			Price: "100", Amount: "1", IdempotencyKey: "poor-key",
-		})
-	}()
-	wg.Wait()
-
-	require.Error(t, poorErr, "잔액 부족이 성공했다")
-
-	idemRepo := repository.NewOrderIdempotencyRepository(db)
-	failed, err := idemRepo.FindByUserKeys([]repository.UserKeyPair{{UserID: poorID, Key: "poor-key"}})
-	require.NoError(t, err)
-	assert.Empty(t, failed, "검증 실패한 요청의 키가 커밋됐다 — 사용자가 그 키를 다시 쓸 수 없다")
-
-	kept, err := idemRepo.FindByUserKeys([]repository.UserKeyPair{{UserID: richID, Key: "rich-key"}})
-	require.NoError(t, err)
-	assert.Len(t, kept, 1, "성공한 요청의 키까지 지워졌다")
-
-	// 같은 키로 다시 시도하면 이번엔 성공해야 한다.
-	seedKRWWallet(t, db, poorID, decimal.NewFromInt(100_000_000))
-	retry, err := svc.CreateOrder(CreateOrderInput{
-		UserID: poorID, CoinSymbol: "BTC", Side: "BUY", OrderType: "LIMIT",
-		Price: "100", Amount: "1", IdempotencyKey: "poor-key",
-	})
-	require.NoError(t, err)
-	assert.False(t, retry.Replay, "재사용 가능해야 할 키가 replay로 처리됐다")
+	assert.EqualValues(t, 1, countOrders(t, db, userID))
+	assert.EqualValues(t, 1, countIdemKeys(t, db, userID))
+	assert.EqualValues(t, 1, countHoldEntries(t, db, orderID), "hold가 두 번 잡혔다")
+	assert.EqualValues(t, 1, engine.submits.Load(), "엔진에 두 번 제출됐다")
 }
 ```
 
-나머지 7개는 같은 하니스 위에서 다음 단언을 갖는다.
+**먼저 이미 커버된 계약을 다시 쓰지 않는다.** Task 4~7에서 다음이 이미 고정됐다.
+
+| 검증 | 이미 고정한 테스트 |
+|---|---|
+| 4b 같은 배치 같은 키 | `TestIntegrationCreateOrderSameBatchDuplicateIsNotUnavailable` (owner 200 / follower 202, hold 1, 제출 1) |
+| 7b 혼합 배치의 실패 키 | `TestIntegrationHoldBatchFailedValidationReleasesKey` + `TestIntegrationCreateOrderFailedValidationDoesNotConsumeKey` |
+| 8f `PENDING` 창의 재요청 → 202 | `TestIntegrationCreateOrderHandlerMapsOutcomeToStatus` |
+| 8g stale `PENDING` 관측 | `TestIntegrationStartOrderIdempotencyMonitorPublishesGauge` (실제 DB에 stale 행을 심고 gauge를 확인) |
+
+나머지는 같은 하니스 위에서 다음 단언을 갖는다.
 
 > **실패 주입은 repository wrapper로 할 수 없다.** `OrderService`의 저장소 필드는 인터페이스가
 > 아니라 concrete pointer(`*repository.OrderRepository` 등)라, B-1의 `blockableOutboxRepo`
@@ -3162,51 +3133,45 @@ func TestIntegrationOrderIdempotencyMixedBatchDoesNotConsumeFailedKey(t *testing
 >
 > **trigger 함수도 영구 객체다.** 이름을 고정하면 다음 실행의 `CREATE FUNCTION`이 충돌하고,
 > `DROP TRIGGER`만 하면 함수가 공유 DB에 계속 쌓인다. 테스트마다 고유한 이름을 쓰고
-> cleanup에서 **trigger와 function을 모두** 지운다.
+> cleanup에서 **trigger와 function을 모두** 지운다. 이 불변식이 두 벌로 갈라지면 한쪽이
+> 틀렸을 때 공유 DB에 함수가 쌓이므로, `internal/testdb.BlockUpdate`로 한 곳에 둔다
+> (Task 6의 handler 테스트도 같은 함수를 쓴다).
 >
 > ```go
-> suffix := fmt.Sprintf("%d", time.Now().UnixNano()) // 테스트마다 고유
-> fn := "fail_order_reject_" + suffix
-> trg := fn + "_trg"
->
-> require.NoError(t, db.Exec(fmt.Sprintf(`
-> CREATE FUNCTION %s() RETURNS trigger AS $$
-> BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql`, fn)).Error)
->
-> // 함수 생성 직후에 등록한다. 트리거 생성이 실패하면 require.NoError가 테스트를
-> // 중단하므로, 뒤에 등록하면 함수가 공유 DB에 그대로 남는다.
-> t.Cleanup(func() {
-> 	require.NoError(t, db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON orders`, trg)).Error)
-> 	require.NoError(t, db.Exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn)).Error)
-> })
->
-> require.NoError(t, db.Exec(fmt.Sprintf(`
-> CREATE TRIGGER %s BEFORE UPDATE ON orders
-> FOR EACH ROW WHEN (NEW.status = 'REJECTED' AND NEW.id = %d)
-> EXECUTE FUNCTION %s()`, trg, orderID, fn)).Error)
+> testdb.BlockUpdate(t, db, "orders",
+> 	fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
+> testdb.BlockUpdate(t, db, "order_idempotency_keys",
+> 	fmt.Sprintf("NEW.outcome = 'UNKNOWN' AND NEW.user_id = %d", userID))
 > ```
 >
-> `order_idempotency_keys`의 `outcome` 전이도 같은 방식으로 막는다(`NEW.outcome = 'REJECTED'`,
-> `'UNKNOWN'`, `'ACCEPTED'`). 주문 ID·레코드 ID로 조건을 좁혀 다른 테스트에 영향을 주지 않는다.
+> 사용자 ID·주문 ID로 조건을 좁혀 다른 테스트에 영향을 주지 않는다. 실행 뒤에는
+> `pg_proc`에 `fail_%` 함수가, `pg_trigger`에 `fail_%` 트리거가 0건이어야 한다.
 
 | 테스트 | 준비 | 단언 |
 |---|---|---|
-| `...SameBatchSameKey` (4b) | `HoldCoordinator.BatchSize`를 키워 두 요청이 한 배치에 들어가게 함 | 두 결과의 `Order.ID` 동일, `holdEntryCount == 1`, `engine.submitCount() == 1` |
-| `...AllFailingBatchCleansKeys` (7c) | 잔액 0인 사용자 2명이 한 배치 | 두 키 모두 `FindByUserKeys`가 빈 결과, 주문 0건 |
-| `...RejectedReplaysSameOrder` (8) | `TrySubmitOrder`가 항상 false인 fake engine | 첫 호출 503, 레코드 `outcome=REJECTED`, 같은 키 재호출이 **같은 `order_id`**, 주문 1건, `holdEntryCount == 1` |
-| `...CompensationIsAtomic` (8b) | `orders`의 `REJECTED` UPDATE에서만 실패하는 trigger | hold가 풀리지 않음(지갑 `locked_balance` 불변) **AND** 주문이 `REJECTED`가 아님 — 부분 반영 0. outcome은 트랜잭션 밖 best-effort 기록이 성공하므로 `UNKNOWN`이다(`PENDING`이 아니다) |
-| `...UnknownUpdateFailureKeepsPending` (8d) | `orders` REJECTED UPDATE와 `outcome='UNKNOWN'` UPDATE를 모두 막는 trigger | `outcome == PENDING`(UNKNOWN 기록까지 실패한 경우다), 주문 1건, `OrderIdempotencyOutcomeUpdateFailuresTotal` 증가 |
-| `...AcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `outcome='ACCEPTED'` UPDATE만 막는 trigger | `outcome == PENDING`, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, `engine.submitCount() == 1` |
-| `...StalePendingIsObserved` (8g) | hold 커밋 후 `UpdateOutcome`을 건너뛰고, 레코드의 `updated_at`을 1시간 전으로 밀어 프로세스 종료를 모사 | `NewOrderIdempotencyMonitor(repo)`의 `Run`을 짧은 `Interval`로 돌린 뒤 `LastValue() >= 1` |
+| `TestIntegrationHoldBatchAllFailingCleansKeys` (7c) | 잔액 0인 사용자 2명이 한 배치 | 두 사용자 모두 키 0건, 주문 0건 |
+| `TestIntegrationCreateOrderRejectedReplaysSameOrder` (8) | `TrySubmitOrder`가 항상 false인 fake engine | 첫 호출이 오류 + `order_id`, 레코드 `outcome=REJECTED`, 같은 키 재호출이 **같은 `order_id`**, 주문 1건, `holdEntryCount == 1`, 제출 1회 |
+| `TestIntegrationCreateOrderCompensationIsAtomic` (8b) | `orders`의 `REJECTED` UPDATE에서만 실패하는 trigger | hold가 풀리지 않음(지갑 `locked_balance` 불변) **AND** 주문이 `REJECTED`가 아님 — 부분 반영 0. outcome은 트랜잭션 밖 best-effort 기록이 성공하므로 `UNKNOWN`이다(`PENDING`이 아니다) |
+| `TestIntegrationCreateOrderUnknownUpdateFailureKeepsPending` (8d) | `orders` REJECTED UPDATE와 `outcome='UNKNOWN'` UPDATE를 모두 막는 trigger | `outcome == PENDING`(UNKNOWN 기록까지 실패한 경우다), 주문 1건, `OrderIdempotencyOutcomeUpdateFailuresTotal` **정확히 +1** |
+| `TestIntegrationCreateOrderAcceptedUpdateFailureKeepsPending` (8e) | 엔진 제출은 성공, `outcome='ACCEPTED'` UPDATE만 막는 trigger | `outcome == PENDING`, counter +1, 같은 키 재호출이 `Replay == true`이고 `Outcome == PENDING`, `holdEntryCount == 1`, 제출 1회 |
 
-`8f`(`PENDING` 창의 재요청 → 202)는 Task 6의 handler 테스트에서 `outcome`을 `PENDING`으로
-고정한 뒤 재요청해 **202**를 확인한다.
+> **8e의 최초 응답은 `ACCEPTED`다.** 엔진이 실제로 접수했으므로 응답은 사실을 말한다.
+> 저장된 outcome만 `PENDING`으로 뒤처지고, 재요청은 202(진행 중)로 내려간다 — 안전한
+> 방향의 불일치다. 서버가 결과를 정말 모르는 `UNKNOWN` 경로에서만 응답을 `PENDING`으로
+> 낮춘다.
 
 - [ ] **Step 2: 각 테스트를 RED로 확인한 뒤 통과시킨다**
 
-각 시나리오마다 관련 구현을 되돌려 실패를 먼저 본다. 특히:
-- owner/follower 분리를 제거하면 `submitCount()`가 2가 되는지
-- 미커밋 키 정리를 제거하면 실패 키가 남는지
+각 시나리오마다 그 테스트가 고정하는 구현만 되돌려 실패를 먼저 본다.
+
+| 변이 | 되돌리는 것 | 실패해야 할 테스트 |
+|---|---|---|
+| `nofollower` | 키 충돌을 `holdRoleFollower`로 표시하지 않는다 | 동시성(4) |
+| `latecleanup` | 실패 키 정리를 전원 실패 조기 반환 **뒤로** 옮긴다 | 7c |
+| `noreplayid` | replay가 저장된 `order_id`를 채우지 않는다 | 8 |
+| `nonatomic` | hold 해제를 보상 트랜잭션 **밖에서** 한다 | 8b |
+| `nounknownmetric` | UNKNOWN 기록 실패를 counter에 남기지 않는다 | 8d |
+| `noacceptedmetric` | ACCEPTED 기록 실패를 counter에 남기지 않는다 | 8e |
 
 - [ ] **Step 3: 전체 확인**
 

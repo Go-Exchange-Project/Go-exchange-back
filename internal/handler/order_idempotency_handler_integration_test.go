@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -281,7 +280,7 @@ func TestIntegrationCreateOrderHandlerFailedCompensationReportsUnknown(t *testin
 
 	// 주문의 REJECTED 전이만 막는다. 보상 트랜잭션이 통째로 롤백되고, 트랜잭션 밖의
 	// UNKNOWN 기록은 성공한다.
-	blockUpdate(t, db, "orders", fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
+	testdb.BlockUpdate(t, db, "orders", fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
 
 	recorder := postOrder(t, handler, userID, "unknown-key", validOrderBody())
 
@@ -296,36 +295,6 @@ func TestIntegrationCreateOrderHandlerFailedCompensationReportsUnknown(t *testin
 		"보상 실패를 UNKNOWN으로 남기지 않았다")
 }
 
-// blockUpdate는 특정 UPDATE만 실패시키는 트리거를 건다. OrderService의 저장소 필드는
-// 인터페이스가 아니라 concrete pointer라, 실패를 주입하려면 운영 코드를 추상화해야 한다.
-// 테스트 하나 때문에 운영 경로를 바꾸는 대신 DB 쪽에서 막는다.
-func blockUpdate(t *testing.T, db *gorm.DB, table string, when string) {
-	t.Helper()
-
-	// 함수도 영구 객체다. 이름을 고정하면 다음 실행의 CREATE FUNCTION이 충돌한다.
-	suffix := fmt.Sprintf("%d_%d", time.Now().UnixNano(), blockedUpdateSeq.Add(1))
-	fn := "fail_" + table + "_" + suffix
-	trg := fn + "_trg"
-
-	require.NoError(t, db.Exec(fmt.Sprintf(`
-CREATE FUNCTION %s() RETURNS trigger AS $$
-BEGIN RAISE EXCEPTION 'injected failure'; END $$ LANGUAGE plpgsql`, fn)).Error)
-
-	// 함수 생성 직후에 등록한다. 트리거 생성이 실패하면 require.NoError가 테스트를
-	// 중단하므로, 뒤에 등록하면 함수가 공유 DB에 그대로 남는다.
-	t.Cleanup(func() {
-		require.NoError(t, db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON %s`, trg, table)).Error)
-		require.NoError(t, db.Exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn)).Error)
-	})
-
-	require.NoError(t, db.Exec(fmt.Sprintf(`
-CREATE TRIGGER %s BEFORE UPDATE ON %s
-FOR EACH ROW WHEN (%s)
-EXECUTE FUNCTION %s()`, trg, table, when, fn)).Error)
-}
-
-var blockedUpdateSeq atomic.Uint64
-
 // 보상도 실패하고 UNKNOWN 기록마저 실패하면 durable outcome은 PENDING에 머문다.
 // 응답이 UNKNOWN이라고 말하면 저장된 상태보다 앞서 말하는 것이다.
 func TestIntegrationCreateOrderHandlerUnknownUpdateFailureReportsPending(t *testing.T) {
@@ -333,8 +302,8 @@ func TestIntegrationCreateOrderHandlerUnknownUpdateFailureReportsPending(t *test
 	userID := seedFundedUser(t, db, 919023)
 	handler := newRejectingOrderHandler(db)
 
-	blockUpdate(t, db, "orders", fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
-	blockUpdate(t, db, "order_idempotency_keys",
+	testdb.BlockUpdate(t, db, "orders", fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
+	testdb.BlockUpdate(t, db, "order_idempotency_keys",
 		fmt.Sprintf("NEW.outcome = 'UNKNOWN' AND NEW.user_id = %d", userID))
 
 	recorder := postOrder(t, handler, userID, "pending-key", validOrderBody())
@@ -360,7 +329,7 @@ func TestIntegrationCreateOrderHandlerUnknownGuidanceDoesNotPromiseRetry(t *test
 	userID := seedFundedUser(t, db, 919024)
 	handler := newRejectingOrderHandler(db)
 
-	blockUpdate(t, db, "orders", fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
+	testdb.BlockUpdate(t, db, "orders", fmt.Sprintf("NEW.status = 'REJECTED' AND NEW.user_id = %d", userID))
 
 	first := postOrder(t, handler, userID, "guidance-key", validOrderBody())
 	require.Equal(t, http.StatusServiceUnavailable, first.Code, "body=%s", first.Body.String())
