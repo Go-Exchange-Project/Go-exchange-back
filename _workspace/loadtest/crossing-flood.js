@@ -1,5 +1,6 @@
 import http from 'k6/http';
 import { sleep } from 'k6';
+import { buildIdempotencyKey } from './idempotency-key.js';
 
 // 3차②-진단: 최초 바인딩 링크 진단 전용 드라이버. 앱 코드 아님 — 측정 도구.
 // 단일 심볼 BTC에 crossing 주문(상대편을 항상 넘는 가격)만 계속 쏴서 체결을
@@ -20,7 +21,8 @@ const ORDER_AMOUNT = '0.001';
 const BUYER_KRW_FUNDING = '1000000000000';
 const SELLER_BTC_FUNDING = '1000000';
 
-const orderResponseCallback = http.expectedStatuses(200, 201, 503);
+// 202는 멱등성 계약의 PENDING(주문·hold는 커밋됨) — 실패로 세면 안 된다.
+const orderResponseCallback = http.expectedStatuses(200, 201, 202, 503);
 
 export const options = {
   setupTimeout: '10m',
@@ -101,6 +103,16 @@ function authHeaders(token) {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 }
 
+// 주문 의도마다 새 키. 형식과 충돌 없음은 idempotency-key.js가 정의하고 셀프체크가
+// 검증한다. 재사용하면 두 번째 주문부터 전부 replay가 되어 체결 부하가 사라진다.
+const GEN_ID = __ENV.GEN_ID || 'gen';
+const RUN_ID = __ENV.RUN_ID || String(Date.now());
+let orderSeq = 0;
+function newIdempotencyKey() {
+  orderSeq += 1;
+  return buildIdempotencyKey(GEN_ID, RUN_ID, __VU, __ITER, orderSeq);
+}
+
 export function runVU(data) {
   const user = data.users[Math.floor(Math.random() * data.users.length)];
   // 항상 상대편을 넘는 가격(±50틱) — 대기 중인 반대편 주문이 있으면 즉시 체결.
@@ -114,7 +126,12 @@ export function runVU(data) {
       price: String(price),
       amount: ORDER_AMOUNT,
     }),
-    { headers: authHeaders(user.token), tags: { name: 'create_order' }, responseCallback: orderResponseCallback, timeout: '30s' }
+    {
+      headers: { ...authHeaders(user.token), 'Idempotency-Key': newIdempotencyKey() },
+      tags: { name: 'create_order' },
+      responseCallback: orderResponseCallback,
+      timeout: '30s',
+    }
   );
   if (SLEEP_MS > 0) sleep(SLEEP_MS);
 }

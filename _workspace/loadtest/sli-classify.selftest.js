@@ -21,6 +21,26 @@ export default function () {
   assert(!r.available && !r.businessSuccess, '503 >SLO → 둘 다 실패');
   r = classifyOrderResponse(0, 90000, SLO);
   assert(!r.available && !r.businessSuccess, 'status 0 → 둘 다 실패');
+
+  // 멱등성 계약: 202(PENDING)는 주문·hold가 이미 커밋된 상태다. 실패로 세면 정상
+  // 주문이 실패로 잡히고, 그냥 성공에 섞으면 outcome UPDATE 실패 신호가 사라진다.
+  r = classifyOrderResponse(202, 120, SLO);
+  assert(r.available && r.businessSuccess, '202 ≤SLO → 가용·업무 성공');
+  assert(r.pendingOutcome, '202는 pendingOutcome으로 따로 드러나야 한다');
+  r = classifyOrderResponse(202, 24000, SLO);
+  assert(!r.available && r.businessSuccess, '202 >SLO → 가용 실패·업무 성공(느린 2xx)');
+  assert(!classifyOrderResponse(200, 120, SLO).pendingOutcome, '200은 pendingOutcome이 아니다');
+
+  // 오류 counter가 실제 실패를 숨기지 않는지 고정한다. 400(키 누락)·409(같은 키
+  // 다른 요청)는 하니스의 키 생성이 깨졌다는 뜻이므로 반드시 실패로 남아야 한다.
+  r = classifyOrderResponse(400, 5, SLO);
+  assert(!r.available && !r.businessSuccess, '400(키 누락) → 둘 다 실패');
+  r = classifyOrderResponse(409, 5, SLO);
+  assert(!r.available && !r.businessSuccess, '409(같은 키 다른 요청) → 둘 다 실패');
+  r = classifyOrderResponse(500, 5, SLO);
+  assert(!r.available && !r.businessSuccess, '500 → 둘 다 실패');
+  r = classifyOrderResponse(502, 5, SLO);
+  assert(!r.available && !r.businessSuccess, '502 → 둘 다 실패');
   // 취소 판정표
   // 200은 202 전환 전 계약이다. 두 값을 모두 성공으로 두어 구·신 하니스가
   // 같은 분류기를 쓸 수 있게 한다.

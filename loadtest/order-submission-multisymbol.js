@@ -48,6 +48,18 @@ export const options = {
   },
 };
 
+
+// 주문 의도마다 새 키를 만든다. VU 전체에서 재사용하면 두 번째 주문부터 전부 replay가
+// 되어 주문이 생성되지 않고 측정이 무의미해진다. 같은 주문의 재시도만 같은 키를 쓴다.
+// load-gen을 나눠 돌리면 같은 __VU·__ITER가 동시에 존재하므로 generator·run도 넣는다.
+const GEN_ID = __ENV.GEN_ID || 'gen';
+const RUN_ID = __ENV.RUN_ID || String(Date.now());
+let orderSeq = 0;
+function newIdempotencyKey() {
+  orderSeq += 1;
+  return `${GEN_ID}-${RUN_ID}-${__VU}-${__ITER}-${orderSeq}`;
+}
+
 export function setup() {
   if (!DEV_TOOLS_TOKEN) {
     throw new Error(
@@ -159,12 +171,14 @@ export function submitOrders(data) {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${user.token}`,
+      'Idempotency-Key': newIdempotencyKey(),
     },
     tags: { name: 'create_order' },
   });
 
   check(res, {
-    'order accepted (status 200)': (r) => r.status === 200,
+    // 202는 멱등성 계약의 PENDING(주문·hold는 커밋됨) — 실패가 아니다.
+    'order accepted (status 200/202)': (r) => r.status === 200 || r.status === 202,
   });
 
   sleep(0.2 + Math.random() * 0.3);

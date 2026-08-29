@@ -155,13 +155,33 @@ function authHeaders(token) {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 }
 
-function submitOrder(user, body) {
+// 주문 의도마다 새 키를 만든다. VU 전체에서 재사용하면 두 번째 주문부터 전부 replay가
+// 되어 주문이 생성되지 않고 측정이 무의미해진다. 같은 주문의 재시도는 받은 key를 그대로
+// 다시 넘겨야 한다 — 재시도마다 새 키를 만들면 멱등성을 전혀 검증하지 못한다.
+//
+// load-gen을 나눠 돌리면 같은 __VU·__ITER가 동시에 존재하므로 generator·run도 넣는다.
+const GEN_ID = __ENV.GEN_ID || 'gen';
+const RUN_ID = __ENV.RUN_ID || String(Date.now());
+let orderSeq = 0;
+function newIdempotencyKey() {
+  orderSeq += 1;
+  return `${GEN_ID}-${RUN_ID}-${__VU}-${__ITER}-${orderSeq}`;
+}
+
+// idempotencyKey를 인자로 받는다. 같은 주문의 재시도는 같은 키를 다시 넘겨야 한다.
+function submitOrder(user, body, idempotencyKey) {
   const res = http.post(`${BASE_URL}/orders`, JSON.stringify(body), {
-    headers: authHeaders(user.token),
+    headers: { ...authHeaders(user.token), 'Idempotency-Key': idempotencyKey },
     tags: { name: 'create_order' },
   });
-  check(res, { 'order accepted (status 200)': (r) => r.status === 200 });
+  // 202는 멱등성 계약의 PENDING이다. 주문·hold는 이미 커밋됐으므로 실패가 아니다.
+  check(res, { 'order accepted (status 200/202)': (r) => r.status === 200 || r.status === 202 });
   return res;
+}
+
+// 202는 주문 행과 hold가 이미 커밋된 상태다(멱등성 PENDING) — 실패가 아니다.
+function isOrderSuccess(status) {
+  return status === 200 || status === 202;
 }
 
 // 메이커: 기준가 위/아래 1~5틱에 지정가를 걸어 오더북에 실제로 쌓이게 한다
@@ -171,15 +191,19 @@ function makerFlow(user) {
   const price =
     user.role === 'buyer' ? BASE_PRICE - offsetTicks * TICK : BASE_PRICE + offsetTicks * TICK;
 
-  const res = submitOrder(user, {
-    coin_symbol: COIN_SYMBOL,
-    side: user.role === 'buyer' ? 'BUY' : 'SELL',
-    order_type: 'LIMIT',
-    price: String(price),
-    amount: ORDER_AMOUNT,
-  });
+  const res = submitOrder(
+    user,
+    {
+      coin_symbol: COIN_SYMBOL,
+      side: user.role === 'buyer' ? 'BUY' : 'SELL',
+      order_type: 'LIMIT',
+      price: String(price),
+      amount: ORDER_AMOUNT,
+    },
+    newIdempotencyKey(),
+  );
 
-  if (res.status !== 200) {
+  if (!isOrderSuccess(res.status)) {
     orderFail.add(1);
     return;
   }
@@ -212,8 +236,8 @@ function takerMarketFlow(user) {
       ? { coin_symbol: COIN_SYMBOL, side: 'BUY', order_type: 'MARKET', quote_amount: MARKET_BUY_QUOTE_AMOUNT }
       : { coin_symbol: COIN_SYMBOL, side: 'SELL', order_type: 'MARKET', amount: ORDER_AMOUNT };
 
-  const res = submitOrder(user, body);
-  if (res.status === 200) {
+  const res = submitOrder(user, body, newIdempotencyKey());
+  if (isOrderSuccess(res.status)) {
     orderSuccess.add(1);
     marketSuccess.add(1);
   } else {
@@ -226,14 +250,18 @@ function takerMarketFlow(user) {
 // 즉시 체결을 노린다.
 function takerCrossingLimitFlow(user) {
   const price = user.role === 'buyer' ? BASE_PRICE + 10 * TICK : BASE_PRICE - 10 * TICK;
-  const res = submitOrder(user, {
-    coin_symbol: COIN_SYMBOL,
-    side: user.role === 'buyer' ? 'BUY' : 'SELL',
-    order_type: 'LIMIT',
-    price: String(price),
-    amount: ORDER_AMOUNT,
-  });
-  if (res.status === 200) {
+  const res = submitOrder(
+    user,
+    {
+      coin_symbol: COIN_SYMBOL,
+      side: user.role === 'buyer' ? 'BUY' : 'SELL',
+      order_type: 'LIMIT',
+      price: String(price),
+      amount: ORDER_AMOUNT,
+    },
+    newIdempotencyKey(),
+  );
+  if (isOrderSuccess(res.status)) {
     orderSuccess.add(1);
   } else {
     orderFail.add(1);

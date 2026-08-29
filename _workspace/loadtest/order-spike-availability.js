@@ -4,6 +4,7 @@ import exec from 'k6/execution';
 import { Counter, Rate } from 'k6/metrics';
 import { classifyOrderResponse, classifyCancelResponse } from './sli-classify.js';
 import { buildLevelPlan, levelForElapsed } from './level-classify.js';
+import { buildIdempotencyKey } from './idempotency-key.js';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const DEV_TOOLS_TOKEN = __ENV.DEV_TOOLS_TOKEN;
@@ -38,7 +39,9 @@ const TAKER_MARKET_RATIO = 0.5;
 const cancelResponseCallback = http.expectedStatuses(200, 202, 404, 409);
 // 주문 생성의 503(입장 거절)은 ④의 의도된 "우아한 셰딩" — http_req_failed로 안 셈,
 // custom_fast_reject_503로 별도 집계.
-const orderResponseCallback = http.expectedStatuses(200, 201, 503);
+// 202는 멱등성 계약의 PENDING(주문·hold는 커밋됨) — http_req_failed로 안 셈,
+// custom_order_pending_outcome로 별도 집계.
+const orderResponseCallback = http.expectedStatuses(200, 201, 202, 503);
 
 // 3차③: 뭉뚱그린 가용성을 세 독립 SLI로 분리(정의는 sli-classify.js). threshold는
 // 안 건다 — 이 단계는 정의+기준선 수집.
@@ -62,6 +65,13 @@ const cancelAlreadyFilled = new Counter('custom_cancel_already_filled');
 const cancelFail = new Counter('custom_cancel_fail');
 const fastReject503 = new Counter('custom_fast_reject_503');
 const rejectMissingRetryAfter = new Counter('custom_reject_missing_retry_after');
+
+// 202(PENDING)는 주문·hold가 커밋됐는데 서버가 그 뒤를 확정하지 못한 상태다. 성공에
+// 섞기만 하면 "outcome UPDATE가 실패하고 있다"는 신호가 사라지므로 따로 센다.
+const orderPendingOutcome = new Counter('custom_order_pending_outcome');
+// 400(키 누락)·409(같은 키 다른 요청)는 하니스의 키 생성이 깨졌다는 뜻이다.
+// 0이 아니면 그 런의 부하 자체가 설계와 다르므로 측정을 신뢰할 수 없다.
+const idempotencyContractFail = new Counter('custom_idempotency_contract_fail');
 
 // ⑤ 확정 프로필: 300 웜(1분) → 5,000 램프(30초) → 5,000 hold(3분, 목표) →
 // ~10,000 버스트(45초, 초과) → 300 급락(30초) → 회복(2분). 로컬 스모크에서는
@@ -253,15 +263,32 @@ function authHeaders(token) {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 }
 
+function orderHeaders(token, idempotencyKey) {
+  return { ...authHeaders(token), 'Idempotency-Key': idempotencyKey };
+}
+
+// 주문 의도마다 새 키를 만든다. 형식과 충돌 없음은 idempotency-key.js가 정의하고
+// 셀프체크가 검증한다. 같은 주문의 재시도는 여기서 만든 key 변수를 그대로 다시 쓴다.
+// orderSeq는 VU별 JS 런타임의 단조 증가 카운터다.
+const GEN_ID = __ENV.GEN_ID || `gen${USER_INDEX_OFFSET}`;
+const RUN_ID = __ENV.RUN_ID || String(Date.now());
+let orderSeq = 0;
+function newIdempotencyKey() {
+  orderSeq += 1;
+  return buildIdempotencyKey(GEN_ID, RUN_ID, __VU, __ITER, orderSeq);
+}
+
 // 90초 타임아웃: A(옛 코드)는 초과 버스트에서 매달릴 것으로 예상되므로, k6 기본
 // 60초보다 넉넉히 잡아 진짜 tail latency를 k6 타임아웃이 아니라 서버 응답으로
 // 관측한다.
-function submitOrder(user, body) {
+// idempotencyKey를 인자로 받는다. 같은 주문의 재시도는 같은 키를 다시 넘겨야 한다 —
+// 이 함수 안에서 만들면 재시도마다 새 키가 되어 중복 주문이 생긴다.
+function submitOrder(user, body, idempotencyKey) {
   // 계단 라벨은 **요청 시작 시각** 기준이다(level-classify.js 주석 참조).
   const startedAt = Date.now();
   const tags = levelTags(startedAt);
   const res = http.post(`${BASE_URL}/orders`, JSON.stringify(body), {
-    headers: authHeaders(user.token),
+    headers: orderHeaders(user.token, idempotencyKey),
     tags: { name: 'create_order' },
     responseCallback: orderResponseCallback,
     timeout: '90s',
@@ -271,11 +298,18 @@ function submitOrder(user, body) {
   const cls = classifyOrderResponse(res.status, res.timings.duration, RESPONSE_SLO_MS);
   orderResponseAvailability.add(cls.available, tags);
   orderBusinessSuccess.add(cls.businessSuccess, tags);
+  if (cls.pendingOutcome) {
+    orderPendingOutcome.add(1, tags);
+  }
+  if (res.status === 400 || res.status === 409) {
+    idempotencyContractFail.add(1, tags);
+  }
   if (res.timings.duration > RESPONSE_SLO_MS) {
     orderResponseOverSlo.add(1, tags);
   }
   check(res, {
-    'order accepted or gracefully rejected': (r) => r.status === 200 || r.status === 201 || r.status === 503,
+    'order accepted or gracefully rejected': (r) =>
+      r.status === 200 || r.status === 201 || r.status === 202 || r.status === 503,
   });
   if (res.status === 503) {
     fastReject503.add(1);
@@ -292,20 +326,30 @@ function submitOrder(user, body) {
   return res;
 }
 
+// 202는 주문 행과 hold가 이미 커밋된 상태다(멱등성 PENDING). 실패로 세면 정상 주문이
+// 실패로 잡히고, order_id도 응답에 실려 오므로 취소 흐름도 그대로 이어갈 수 있다.
+function isOrderSuccess(status) {
+  return status === 200 || status === 201 || status === 202;
+}
+
 function makerFlow(user) {
   const offsetTicks = 1 + Math.floor(Math.random() * 5);
   const price =
     user.role === 'buyer' ? BASE_PRICE - offsetTicks * TICK : BASE_PRICE + offsetTicks * TICK;
 
-  const res = submitOrder(user, {
-    coin_symbol: COIN_SYMBOL,
-    side: user.role === 'buyer' ? 'BUY' : 'SELL',
-    order_type: 'LIMIT',
-    price: String(price),
-    amount: ORDER_AMOUNT,
-  });
+  const res = submitOrder(
+    user,
+    {
+      coin_symbol: COIN_SYMBOL,
+      side: user.role === 'buyer' ? 'BUY' : 'SELL',
+      order_type: 'LIMIT',
+      price: String(price),
+      amount: ORDER_AMOUNT,
+    },
+    newIdempotencyKey(),
+  );
 
-  if (res.status !== 200 && res.status !== 201) {
+  if (!isOrderSuccess(res.status)) {
     orderFail.add(1);
     return;
   }
@@ -345,8 +389,8 @@ function takerMarketFlow(user) {
       ? { coin_symbol: COIN_SYMBOL, side: 'BUY', order_type: 'MARKET', quote_amount: MARKET_BUY_QUOTE_AMOUNT }
       : { coin_symbol: COIN_SYMBOL, side: 'SELL', order_type: 'MARKET', amount: ORDER_AMOUNT };
 
-  const res = submitOrder(user, body);
-  if (res.status === 200 || res.status === 201) {
+  const res = submitOrder(user, body, newIdempotencyKey());
+  if (isOrderSuccess(res.status)) {
     orderSuccess.add(1);
     marketSuccess.add(1);
   } else {
@@ -357,14 +401,18 @@ function takerMarketFlow(user) {
 
 function takerCrossingLimitFlow(user) {
   const price = user.role === 'buyer' ? BASE_PRICE + 10 * TICK : BASE_PRICE - 10 * TICK;
-  const res = submitOrder(user, {
-    coin_symbol: COIN_SYMBOL,
-    side: user.role === 'buyer' ? 'BUY' : 'SELL',
-    order_type: 'LIMIT',
-    price: String(price),
-    amount: ORDER_AMOUNT,
-  });
-  if (res.status === 200 || res.status === 201) {
+  const res = submitOrder(
+    user,
+    {
+      coin_symbol: COIN_SYMBOL,
+      side: user.role === 'buyer' ? 'BUY' : 'SELL',
+      order_type: 'LIMIT',
+      price: String(price),
+      amount: ORDER_AMOUNT,
+    },
+    newIdempotencyKey(),
+  );
+  if (isOrderSuccess(res.status)) {
     orderSuccess.add(1);
   } else {
     orderFail.add(1);
