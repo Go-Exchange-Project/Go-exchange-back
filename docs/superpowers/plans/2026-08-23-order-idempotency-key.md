@@ -10,6 +10,14 @@
 
 **Spec:** [`docs/superpowers/specs/2026-08-23-order-idempotency-key-design.md`](../specs/2026-08-23-order-idempotency-key-design.md)
 
+> **상태: 완료 (2026-08-29).** Task 1~11을 모두 실행하고 리뷰 승인까지 받았다.
+> 아래 체크박스는 그 결과를 반영한 것이며, **이 계획은 다시 실행하지 않는다.**
+>
+> - 측정 SHA: backend `21a80fe` · frontend `4438917`
+> - 최종 SHA: backend `5bcb85d` · frontend `da62f0f`
+> - 측정 결과: [36번 벤치마크](../../benchmarks/36-2026-08-29-order-idempotency-key.md)
+> - 계획에서 벗어난 점과 남은 부채는 36번 문서 §3·§8에 적혀 있다.
+
 ## Global Constraints
 
 - `Idempotency-Key` 헤더는 **필수**다. 누락·공백은 **400**. 길이는 공백 제외 **1~128자**
@@ -74,7 +82,7 @@
   - `service.OrderFingerprintInput{UserID uint; CoinSymbol, Side, OrderType string; Price, Amount, QuoteAmount decimal.Decimal}`
   - `service.ComputeOrderFingerprint(in OrderFingerprintInput, version int) (string, error)`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [x] **Step 1: 실패하는 테스트 작성**
 
 ```go
 package service
@@ -184,12 +192,12 @@ func TestComputeOrderFingerprintV1IsFrozen(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/service -run OrderFingerprint -v`
 Expected: FAIL — `undefined: OrderFingerprintInput`
 
-- [ ] **Step 3: 최소 구현**
+- [x] **Step 3: 최소 구현**
 
 ```go
 package service
@@ -262,12 +270,12 @@ func computeOrderFingerprintV1(in OrderFingerprintInput) string {
 }
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `go test ./internal/service -run OrderFingerprint -v`
 Expected: PASS 6개
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 커밋**
 
 ```bash
 git add internal/service/order_fingerprint.go internal/service/order_fingerprint_test.go
@@ -293,7 +301,7 @@ git commit -F _workspace/commit-draft.md
   - `model.OrderIdempotencyOutcomePending|Accepted|Rejected|Unknown`
   - `model.OrderIdempotencyKey`
 
-- [ ] **Step 1: 정적 계약 RED 테스트 작성**
+- [x] **Step 1: 정적 계약 RED 테스트 작성**
 
 `internal/dbmigration/runner_test.go` 끝에 추가한다.
 
@@ -325,12 +333,12 @@ func TestOrderIdempotencyMigrationDeclaresContract(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/dbmigration -run OrderIdempotency -v`
 Expected: FAIL — 008 파일이 없다
 
-- [ ] **Step 3: 모델 작성**
+- [x] **Step 3: 모델 작성**
 
 ```go
 package model
@@ -369,7 +377,7 @@ type OrderIdempotencyKey struct {
 }
 ```
 
-- [ ] **Step 4: migration 008 작성**
+- [x] **Step 4: migration 008 작성**
 
 ```sql
 -- +goose Up
@@ -505,7 +513,7 @@ END $$;
 SELECT 1;
 ```
 
-- [ ] **Step 5: 카탈로그 통합 테스트 작성**
+- [x] **Step 5: 카탈로그 통합 테스트 작성**
 
 ```go
 // package dbmigration_test인 이유: testdb가 dbmigration을 import하므로 내부 테스트
@@ -712,7 +720,7 @@ func reapply008(t *testing.T, db *gorm.DB) {
 }
 ```
 
-- [ ] **Step 6: 통과 확인**
+- [x] **Step 6: 통과 확인**
 
 ```powershell
 $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
@@ -726,7 +734,7 @@ Expected: 정적 1개 + 카탈로그 5개 서브테스트 + 실패 케이스 4�
 먼저 지운 뒤** `dbmigration.Up`을 호출해야 한다. migration이 성공해 버린 경우에는 version 8이
 남아 goose가 건너뛰고, 훼손된 스키마가 공유 테스트 DB에 그대로 남는다.
 
-- [ ] **Step 7: 커밋**
+- [x] **Step 7: 커밋**
 
 권장 subject: `feat(order): 멱등성 키 테이블과 카탈로그 검증 migration 추가`
 
@@ -753,7 +761,7 @@ Expected: 정적 1개 + 카탈로그 5개 서브테스트 + 실패 케이스 4�
   - `CountStalePending(olderThan time.Time) (int64, error)`
   - `repository.UserKeyPair{UserID uint; Key string}`
 
-- [ ] **Step 1: RED 통합 테스트 작성**
+- [x] **Step 1: RED 통합 테스트 작성**
 
 ```go
 package repository
@@ -1050,12 +1058,12 @@ func TestIntegrationOrderIdempotencyCountStalePending(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/repository -run IntegrationOrderIdempotency`
 Expected: FAIL — `undefined: NewOrderIdempotencyRepository`
 
-- [ ] **Step 3: 구현**
+- [x] **Step 3: 구현**
 
 ```go
 package repository
@@ -1253,7 +1261,7 @@ func (r *OrderIdempotencyRepository) CountStalePending(olderThan time.Time) (int
 }
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 ```powershell
 $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
@@ -1281,7 +1289,7 @@ Expected: 8개 PASS(서브테스트 6개 포함)
 > 그래서 명시적 `INSERT ... ON CONFLICT DO NOTHING RETURNING id, user_id, idempotency_key`로
 > 바꾸고, 반환 행을 `(user_id, idempotency_key)`로 되짚어 구조체에 채운다.
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 커밋**
 
 권장 subject: `feat(order): 멱등성 키 저장소 추가`
 
@@ -1307,7 +1315,7 @@ Expected: 8개 PASS(서브테스트 6개 포함)
   - `service.groupIdempotentRequests(reqs []holdRequest) (owners []int, followers map[int]int, conflicts []int)` — 결정적
   - `(*HoldCoordinator).SubmitWithIdempotency(order *model.Order, idem *idempotencyContext) (holdResult, error)`
 
-- [ ] **Step 1: 그룹화 결정성 RED 테스트 작성**
+- [x] **Step 1: 그룹화 결정성 RED 테스트 작성**
 
 ```go
 package service
@@ -1392,12 +1400,12 @@ func TestGroupIdempotentRequestsKeepsUnkeyedRequestsAsOwners(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/service -run GroupIdempotentRequests -v`
 Expected: FAIL — `undefined: groupIdempotentRequests`
 
-- [ ] **Step 3: 타입과 그룹화 구현**
+- [x] **Step 3: 타입과 그룹화 구현**
 
 `internal/service/hold_coordinator.go`의 기존 타입을 바꾸고 함수를 추가한다.
 
@@ -1469,12 +1477,12 @@ func groupIdempotentRequests(reqs []holdRequest) (owners []int, followers map[in
 }
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 Run: `go test ./internal/service -run GroupIdempotentRequests -v`
 Expected: 4개 PASS
 
-- [ ] **Step 5: `HoldBatch`에 트랜잭션 순서 반영**
+- [x] **Step 5: `HoldBatch`에 트랜잭션 순서 반영**
 
 `HoldBatch`의 시그니처를 `HoldBatch(reqs []holdRequest) ([]holdResult, error)`로 바꾸고,
 트랜잭션 맨 앞과 끝에 다음을 넣는다. 기존 지갑 락·검증·INSERT 로직은 그대로 두고
@@ -1575,7 +1583,7 @@ for _, ph := range passing {
 
 `conflicts`의 요청에는 `results[i] = holdResult{Err: NewConflictErrorf("idempotency key reused with a different request")}`를 채운다.
 
-- [ ] **Step 6: fallback 경로 반영**
+- [x] **Step 6: fallback 경로 반영**
 
 `processBatch`의 fallback은 `persistAndHold`를 호출한다. 같은 순서를 적용한 메서드
 `(*HoldCoordinator).persistAndHoldOne(req holdRequest) holdResult`로 바꾼다(코디네이터의
@@ -1609,7 +1617,7 @@ func (c *HoldCoordinator) fallbackPerRequest(reqs []holdRequest) []holdResult {
 }
 ```
 
-- [ ] **Step 7: 회귀 확인**
+- [x] **Step 7: 회귀 확인**
 
 Run: `go test ./internal/service -race -p 1`
 Expected: 기존 hold coordinator 테스트 전부 PASS
@@ -1625,7 +1633,7 @@ Expected: 기존 hold coordinator 테스트 전부 PASS
 | `ExistingKeyReturnsStoredRecord` | 재시도가 follower + 저장된 `OrderID`를 받고 새 주문 없음 |
 | `FallbackKeepsIdempotencyGrouping` | 폴백에서도 다른 지문은 409, 중복은 follower, 실패 키는 소비되지 않음 |
 
-- [ ] **Step 8: 커밋**
+- [x] **Step 8: 커밋**
 
 권장 subject: `feat(order): hold 배치에 멱등성 키와 owner/follower 분리 도입`
 
@@ -1651,7 +1659,7 @@ Expected: 기존 hold coordinator 테스트 전부 PASS
   - `OrderService.OrderIdempotencyRepository *repository.OrderIdempotencyRepository`
   - `metrics.OrderIdempotencyUnknownTotal`, `metrics.OrderIdempotencyOutcomeUpdateFailuresTotal`
 
-- [ ] **Step 0: 이 태스크가 쓰는 지표 두 개를 먼저 추가**
+- [x] **Step 0: 이 태스크가 쓰는 지표 두 개를 먼저 추가**
 
 `internal/metrics/metrics.go`의 `var (...)` 블록에 넣는다. gauge와 monitor 오류 counter는
 Task 7에서 추가한다.
@@ -1670,7 +1678,7 @@ Task 7에서 추가한다.
 	})
 ```
 
-- [ ] **Step 1: 키 검증 RED 테스트 작성**
+- [x] **Step 1: 키 검증 RED 테스트 작성**
 
 ```go
 func TestCreateOrderRequiresIdempotencyKey(t *testing.T) {
@@ -1707,12 +1715,12 @@ func TestNormalizeIdempotencyKeyCountsCharactersNotBytes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/service -run CreateOrderRequiresIdempotencyKey -v`
 Expected: FAIL — `unknown field IdempotencyKey`
 
-- [ ] **Step 3: 키 검증·지문·follower 분기 구현**
+- [x] **Step 3: 키 검증·지문·follower 분기 구현**
 
 `BuildOrderWithRegistry`를 **구문 파싱(`parseOrderRequest`)** 과 **시장 정책 검증
 (`validateMarketPolicy`)** 으로 쪼갠다. `CreateOrder`는 파싱만 먼저 하고, 정책은 새 키에만
@@ -1918,7 +1926,7 @@ func (s *OrderService) replayResult(record *model.OrderIdempotencyKey, in OrderF
 }
 ```
 
-- [ ] **Step 4: 보상 트랜잭션에 `REJECTED` 포함**
+- [x] **Step 4: 보상 트랜잭션에 `REJECTED` 포함**
 
 ```go
 // rejectAcceptedOrderWithIdempotency는 hold 해제·주문 REJECTED·outcome REJECTED를
@@ -1991,7 +1999,7 @@ func (s *OrderService) acceptanceTimeout() time.Duration {
 }
 ```
 
-- [ ] **Step 5: 기존 통합 테스트를 새 계약으로 갱신**
+- [x] **Step 5: 기존 통합 테스트를 새 계약으로 갱신**
 
 기존 호출부 13곳은 키 계약이 아니라 주문·홀드 동작을 본다. 호출마다 손으로 키를 넣는 대신
 `service_integration_test.go`에 헬퍼를 두고 `orderService.CreateOrder(CreateOrderInput{` →
@@ -2027,7 +2035,7 @@ func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, e
 		Delete(&model.OrderIdempotencyKey{}).Error)
 ```
 
-- [ ] **Step 5b: 계약 통합 테스트 작성**
+- [x] **Step 5b: 계약 통합 테스트 작성**
 
 `order_idempotency_service_integration_test.go`에 넣는다. 엔진 제출 횟수를 세는
 `countingAcceptanceEngine`이 필요하다 — 상태만 보면 "두 번 제출됐지만 결과가 같아 보이는"
@@ -2044,7 +2052,7 @@ func createTestOrder(svc *OrderService, input CreateOrderInput) (*model.Order, e
 goroutine 2개로 같은 키를 동시에 보낸다. 도착 순서는 정해지지 않으므로 "owner 1건 +
 follower 1건"으로 판정한다.
 
-- [ ] **Step 6: 통과 확인**
+- [x] **Step 6: 통과 확인**
 
 ```powershell
 $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
@@ -2052,7 +2060,7 @@ go test -run 'Integration|CreateOrder' -v -p 1 ./internal/service
 go test ./internal/service -race
 ```
 
-- [ ] **Step 7: 커밋**
+- [x] **Step 7: 커밋**
 
 권장 subject: `feat(order): 주문 생성에 멱등성 키 계약 적용`
 
@@ -2083,7 +2091,7 @@ go test ./internal/service -race
 - Consumes: Task 5
 - Produces: HTTP 200/202/400/409 계약, `idempotent_replay` 필드
 
-- [ ] **Step 1: RED 테스트 작성**
+- [x] **Step 1: RED 테스트 작성**
 
 ```go
 package handler
@@ -2480,12 +2488,12 @@ func TestIntegrationCreateOrderHandlerRejectedGuidanceAsksForNewKey(t *testing.T
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/handler -run IntegrationCreateOrderHandler`
 Expected: FAIL — 헬퍼와 헤더 처리가 없다
 
-- [ ] **Step 3: 핸들러 구현**
+- [x] **Step 3: 핸들러 구현**
 
 ```go
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
@@ -2618,14 +2626,14 @@ func WriteErrorWithData(c *gin.Context, status int, code string, message string,
 }
 ```
 
-- [ ] **Step 4: 통과 확인**
+- [x] **Step 4: 통과 확인**
 
 ```powershell
 $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
 go test ./internal/handler -run IntegrationCreateOrderHandler -v -p 1
 ```
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 커밋**
 
 권장 subject: `feat(api): 주문 생성 HTTP 계약에 멱등성 키 반영`
 
@@ -2648,7 +2656,7 @@ go test ./internal/handler -run IntegrationCreateOrderHandler -v -p 1
   - `service.NewOrderIdempotencyMonitor(counter stalePendingCounter)` with `Interval`, `Threshold`
   - `(*OrderIdempotencyMonitor).Run(ctx)`
 
-- [ ] **Step 1: RED 테스트 작성**
+- [x] **Step 1: RED 테스트 작성**
 
 ```go
 package service
@@ -2785,12 +2793,12 @@ func TestOrderIdempotencyMonitorQueriesOlderThanThreshold(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `go test ./internal/service -run OrderIdempotencyMonitor -v`
 Expected: FAIL — `undefined: NewOrderIdempotencyMonitor`
 
-- [ ] **Step 3: gauge와 monitor 오류 counter 추가**
+- [x] **Step 3: gauge와 monitor 오류 counter 추가**
 
 Task 5 Step 0에서 counter 두 개는 이미 넣었다. `internal/metrics/metrics.go`에 나머지를
 추가한다.
@@ -2809,7 +2817,7 @@ Task 5 Step 0에서 counter 두 개는 이미 넣었다. `internal/metrics/metri
 	})
 ```
 
-- [ ] **Step 4: monitor 구현**
+- [x] **Step 4: monitor 구현**
 
 ```go
 package service
@@ -2909,7 +2917,7 @@ func (m *OrderIdempotencyMonitor) threshold() time.Duration {
 }
 ```
 
-- [ ] **Step 5: `cmd/main.go` 배선**
+- [x] **Step 5: `cmd/main.go` 배선**
 
 배선을 `main()` 안에 인라인으로 두면 그 줄을 지워도 어떤 테스트도 깨지지 않는다 —
 구현은 존재하지만 운영에서는 영원히 실행되지 않는 상태가 된다. 함수로 뺀다.
@@ -2946,7 +2954,7 @@ func TestMainStartsOrderIdempotencyMonitor(t *testing.T) {
 }
 ```
 
-- [ ] **Step 6: 통과 확인**
+- [x] **Step 6: 통과 확인**
 
 ```powershell
 go test ./internal/service -run OrderIdempotencyMonitor -count=20 -race -v
@@ -2996,7 +3004,7 @@ EXPLAIN EXECUTE q_param('PENDING', now() - interval '5 minutes');
 > 아니라 **gauge 값**을 `Eventually`로 기다려야 monitor가 값을 쓰기 전에 단언이 실행되는
 > 경쟁이 사라진다.
 
-- [ ] **Step 7: 커밋**
+- [x] **Step 7: 커밋**
 
 권장 subject: `feat(order): 멱등성 지표와 stale PENDING monitor 추가`
 
@@ -3012,7 +3020,7 @@ EXPLAIN EXECUTE q_param('PENDING', now() - interval '5 minutes');
 **Interfaces:**
 - Consumes: Task 1~7 전체
 
-- [ ] **Step 1: 하니스와 동시성 검증 작성**
+- [x] **Step 1: 하니스와 동시성 검증 작성**
 
 핵심은 **판정 기준**이다. 주문 상태가 아니라 **`ORDER_HOLD` 원장 건수**와
 **fake engine의 `TrySubmitOrder` 호출 수**로 판정한다 — 상태만 보면 "hold 1회·엔진 제출
@@ -3165,7 +3173,7 @@ func TestIntegrationCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 > 방향의 불일치다. 서버가 결과를 정말 모르는 `UNKNOWN` 경로에서만 응답을 `PENDING`으로
 > 낮춘다.
 
-- [ ] **Step 2: 각 테스트를 RED로 확인한 뒤 통과시킨다**
+- [x] **Step 2: 각 테스트를 RED로 확인한 뒤 통과시킨다**
 
 각 시나리오마다 그 테스트가 고정하는 구현만 되돌려 실패를 먼저 본다.
 
@@ -3185,7 +3193,7 @@ func TestIntegrationCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 > 사용자 2명을 만드는데, 이때 생기는 임시 buyer도 `cleanupServiceUsers`에 넣어야 한다.
 > 넣지 않으면 실행마다 `wallets`에 4행이 쌓인다. 실행 전후 `wallets` 건수가 같아야 한다.
 
-- [ ] **Step 3: 전체 확인**
+- [x] **Step 3: 전체 확인**
 
 ```powershell
 $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
@@ -3194,7 +3202,7 @@ Remove-Item Env:GOEXCHANGE_TEST_DATABASE_DSN
 go test ./... -race
 ```
 
-- [ ] **Step 4: 커밋**
+- [x] **Step 4: 커밋**
 
 권장 subject: `test(order): 멱등성 키의 동시성·배치·상태 전이 통합 검증`
 
@@ -3213,7 +3221,7 @@ go test ./... -race
 **Interfaces:**
 - Produces: `createOrder(token, input, idempotencyKey)`
 
-- [ ] **Step 1: RED 테스트 작성**
+- [x] **Step 1: RED 테스트 작성**
 
 ```ts
 it("createOrder가 Idempotency-Key 헤더를 보낸다", async () => {
@@ -3232,12 +3240,12 @@ it("createOrder가 Idempotency-Key 헤더를 보낸다", async () => {
 });
 ```
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
 Run: `npm test -- --run src/lib/api.test.ts`
 Expected: FAIL — 인자가 3개가 아니다
 
-- [ ] **Step 3: `api.ts` 구현**
+- [x] **Step 3: `api.ts` 구현**
 
 ```ts
 export async function createOrder(
@@ -3257,7 +3265,7 @@ export async function createOrder(
 `apiRequest`가 `options.headers`를 이미 `new Headers(options.headers)`로 받으므로 추가
 변경은 필요 없다.
 
-- [ ] **Step 4: `OrderForm` 키 수명 RED 테스트**
+- [x] **Step 4: `OrderForm` 키 수명 RED 테스트**
 
 ```ts
 // 사용자 주문 시도마다 키를 한 번 생성한다. 네트워크 재시도는 같은 키를 쓰고,
@@ -3267,12 +3275,12 @@ it("사용자가 다시 제출하면 새 키를 만든다", async () => { /* ...
 it("202 응답을 실패로 표시하지 않는다", async () => { /* ... */ });
 ```
 
-- [ ] **Step 5: `OrderForm` 구현**
+- [x] **Step 5: `OrderForm` 구현**
 
 `crypto.randomUUID()`로 키를 만들고 `useRef`에 보관한다. 제출 성공·사용자 재제출 시
 새 키로 교체한다.
 
-- [ ] **Step 6: 프런트 게이트**
+- [x] **Step 6: 프런트 게이트**
 
 ```powershell
 npm test
@@ -3280,7 +3288,7 @@ npm run lint
 npm run build
 ```
 
-- [ ] **Step 7: 커밋**(프런트 저장소)
+- [x] **Step 7: 커밋**(프런트 저장소)
 
 권장 subject: `feat(trading): 주문 생성에 멱등성 키 전송`
 
@@ -3294,7 +3302,7 @@ npm run build
 - Modify (front): `tests/e2e/exchange.spec.ts`
 - Modify (back): `_workspace/loadtest/order-spike-availability.js`, `_workspace/loadtest/crossing-flood.js`, `_workspace/loadtest/stress-hold3000.js`, `loadtest/order-spike-single-symbol.js`
 
-- [ ] **Step 1: k6 헬퍼 추가**
+- [x] **Step 1: k6 헬퍼 추가**
 
 각 스크립트에 iteration마다 새 키를 만드는 헬퍼를 넣는다.
 
@@ -3310,7 +3318,7 @@ function newIdempotencyKey() {
 주문 POST의 헤더에 `'Idempotency-Key': key`를 추가하고, 같은 iteration의 재시도에는
 같은 `key` 변수를 쓴다.
 
-- [ ] **Step 2: E2E 중복 제출 시나리오 추가**
+- [x] **Step 2: E2E 중복 제출 시나리오 추가**
 
 ```ts
 test("duplicate order submission with the same key creates one order", async ({ request }) => {
@@ -3319,14 +3327,14 @@ test("duplicate order submission with the same key creates one order", async ({ 
 });
 ```
 
-- [ ] **Step 3: 확인**
+- [x] **Step 3: 확인**
 
 ```powershell
 k6 run _workspace/loadtest/sli-classify.selftest.js
 npx playwright test --grep "idempot|duplicate order"
 ```
 
-- [ ] **Step 4: 커밋 두 개**(백엔드·프런트 각각)
+- [x] **Step 4: 커밋 두 개**(백엔드·프런트 각각)
 
 권장 백엔드 subject: `test(load): 부하 하니스에 iteration별 멱등성 키 적용`
 권장 프런트 subject: `test(e2e): 같은 키 중복 제출이 주문을 하나만 만드는지 검증`
@@ -3339,7 +3347,7 @@ npx playwright test --grep "idempot|duplicate order"
 - Create: `docs/benchmarks/36-YYYY-MM-DD-order-idempotency-key.md`
 - Modify: `README.md`, `docs/refactor/README.md`, `docs/ENGINEERING-SUMMARY.md`
 
-- [ ] **Step 1: 로컬 전체 게이트**
+- [x] **Step 1: 로컬 전체 게이트**
 
 ```powershell
 $env:GOEXCHANGE_TEST_DATABASE_DSN='host=localhost user=goexchange_test password=goexchange_test_password dbname=goexchange_test port=55432 sslmode=disable'
@@ -3350,9 +3358,9 @@ go vet ./...
 git diff --check
 ```
 
-- [ ] **Step 2: push·CI 초록 확인 후 측정 SHA 고정**
+- [x] **Step 2: push·CI 초록 확인 후 측정 SHA 고정**
 
-- [ ] **Step 3: 유료 GCP 실행 승인 요청**
+- [x] **Step 3: 유료 GCP 실행 승인 요청**
 
 35번과 같은 topology·게이트. **추가로 비용 실측 항목**을 부하 전후로 기록한다.
 
@@ -3363,16 +3371,16 @@ SELECT pg_size_pretty(pg_relation_size('order_idempotency_keys')) AS table_size,
 SELECT pg_current_wal_lsn();
 ```
 
-- [ ] **Step 4: 산출물 시크릿 게이트**
+- [x] **Step 4: 산출물 시크릿 게이트**
 
 runbook §7.5 순서를 따른다. `_workspace`·`_artifacts`에는 정리본만 넣는다.
 
-- [ ] **Step 5: 36번 문서 작성**
+- [x] **Step 5: 36번 문서 작성**
 
 측정 SHA와 최종 문서 SHA를 구분한다. 인덱스 크기·WAL 증가량을 **기준선으로만** 기록하고
 보존 정책 결정의 근거로 남긴다.
 
-- [ ] **Step 6: 커밋·push·CI**
+- [x] **Step 6: 커밋·push·CI**
 
 **커버하는 검증**: 10, 11
 
