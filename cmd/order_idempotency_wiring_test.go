@@ -24,6 +24,16 @@ func TestMainStartsOrderIdempotencyMonitor(t *testing.T) {
 		"main()이 stale PENDING monitor를 기동하지 않는다")
 }
 
+// 핸들러가 Idempotency-Key를 필수로 요구하는데 CORS가 그 헤더를 허용하지 않으면
+// preflight 단계에서 막혀 브라우저 주문이 전부 실패한다. 서버 로그에는 아무것도 남지
+// 않아 원인을 찾기 어렵다(E2E에서 실제로 겪었다).
+func TestCORSAllowsTheHeadersOrderCreationRequires(t *testing.T) {
+	assert.Contains(t, corsAllowedHeaders, "Idempotency-Key",
+		"주문 생성이 요구하는 헤더가 CORS 허용 목록에 없다 — 브라우저에서 주문이 되지 않는다")
+	assert.Contains(t, corsAllowedHeaders, "Authorization")
+	assert.Contains(t, corsAllowedHeaders, "Content-Type")
+}
+
 // 배선이 실제 DB까지 이어지는지 본다 — repository 생성, goroutine 기동, gauge 반영이
 // 한 번에 깨진다.
 func TestIntegrationStartOrderIdempotencyMonitorPublishesGauge(t *testing.T) {

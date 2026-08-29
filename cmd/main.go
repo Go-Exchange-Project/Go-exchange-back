@@ -334,7 +334,7 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins: config.CORSAllowedOriginsFromEnv(),
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders: []string{"Content-Type", "Authorization", middleware.DevToolsTokenHeader},
+		AllowHeaders: corsAllowedHeaders,
 	}))
 	r.Use(metrics.HTTPMiddleware())
 
@@ -471,6 +471,18 @@ type settlementDependencyGuard interface {
 type cancellationDeferStore interface {
 	RecordFailure(cancelled matching.OrderCancelled, sourceOutboxID uint64, executionErr error) (*model.FailedOrderCancellation, error)
 	EnsureDeferred(cancelled matching.OrderCancelled, sourceOutboxID uint64, reason error) (*model.FailedOrderCancellation, error)
+}
+
+// corsAllowedHeaders는 브라우저가 preflight에서 허용받아야 하는 요청 헤더다.
+//
+// 주문 생성은 Idempotency-Key를 **필수로 요구**하므로, 이 목록에 빠지면 preflight가
+// 막아 브라우저에서는 주문 자체가 되지 않는다(서버 로그에는 아무것도 남지 않는다).
+// 서버가 요구하는 헤더와 CORS가 허용하는 헤더는 같이 움직여야 한다.
+var corsAllowedHeaders = []string{
+	"Content-Type",
+	"Authorization",
+	middleware.DevToolsTokenHeader,
+	"Idempotency-Key",
 }
 
 // startOrderIdempotencyMonitor는 hold 커밋 직후 프로세스가 죽어 남은 PENDING을 주기
