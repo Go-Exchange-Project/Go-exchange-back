@@ -1,0 +1,8 @@
+# 측정 산출물의 원본 출력은 가공하지 않고 그대로 보존한다(docs/benchmarks/README.md 규칙).
+# psql 표 출력은 헤더에 후행 공백이 있는데, 그것을 지우면 원본이 아니게 된다.
+# 그래서 이 경로에서는 whitespace 검사를 끄고, 대신 텍스트 변환도 하지 않아
+# 체크아웃 플랫폼과 무관하게 바이트가 유지되도록 한다.
+_workspace/**/raw-*.txt -whitespace -text
+
+# checksum 파일은 GNU sha256sum -c가 그대로 읽을 수 있어야 한다: LF 고정, BOM 없음.
+_workspace/**/checksums.txt text eol=lf

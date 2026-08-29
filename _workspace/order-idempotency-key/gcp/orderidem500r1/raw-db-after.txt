@@ -1,0 +1,75 @@
+﻿=== WAL LSN AFTER ===
+ wal_lsn_after 
+---------------
+ 9/9A9AE5C0
+(1 row)
+
+=== 인덱스/테이블 크기 AFTER ===
+ table_size | unique_index | partial_index | table_bytes | unique_bytes | partial_bytes 
+------------+--------------+---------------+-------------+--------------+---------------
+ 84 MB      | 47 MB        | 2232 kB       |    87597056 |     49102848 |       2285568
+(1 row)
+
+=== 정합성 4종 (모두 0이어야 한다) ===
+             t              | count 
+----------------------------+-------
+ failed_settlements         |     0
+ failed_market_completions  |     0
+ failed_order_cancellations |     0
+ reconciliation_violations  |     0
+(4 rows)
+
+=== 멱등성 outcome 분포 ===
+ outcome  | count  
+----------+--------
+ ACCEPTED | 414447
+(1 row)
+
+=== stale PENDING (임계 5분 초과) ===
+ stale_pending 
+---------------
+             0
+(1 row)
+
+=== 중복 주문 없음: 키 1건당 order_id 1건 ===
+ keys_with_multiple_orders 
+---------------------------
+                         0
+(1 row)
+
+ orders_shared_by_multiple_keys 
+--------------------------------
+                              0
+(1 row)
+
+=== 중복 ORDER_HOLD 없음: 주문 1건당 hold 1건 ===
+ orders_with_multiple_holds 
+----------------------------
+                          0
+(1 row)
+
+=== 주문/키/hold 총계 ===
+ orders | idem_keys | order_holds | trades | cancel_commands 
+--------+-----------+-------------+--------+-----------------
+ 414447 |    414447 |      414447 | 235041 |           29764
+(1 row)
+
+=== 키가 없는 주문 (있으면 하니스가 키를 빠뜨린 것) ===
+ orders_without_idem_key 
+-------------------------
+                       0
+(1 row)
+
+=== 테이블별 크기 (참고) ===
+        relname         |  total  
+------------------------+---------
+ ledger_entries         | 433 MB
+ trade_outbox_events    | 179 MB
+ order_idempotency_keys | 145 MB
+ orders                 | 133 MB
+ trades                 | 111 MB
+ cancel_commands        | 5328 kB
+ wallets                | 792 kB
+ users                  | 256 kB
+(8 rows)
+

@@ -1,0 +1,84 @@
+﻿=== BEFORE: row counts ===
+             t              | count 
+----------------------------+-------
+ orders                     |     0
+ trades                     |     0
+ ledger_entries             |     2
+ wallets                    |     2
+ users                      |     4
+ cancel_commands            |     0
+ order_idempotency_keys     |     0
+ trade_outbox_events        |     0
+ failed_settlements         |     0
+ failed_market_completions  |     0
+ failed_order_cancellations |     0
+ reconciliation_violations  |     0
+(12 rows)
+
+=== TRUNCATE workload tables ===
+TRUNCATE TABLE
+=== AFTER: row counts (all must be 0) ===
+             t              | count 
+----------------------------+-------
+ orders                     |     0
+ trades                     |     0
+ ledger_entries             |     0
+ wallets                    |     0
+ users                      |     0
+ cancel_commands            |     0
+ order_idempotency_keys     |     0
+ trade_outbox_events        |     0
+ failed_settlements         |     0
+ failed_market_completions  |     0
+ failed_order_cancellations |     0
+ reconciliation_violations  |     0
+(12 rows)
+
+=== GATE: goose version ===
+ goose_version 
+---------------
+             8
+(1 row)
+
+=== GATE: order idempotency UNIQUE + partial index catalog definitions ===
+                       conname                       |                                         pg_get_constraintdef                                          
+-----------------------------------------------------+-------------------------------------------------------------------------------------------------------
+ order_idempotency_keys_created_at_not_null          | NOT NULL created_at
+ order_idempotency_keys_fingerprint_not_null         | NOT NULL fingerprint
+ order_idempotency_keys_fingerprint_version_not_null | NOT NULL fingerprint_version
+ order_idempotency_keys_id_not_null                  | NOT NULL id
+ order_idempotency_keys_idempotency_key_not_null     | NOT NULL idempotency_key
+ order_idempotency_keys_key_length                   | CHECK (((length(btrim(idempotency_key)) >= 1) AND (length(btrim(idempotency_key)) <= 128)))
+ order_idempotency_keys_outcome_check                | CHECK ((outcome = ANY (ARRAY['PENDING'::text, 'ACCEPTED'::text, 'REJECTED'::text, 'UNKNOWN'::text])))
+ order_idempotency_keys_outcome_not_null             | NOT NULL outcome
+ order_idempotency_keys_pkey                         | PRIMARY KEY (id)
+ order_idempotency_keys_updated_at_not_null          | NOT NULL updated_at
+ order_idempotency_keys_user_id_not_null             | NOT NULL user_id
+ order_idempotency_keys_user_key_unique              | UNIQUE (user_id, idempotency_key)
+(12 rows)
+
+               indexname                |                                                                   indexdef                                                                    
+----------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------
+ order_idempotency_keys_pkey            | CREATE UNIQUE INDEX order_idempotency_keys_pkey ON public.order_idempotency_keys USING btree (id)
+ order_idempotency_keys_user_key_unique | CREATE UNIQUE INDEX order_idempotency_keys_user_key_unique ON public.order_idempotency_keys USING btree (user_id, idempotency_key)
+ order_idempotency_pending_updated_at   | CREATE INDEX order_idempotency_pending_updated_at ON public.order_idempotency_keys USING btree (updated_at) WHERE (outcome = 'PENDING'::text)
+(3 rows)
+
+=== GATE: partial index catalog flags ===
+               relname                | indisvalid | indisready | indnkeyatts | indnatts | no_exprs |          predicate          
+--------------------------------------+------------+------------+-------------+----------+----------+-----------------------------
+ order_idempotency_pending_updated_at | t          | t          |           1 |        1 | t        | (outcome = 'PENDING'::text)
+(1 row)
+
+=== index sizes BEFORE load ===
+ table_size | unique_index | partial_index | table_bytes | unique_bytes | partial_bytes 
+------------+--------------+---------------+-------------+--------------+---------------
+ 0 bytes    | 8192 bytes   | 8192 bytes    |           0 |         8192 |          8192
+(1 row)
+
+=== WAL LSN BEFORE ===
+ wal_lsn_before 
+----------------
+ 8/D0292BF0
+(1 row)
+
