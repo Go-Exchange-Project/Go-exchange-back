@@ -215,7 +215,7 @@ go run ./cmd
 | POST | `/auth/login` | 없음 | 로그인, JWT 반환 |
 | GET | `/markets/rules?coin_symbol=BTC` | 없음 | 시장 정책 조회 |
 | GET | `/orderbook?coin_symbol=BTC` | 없음 | 현재 오더북 snapshot 조회 |
-| POST | `/orders` | 필요 | 지정가/시장가 주문 생성 |
+| POST | `/orders` | 필요 + `Idempotency-Key` | 지정가/시장가 주문 생성 |
 | DELETE | `/orders/:id` | 필요 | 미체결/부분체결 주문 **취소 command 접수**(`202 Accepted`) |
 | GET | `/orders` | 필요 | 내 주문 목록 |
 | GET | `/orders/:id` | 필요 | 내 주문 단건 |
@@ -225,6 +225,37 @@ go run ./cmd
 | GET | `/ws` | origin whitelist | orderbook/trade stream |
 
 금액과 수량은 JSON decimal string으로 주고받습니다.
+
+### 주문 생성의 멱등성 계약
+
+`POST /orders`는 `Idempotency-Key` 헤더를 **필수로 요구**합니다(1~128자, 공백만이면 거부).
+응답을 받지 못한 재시도가 중복 주문과 중복 hold를 만드는 것을 막기 위해서입니다.
+
+- 키는 사용자 단위로 유일합니다(`(user_id, idempotency_key)` UNIQUE).
+- **같은 키 + 같은 주문 내용**은 저장된 결과를 그대로 돌려줍니다(새 주문을 만들지 않습니다).
+- **같은 키 + 다른 주문 내용**은 `409 Conflict`입니다.
+- 키가 없거나 길이 계약을 어기면 `400 Bad Request`입니다.
+
+응답은 서버가 **durable하게 아는 상태**를 그대로 반영합니다.
+
+| 상태 | HTTP | 뜻 |
+|---|---|---|
+| `ACCEPTED` | **200** | 엔진이 접수했다 |
+| `PENDING` | **202** | 주문과 hold는 커밋됐지만 그 뒤를 서버가 확정하지 못했다 |
+| `REJECTED` | **503** | 접수되지 않았고 hold도 되돌렸다. 새 주문에는 **새 키**가 필요하다 |
+| `UNKNOWN` | **503** | 되돌리다 실패했다. 자금이 묶여 있을 수 있다 |
+
+`202`·`503` 응답도 `order_id`를 함께 줍니다 — 사용자가 그 주문을 조회할 수 있어야 하기 때문입니다.
+**`PENDING`·`UNKNOWN`은 같은 키로 재시도해도 같은 상태가 돌아옵니다.** 재시도가 해결 수단이
+아니므로 주문 상태를 먼저 조회해야 합니다.
+
+클라이언트는 **한 번의 주문 시도마다 키를 하나** 만들고, 응답을 받지 못한 재시도에는 **같은 키**를
+씁니다. 주문 내용이 바뀌거나 서버 응답이 도착하면 그 시도는 끝난 것이므로 다음 제출에는 새 키를
+씁니다.
+
+관측 지표: `order_idempotency_stale_pending`(gauge), `order_idempotency_unknown_total`,
+`order_idempotency_outcome_update_failures_total`, `order_idempotency_monitor_errors_total`.
+`PENDING`은 프로세스가 hold 커밋 직후 죽으면 어떤 counter도 오르지 않으므로 gauge로 관측합니다.
 
 ## 테스트
 
