@@ -98,8 +98,33 @@ quantum을 통째로 무력화하므로, 조용한 fallback이 가장 나쁜 실
 
 ### 2.2.1 strict env 계약
 
-**전용 parser를 새로 쓴다.** 코드베이스에 재사용할 env 정수 파서가 없고(`strconv.Atoi` 직접
-호출 2곳뿐), 기존 핸들러 파서는 "잘못되면 기본값"이라 여기 요구사항과 정반대다.
+**전용 parser를 새로 쓴다. 기존 `parsePositiveIntEnv`를 재사용하지 않는다.**
+
+기존 파서([config/database.go:68](../../../config/database.go))는 세 지점이 이 요구사항과
+정반대다.
+
+```go
+func parsePositiveIntEnv(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))   // ① 미설정과 "" 구분 불가
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback                          // ② 오류·0·음수를 조용히 fallback
+	}
+	return parsed
+}
+```
+
+| # | 기존 동작 | 이 요구사항 |
+|---|---|---|
+| ① | `os.Getenv` — 미설정과 빈 문자열이 모두 `""` | `LookupEnv`로 구분. 빈 문자열은 error |
+| ② | 파싱 실패·`<= 0`이면 **조용히 fallback** | **error**. 잘못된 값으로 부하를 도는 것을 막는다 |
+| ③ | `TrimSpace`로 `" 3"`을 허용 | 공백 불허 |
+
+기존 파서는 `EngineShardsFromEnv`·`OutboxBatchSizeFromEnv` 등 5곳이 쓰고 있다. **그 동작을
+바꾸지 않는다** — 이번 변경 범위 밖이고, 그쪽은 조용한 fallback이 의도된 설계다.
 
 ```go
 // LookupEnv 기반. 미설정과 "빈 문자열로 설정됨"을 구분한다.
@@ -127,18 +152,23 @@ func strictPositiveEnv(key string, def int) (int, error)
 ### 2.2.2 설정 주입 경로
 
 ```go
+// config 패키지 — 기존 EngineShardsFromEnv와 같은 자리, 같은 역할
+func MatchingQuantumFromEnv() (maxMatchesPerTurn int, maxConsecutiveCancels int, err error)
+
+// matching 패키지
 type QuantumConfig struct {
-	MaxMatchesPerTurn    int
+	MaxMatchesPerTurn     int
 	MaxConsecutiveCancels int
 }
-
-func LoadQuantumConfig() (QuantumConfig, error)          // 두 env를 strict 파싱
-func NewShardedEngineWithQuantum(shardCount int, cfg QuantumConfig) *ShardedEngine
-func (se *ShardedEngine) setQuantum(cfg QuantumConfig)   // 전 샤드에 동일 주입
+func (c QuantumConfig) Validate() error
+func NewShardedEngineWithQuantum(shardCount int, cfg QuantumConfig) (*ShardedEngine, error)
 ```
 
-- **`main`은 기동 시 `LoadQuantumConfig()`를 호출하고, 에러면 기동을 실패시킨다.** 잘못된 값으로
-  뜬 서버가 부하를 받는 것보다 안 뜨는 편이 낫다.
+`config`가 `matching` 타입을 반환하지 않고 정수 두 개를 반환하는 이유: 새 패키지 의존을 만들지
+않기 위해서다. `main`이 두 값을 받아 `QuantumConfig`를 구성한다.
+
+- **`main`은 기동 시 `MatchingQuantumFromEnv()`를 호출하고, 에러면 `log.Fatal`로 기동을
+  실패시킨다.** 잘못된 값으로 뜬 서버가 부하를 받는 것보다 안 뜨는 편이 낫다.
 - **모든 샤드에 같은 값이 주입된다.** 기존 `SetMatchLatencyObserver`가 전 샤드를 순회하는
   패턴을 그대로 따른다. 샤드별 차등은 근거가 없다(§14 R8).
 - **기존 무인자 생성자 `NewMatchingEngine()`·`NewShardedEngine(n)`은 테스트용 기본값을
@@ -146,9 +176,7 @@ func (se *ShardedEngine) setQuantum(cfg QuantumConfig)   // 전 샤드에 동일
   검증된 설정을 주입하는 경로로 정리한다.
 - `NewShardedEngine`은 `shardCount < 1`을 조용히 1로 클램프한다. 이 동작은 **바꾸지 않는다** —
   이번 변경 범위 밖이고, quantum 값과 달리 0이 sentinel과 충돌하지도 않는다.
-
-> 관측: `GOEXCHANGE_OUTBOX_BATCH_SIZE`는 소스 주석에 "운영 조정" knob으로 적혀 있으나 실제
-> 파싱 코드가 없다. 이번 변경 범위 밖이므로 고치지 않고 기록만 남긴다.
+- env 이름 상수는 기존 `EnvGOExchange*` 상수 블록에 나란히 추가한다.
 
 ### 2.3 슬롯 진입 가드
 
@@ -234,6 +262,8 @@ tickerDue            bool                // latch됨, 아직 미flush
 ```
 turn:
   ── turn 계측 시작 ─────────────────────────────────────────
+  0. hadActive := (activeSweep != nil)   // turn 시작 시점의 상태를 고정한다
+
   1. cancel phase
        for cancelsSinceProgress < maxConsecutiveCancels:
            cmd := takeCancel()          // pendingCancel 우선, 없으면 CancelCh 논블로킹
@@ -258,8 +288,8 @@ turn:
   4. stop latch
        if !shuttingDown: 논블로킹 recv stopCh → shuttingDown = true
 
-  5. admission phase
-       if activeSweep == nil:
+  5. admission phase — hadActive면 건너뛴다
+       if !hadActive:                                       // ← turn 시작 상태로 판단한다
            if pendingOrder != nil:                          // 이미 접수된 작업 — 게이트 없음
                admit(pendingOrder); pendingOrder = nil
                progress(P-b)
@@ -299,10 +329,31 @@ turn:
 | P-c | `activeSweep == nil`이고 admit할 주문 없음 | 굶을 대상이 없다 |
 | P-d | `activeSweep == nil`이고 `emitBackpressured()` | 유입 억제는 의도된 동작이다 |
 
-**불변식: 모든 turn은 P-a~P-d 중 정확히 하나를 발생시킨다.** 3단계에서 슬롯이 있으면 P-a,
-없으면 5단계가 P-b/P-c/P-d 중 하나를 반드시 발생시킨다. 이 불변식이 깨지면 counter가 상한에
-고정되어 취소를 영원히 처리하지 못하는 **wedge**가 생긴다. 그래서 이것을 테스트로 고정한다
-(SCH-5).
+**불변식: 모든 turn은 P-a~P-d 중 정확히 하나를 발생시킨다.**
+
+이 "정확히 하나"를 지키려면 **5단계가 3단계의 결과가 아니라 turn 시작 시점의 상태를 보고
+판단해야 한다.** 0단계에서 `hadActive`를 고정하는 이유가 이것이다. `activeSweep != nil`을
+5단계에서 다시 읽으면 이런 turn이 생긴다.
+
+```
+turn 시작: activeSweep != nil
+3단계    : 마지막 조각이 끝나 activeSweep = nil, P-a 발생
+5단계    : activeSweep == nil을 보고 admission 실행 → P-b/P-c/P-d 추가 발생
+결과     : 한 turn에 progress 두 개
+```
+
+기능적으로는 counter가 0으로 두 번 리셋될 뿐이라 당장 눈에 띄지 않는다. 그러나 불변식이
+"정확히 하나"가 아니게 되면 **SCH-5가 검증할 대상이 사라지고**, 이후 누군가 5단계를 조건부로
+바꿀 때 wedge를 막아주던 근거가 없어진다. 또 sweep이 끝난 turn만 취소 상한을 두 배로 얻는
+비대칭도 생긴다.
+
+`hadActive`가 true인 turn은 admission을 건너뛴다. 그 sweep이 끝난 주문의 다음 작업은 **다음
+turn의 5단계**에서 받는다. 한 turn 늦어지지만, 그 turn은 어차피 조각을 실행했으므로 진행이
+멈추지 않는다.
+
+3단계에서 슬롯이 있으면 P-a, 없으면 5단계가 P-b/P-c/P-d 중 하나를 반드시 발생시킨다. 이
+불변식이 깨지면 counter가 상한에 고정되어 취소를 영원히 처리하지 못하는 **wedge**가 생긴다.
+그래서 이것을 테스트로 고정한다 (SCH-5).
 
 P-d를 progress로 두는 것이 옳은 이유: `emitBackpressured()`는 원래 **하류 포화 시 신규 주문
 유입을 억제해 취소 emit 헤드룸을 확보**하는 장치다. 그 상태에서 취소를 상한 없이 처리하는 것은
@@ -427,7 +478,18 @@ type EngineObservers struct {
 `OrderAdmitted`와 `OrderDone`을 분리하는 이유: 큐 대기는 **admit 시점**에 확정되고 체결 수는
 **완료 시점**에 확정된다. 하나로 묶으면 sweep이 진행되는 내내 queueWait 관측이 지연되어,
 sweep 중 큐 상태를 볼 수 없다. 즉시 완료 경로(§2.3)도 `OrderAdmitted`만 발생하고
-`OrderDone`은 발생하지 않는다.
+`OrderDone`은 발생하지 않는다 — 슬롯이 만들어지지 않았으므로 셀 체결이 없고, 여기서
+`OrderDone(0)`을 내면 `executions_per_order` 분포가 0으로 오염된다.
+
+**호출 순서 계약 — `Slice`는 `finishOrder` 뒤에 부른다.** `emitBlock` 인자는 그 조각이
+`ExecutionCh`에서 블로킹된 **총** 시간이어야 한다. 마지막 조각은 `finishOrder`가
+`MarketOrderDone`(시장가)을 emit하므로, `Slice`를 `finishOrder`보다 먼저 부르면 그 블로킹
+시간이 `emit_block_per_slice`에서 통째로 빠진다. 하필 그 emit이 하류 포화 시 가장 오래
+막히는 지점이므로, 순서가 뒤집히면 측정이 실패를 가장 잘 보여줘야 할 구간에서 침묵한다.
+
+**CP1-A도 `Slice`를 호출해야 한다.** 조각화 이전에는 "조각 = 주문 전체"이므로 `Slice(총 체결 수,
+그 주문의 emit 블로킹 누적)`으로 1회 부른다. CP1-A가 `Slice`를 안 부르면
+`matches_per_slice`·`emit_block_per_slice`의 baseline이 비어 CP2에서 전후 비교가 불가능해진다.
 
 `CancelOrderCommand`에 `EnqueuedAt time.Time`을 추가하고
 [engine.go:350 `CancelOrder`](../../../internal/matching/engine.go) 한 곳에서 채운다. 제로값이면
@@ -603,7 +665,7 @@ H0~H5를 각 5회 돌려 JSON을 남긴 뒤에야 CP1-B로 넘어간다. 보존 
 | 항목 | 내용 |
 |---|---|
 | baseline SHA | 계측 + 하니스만 들어간 CP1-A 커밋 |
-| baseline JSON | H0·H1·H2(1/64/256/1024/5000)·H3·H4·H5 각 5회 |
+| baseline JSON | **파일 10개** — H0, H1, H2-1, H2-64, H2-256, H2-1024, H2-5000, H3, H4, H5. 각 파일에 회차 5개 |
 | censored 개수 | 시나리오별. H1의 censored는 "고치려는 문제의 크기"다 |
 | 계측 오버헤드 | `engine_bench_test.go` 계측 전후 비교 수치 |
 
@@ -732,6 +794,17 @@ lifecycle 전제와 모순되므로 그렇게 쓰지 않는다.
 | load-gen linger | `enable-linger` 완료 |
 | SSH 경로 | server·db는 IAP, load-gen은 집 IP 직접 SSH |
 | 기준 SHA | 계획된 커밋과 일치 |
+| **quantum 값 적용 증거** | 아래 세 곳이 **모두** §9에서 선택된 값과 일치 |
+
+**quantum 값 적용 증거를 preflight 항목으로 둔다.** 값이 실제로 서버에 적용됐는지 확인하지
+않으면, 회귀 게이트가 검증하는 것이 무엇인지 알 수 없다. 기본값으로 뜬 서버를 측정하고 선택된
+값을 측정했다고 기록하는 것이 가장 흔한 실패 방식이다. 세 곳을 본다.
+
+1. compose/env 파일의 `GOEXCHANGE_MATCHING_MAX_*` (미설정이면 코드 기본값 상수를 확인)
+2. 실행 중 컨테이너의 실제 환경 (`docker compose exec ... env | grep MATCHING`)
+3. 서버 기동 로그의 `matching engine sharded: ... maxMatchesPerTurn=N maxConsecutiveCancels=M`
+
+셋 중 하나라도 어긋나면 **preflight 실패**다.
 
 **preflight 실패 = 부하 실행 금지.**
 
@@ -773,7 +846,9 @@ lifecycle 전제와 모순되므로 그렇게 쓰지 않는다.
 
 | 항목 | 기준 |
 |---|---|
-| 신규 지표 8종 | 실제로 수집됨 |
+| 신규 지표 8종 — metric family 존재 | 8종 전부 `/metrics`에 노출 |
+| 신규 지표 — 표본 수 | `turn_duration`·`order_queue_wait`·`executions_per_order`·`matches_per_slice`·`emit_block{event="trade"}`의 `_count` > 0 |
+| 신규 지표 — **0이어도 정상인 것** | `quantum_yields_total`, `cancel_queue_wait_count`, `emit_block{event="done"}`, `emit_block_per_slice`의 0은 **실패가 아니다**. 워크로드에 시장가·취소·yield가 없었을 수 있으므로, 0이면 그 사실을 워크로드 구성으로 설명해 보고서에 적는다 |
 | p95 | **참고값으로만 기록.** quantum 효과로 귀속하지 않는다 (사전 등록된 정량 게이트가 없다 — 36번 §8과 동일한 이유) |
 
 ### 11.4 산출물 시크릿 게이트 — 필수 중단 조건
