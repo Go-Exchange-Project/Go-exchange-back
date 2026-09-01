@@ -71,7 +71,17 @@ func main() {
 	}
 
 	engineShards := config.EngineShardsFromEnv()
-	me := matching.NewShardedEngine(engineShards)
+	maxMatchesPerTurn, maxConsecutiveCancels, quantumErr := config.MatchingQuantumFromEnv()
+	if quantumErr != nil {
+		log.Fatal("matching quantum config invalid: ", quantumErr)
+	}
+	me, engineErr := matching.NewShardedEngineWithQuantum(engineShards, matching.QuantumConfig{
+		MaxMatchesPerTurn:     maxMatchesPerTurn,
+		MaxConsecutiveCancels: maxConsecutiveCancels,
+	})
+	if engineErr != nil {
+		log.Fatal("matching quantum config invalid: ", engineErr)
+	}
 	me.SetMatchLatencyObserver(func(d time.Duration) {
 		metrics.OrderPipelineMatchLatency.Observe(d.Seconds())
 	})
@@ -84,7 +94,9 @@ func main() {
 	)
 	metrics.RegisterMatchingEngineShardOrderChannelLenGauges(me.ShardOrderChannelLens())
 	me.Start()
-	log.Printf("matching engine sharded: shards=%d", engineShards)
+	// GCP preflight가 이 로그로 적용된 quantum 값을 확인한다.
+	log.Printf("matching engine sharded: shards=%d maxMatchesPerTurn=%d maxConsecutiveCancels=%d",
+		engineShards, maxMatchesPerTurn, maxConsecutiveCancels)
 
 	hub := ws.NewHub()
 	go hub.Run()

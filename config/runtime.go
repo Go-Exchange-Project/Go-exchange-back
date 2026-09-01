@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +21,65 @@ const (
 	EnvGOExchangeOutboxBatchSize        = "GOEXCHANGE_OUTBOX_BATCH_SIZE"
 	EnvGOExchangeAcceptanceTimeoutMs    = "GOEXCHANGE_ACCEPTANCE_TIMEOUT_MS"
 	EnvGOExchangeHoldBatchSize          = "GOEXCHANGE_HOLD_BATCH_SIZE"
+
+	EnvGOExchangeMatchingMaxMatchesPerTurn     = "GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN"
+	EnvGOExchangeMatchingMaxConsecutiveCancels = "GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS"
+)
+
+// strictPositiveEnv는 기존 parsePositiveIntEnv(database.go)와 달리 조용히
+// fallback하지 않는다. quantum 값은 0이 matchSlice의 무제한 sentinel과
+// 충돌하므로, 잘못된 설정으로 뜬 서버가 부하를 받는 것보다 안 뜨는 편이 낫다.
+//
+// 미설정(LookupEnv ok=false)만 기본값을 쓴다. 빈 문자열로 설정된 것은 셸
+// 변수 오타나 치환 실패의 전형적 결과이므로 에러다 — os.Getenv로는 둘을
+// 구분할 수 없어 LookupEnv를 쓴다.
+func strictPositiveEnv(key string, def int) (int, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return def, nil
+	}
+	if raw == "" {
+		return 0, fmt.Errorf("%s is set but empty", key)
+	}
+	if raw != strings.TrimSpace(raw) {
+		return 0, fmt.Errorf("%s has surrounding whitespace: %q", key, raw)
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a decimal integer: %q", key, raw)
+	}
+	if strconv.Itoa(parsed) != raw {
+		return 0, fmt.Errorf("%s is not in canonical decimal form: %q", key, raw)
+	}
+	if parsed < 1 {
+		return 0, fmt.Errorf("%s must be >= 1, got %d", key, parsed)
+	}
+	return parsed, nil
+}
+
+// MatchingQuantumFromEnv는 매칭 스케줄러의 두 상한을 strict 파싱한다.
+// matching 타입을 반환하지 않는 것은 config → matching 의존을 만들지
+// 않기 위해서다. main이 두 값으로 matching.QuantumConfig를 구성한다.
+//
+// 기본값은 matching 패키지의 개발용 상수와 같아야 한다. 어긋나면 테스트와
+// 프로덕션이 다른 값으로 돈다.
+func MatchingQuantumFromEnv() (maxMatchesPerTurn int, maxConsecutiveCancels int, err error) {
+	maxMatchesPerTurn, err = strictPositiveEnv(EnvGOExchangeMatchingMaxMatchesPerTurn, defaultMatchingMaxMatchesPerTurn)
+	if err != nil {
+		return 0, 0, err
+	}
+	maxConsecutiveCancels, err = strictPositiveEnv(EnvGOExchangeMatchingMaxConsecutiveCancels, defaultMatchingMaxConsecutiveCancels)
+	if err != nil {
+		return 0, 0, err
+	}
+	return maxMatchesPerTurn, maxConsecutiveCancels, nil
+}
+
+// 로컬 탐색으로 확정할 때까지의 임시 개발값이다.
+// internal/matching/quantum_config.go의 값과 반드시 같아야 한다.
+const (
+	defaultMatchingMaxMatchesPerTurn     = 64
+	defaultMatchingMaxConsecutiveCancels = 32
 )
 
 const defaultSettlementWorkers = 10

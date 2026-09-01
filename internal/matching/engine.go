@@ -63,18 +63,35 @@ type MatchingEngine struct {
 	// Start() 전에 설정하고 실행 중 교체하지 않는다 — 재대입은 data race다.
 	Observers EngineObservers
 
-	// lastMatchTrades·sliceEmitBlock은 한 조각의 누적값이다. 엔진
-	// goroutine에서만 쓴다. processOrder가 매 주문 시작 시 0으로 되돌린다 —
-	// Match 안에서 초기화하면 Match를 직접 부르는 테스트 30여 곳의 누적값이
-	// 섞인다.
-	lastMatchTrades int
-	sliceEmitBlock  time.Duration
+	// sliceEmitBlock은 조각 하나의 emit 블로킹 누적값이다. runSlice가 조각
+	// 시작마다 0으로 되돌린다. 엔진 goroutine에서만 쓴다.
+	sliceEmitBlock time.Duration
 
 	// quantum 값. 0은 matchSlice의 무제한 sentinel과 충돌하므로 항상 1
 	// 이상이어야 한다. 여기 기본값은 개발·테스트용이며, production 값은
 	// 로컬 탐색 결과로 확정한다.
 	maxMatchesPerTurn     int
 	maxConsecutiveCancels int
+
+	// 스케줄러 지속 상태. 엔진 goroutine에서만 쓴다.
+	//
+	// pendingCancel·pendingOrder·tickerDue는 blocking select가 latch한
+	// 작업이다. 그 select는 작업을 실행하지 않고 latch만 하며, 다음 turn이
+	// 처리한다 — turn_duration에 블로킹 대기가 섞이지 않게 하기 위해서다.
+	activeSweep          *activeSweep
+	shuttingDown         bool
+	cancelsSinceProgress int
+	pendingCancel        *CancelOrderCommand
+	pendingOrder         *Order
+	tickerDue            bool
+
+	// crashHook은 테스트 전용이다. nil이 아니고 true를 반환하면 엔진 루프가
+	// drain·flush·채널 close 없이 즉시 반환한다 — 프로세스 크래시와 같은
+	// 상태를 만든다. 프로덕션에서는 항상 nil이다.
+	//
+	// Start() 전에 설치하고 arm은 hook 내부의 atomic으로 한다. 실행 중
+	// 함수 필드를 교체하면 data race다.
+	crashHook func() bool
 
 	// snapshotCache는 심볼별 최신 스냅샷(*OrderBookSnapshot)을 담는다. 엔진 goroutine이
 	// 코얼레싱 티커에서 Store하고, REST 핸들러가 락 없이 Load한다.
@@ -180,75 +197,209 @@ func (me *MatchingEngine) Start() {
 		ticker := time.NewTicker(me.interval())
 		defer ticker.Stop()
 		for {
-			// 취소 우선: 대기 중 취소를 먼저 논블로킹으로 전부 드레인.
-			select {
-			case cmd := <-me.CancelCh:
-				me.processCancel(cmd)
-				continue
-			default:
-			}
-			// 취소가 없을 때만 주문/ticker/stop.
-			orderCh := me.OrderCh
-			if me.emitBackpressured() {
-				orderCh = nil // 하류 포화 — 신규 주문 억제, 취소 emit 헤드룸 확보
-			}
-			select {
-			case cmd := <-me.CancelCh:
-				me.processCancel(cmd)
-			case order := <-orderCh:
-				me.processOrder(order)
-			case <-ticker.C:
-				// 코얼레싱: dirty 심볼의 스냅샷만 생성해 캐시 저장 + 논블로킹 브로드캐스트.
-				me.flushSnapshots()
-			case <-me.stopCh:
-				// graceful shutdown: 이미 접수된 주문/취소를 모두 처리한 뒤 마지막
-				// 스냅샷을 flush하고 종료한다. 이 루프가 ExecutionCh와 SnapshotCh의
-				// 유일한 writer이므로, 드레인 완료 후의 close가 downstream(outbox
-				// writer, 스냅샷 소비자) 종료를 도미노로 전파한다.
-				me.drainPendingWork()
-				me.flushSnapshots()
-				if me.ExecutionCh != nil {
-					close(me.ExecutionCh)
-				}
-				close(me.SnapshotCh)
+			if me.runTurn(ticker) {
 				return
 			}
 		}
 	}()
 }
 
-// processOrder는 매칭 후 심볼을 dirty로 표시만 한다. 스냅샷 생성·브로드캐스트는
-// 코얼레싱 티커가 담당하므로, 매칭 루프가 스냅샷 비용이나 소비자 속도에 결박되지 않는다.
-func (me *MatchingEngine) processOrder(order *Order) {
-	if order == nil {
+// runTurn은 quantum 경계 하나를 실행한다. true를 반환하면 엔진이 종료됐다.
+//
+// 계약: blocking select는 작업을 실행하지 않고 latch만 한다. latch된 작업은
+// 다음 turn에서 처리된다 — 그래야 모든 실제 작업이 계측 구간 안에서 일어나고
+// turn_duration에 블로킹 대기가 섞이지 않는다.
+func (me *MatchingEngine) runTurn(ticker *time.Ticker) bool {
+	turnStart := time.Now()
+
+	// 0. turn 시작 상태를 고정한다. 5단계가 3단계 실행 **후의** activeSweep을
+	//    다시 읽으면, 마지막 조각이 끝난 turn에서 P-a와 P-b/P-c/P-d가 함께
+	//    발생해 "turn당 progress 정확히 하나" 불변식이 깨진다. 그러면 sweep이
+	//    끝난 turn만 취소 상한을 두 배로 얻는 비대칭이 생긴다.
+	hadActive := me.activeSweep != nil
+
+	// 1. cancel phase — 상한 안에서만 드레인한다. 상한이 없으면 취소 홍수가
+	//    OrderCh를 영원히 굶긴다.
+	for me.cancelsSinceProgress < me.maxConsecutiveCancels {
+		cmd, ok := me.takeCancel()
+		if !ok {
+			break
+		}
+		me.processCancel(cmd)
+		me.cancelsSinceProgress++
+	}
+
+	// 2. ticker phase — 코얼레싱된 스냅샷을 발행한다.
+	if me.tickerDue {
+		me.tickerDue = false
+		me.flushSnapshots()
+	} else {
+		select {
+		case <-ticker.C:
+			me.flushSnapshots()
+		default:
+		}
+	}
+
+	// 3. slice phase
+	if me.activeSweep != nil {
+		me.runSlice()
+		me.cancelsSinceProgress = 0 // P-a
+	}
+
+	// 3.5 crash hook (테스트 전용). 조각 사이에서만 발동한다.
+	//     drain·flush·close 없이 반환해 프로세스 크래시와 같은 상태를 만든다.
+	if me.crashHook != nil && me.crashHook() {
+		return true
+	}
+
+	// 4. stop latch
+	if !me.shuttingDown {
+		select {
+		case <-me.stopCh:
+			me.shuttingDown = true
+		default:
+		}
+	}
+
+	// 5. admission phase — turn 시작 시점에 슬롯이 있었으면 건너뛴다.
+	//    그 sweep이 끝난 주문의 다음 작업은 다음 turn의 5단계가 받는다.
+	if !hadActive {
+		me.admitPhase()
+	}
+
+	me.Observers.turn(time.Since(turnStart))
+
+	// 6. 남은 일이 있으면 블로킹하지 않고 다음 turn으로.
+	if me.activeSweep != nil || me.pendingCancel != nil || me.pendingOrder != nil || me.tickerDue {
+		return false
+	}
+
+	// 7. shutdown drain 완료 판정.
+	if me.shuttingDown {
+		if me.latchOneNonBlocking() {
+			return false
+		}
+		// activeSweep이 없고 두 채널의 논블로킹 recv가 모두 비었다 → drain 완료.
+		// 이 루프가 ExecutionCh와 SnapshotCh의 유일한 writer이므로, close가
+		// downstream(outbox writer, 스냅샷 소비자) 종료를 도미노로 전파한다.
+		me.flushSnapshots()
+		if me.ExecutionCh != nil {
+			close(me.ExecutionCh)
+		}
+		close(me.SnapshotCh)
+		return true
+	}
+
+	// 8. blocking select — 실행하지 않고 latch만 한다.
+	orderCh := me.OrderCh
+	if me.emitBackpressured() {
+		orderCh = nil // 하류 포화 — 신규 주문 억제, 취소 emit 헤드룸 확보
+	}
+	select {
+	case cmd := <-me.CancelCh:
+		me.pendingCancel = &cmd
+	case order := <-orderCh:
+		me.pendingOrder = order
+	case <-ticker.C:
+		me.tickerDue = true
+	case <-me.stopCh:
+		me.shuttingDown = true
+	}
+	return false
+}
+
+func (me *MatchingEngine) takeCancel() (CancelOrderCommand, bool) {
+	if me.pendingCancel != nil {
+		cmd := *me.pendingCancel
+		me.pendingCancel = nil
+		return cmd, true
+	}
+	select {
+	case cmd := <-me.CancelCh:
+		return cmd, true
+	default:
+		return CancelOrderCommand{}, false
+	}
+}
+
+// admitPhase는 P-b/P-c/P-d 중 하나를 반드시 발생시킨다. 그 불변식이
+// cancelsSinceProgress가 상한에 고정되는 wedge를 막는다.
+//
+// latch된 pendingOrder는 emitBackpressured() 검사보다 **먼저** 처리한다.
+// 게이트는 OrderCh에서의 신규 유입만 억제하는 장치이고, 이미 엔진 안으로
+// 들어온 작업에는 적용되지 않는다. 순서가 뒤집히면 cancel phase가 만든
+// backpressure에 latch된 주문이 걸려 무기한 park한다.
+func (me *MatchingEngine) admitPhase() {
+	if me.pendingOrder != nil {
+		order := me.pendingOrder
+		me.pendingOrder = nil
+		me.admit(order)
+		me.cancelsSinceProgress = 0 // P-b
 		return
 	}
-	if !order.EnqueuedAt.IsZero() {
-		me.Observers.orderAdmitted(time.Since(order.EnqueuedAt))
+	if !me.shuttingDown && me.emitBackpressured() {
+		me.cancelsSinceProgress = 0 // P-d: 의도된 유입 억제 — 굶는 주체가 없다
+		return
 	}
-	// 조각화 이전에는 "조각 = 주문 전체"다. 조각화 후와 같은 지표를 채우기
-	// 위해 Slice/OrderDone을 여기서 1회 낸다. 이 둘이 비면
-	// matches_per_slice와 emit_block_per_slice의 baseline이 없어 전후
-	// 비교가 불가능하다.
-	me.lastMatchTrades = 0
+	select {
+	case order := <-me.OrderCh:
+		me.admit(order)
+	default:
+	}
+	me.cancelsSinceProgress = 0 // P-b 또는 P-c
+}
+
+func (me *MatchingEngine) admit(order *Order) {
+	if sweep := me.admitOrder(order); sweep != nil {
+		me.activeSweep = sweep
+	}
+}
+
+// runSlice는 조각 하나를 실행하고, 마지막 조각이면 슬롯을 비운다.
+//
+// Slice 관측은 finishOrder 뒤다 — 마지막 조각의 MarketOrderDone emit
+// 블로킹이 sliceEmitBlock에 들어간 뒤여야 한다.
+func (me *MatchingEngine) runSlice() {
+	sweep := me.activeSweep
 	me.sliceEmitBlock = 0
-	admissible := me.orderIsAdmissible(order)
-	me.Match(order)
-	if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
-		me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
+	trades, done := me.matchSlice(sweep.book, sweep.order, me.maxMatchesPerTurn)
+	sweep.trades += trades
+	// 조각마다 dirty를 찍는다. Match 완료 후에만 찍으면 sweep 도중의 ticker가
+	// 그 심볼을 보지 못해 캐시와 WebSocket 스냅샷이 sweep 내내 멈춘다.
+	if trades >= 1 {
+		me.markDirty(sweep.order.CoinSymbol)
 	}
-	// 즉시 완료 경로는 매칭을 수행하지 않으므로 셀 체결이 없다. 여기서
-	// OrderDone(0)/Slice(0)를 내면 executions_per_order 분포가 0으로
-	// 오염되고, "OrderAdmitted만 발생" 계약과 어긋난다.
-	//
-	// Slice는 Match(= 잔량 등록·MarketOrderDone 포함) 뒤에 부른다. 마지막
-	// emit의 블로킹 시간이 sliceEmitBlock에 들어간 뒤여야 한다 — 순서가
-	// 뒤집히면 하류 포화 시 가장 오래 막히는 지점이 측정에서 빠진다.
-	if admissible {
-		me.Observers.slice(me.lastMatchTrades, me.sliceEmitBlock)
-		me.Observers.orderDone(me.lastMatchTrades)
+	if !done {
+		me.Observers.slice(trades, me.sliceEmitBlock)
+		me.Observers.yield()
+		return
 	}
-	me.markDirty(order.CoinSymbol)
+	me.finishOrder(sweep.book, sweep.order)
+	me.Observers.slice(trades, me.sliceEmitBlock)
+	me.observeMatchLatency(sweep.order)
+	me.Observers.orderDone(sweep.trades)
+	me.activeSweep = nil
+}
+
+// latchOneNonBlocking은 shutdown drain 전용이다. OrderCh에 게이트를 걸지
+// 않는다 — 이미 접수된 작업이기 때문이다. HTTP·hold coordinator·cancel
+// worker가 먼저 종료돼 새 producer가 없다는 lifecycle을 전제로 하며,
+// 채널 len()으로 판정하지 않는다.
+func (me *MatchingEngine) latchOneNonBlocking() bool {
+	select {
+	case cmd := <-me.CancelCh:
+		me.pendingCancel = &cmd
+		return true
+	default:
+	}
+	select {
+	case order := <-me.OrderCh:
+		me.pendingOrder = order
+		return true
+	default:
+	}
+	return false
 }
 
 // orderIsAdmissible은 Match가 실제 매칭을 수행할 주문인지를 Match와 같은
@@ -313,18 +464,6 @@ func (me *MatchingEngine) interval() time.Duration {
 	return defaultSnapshotInterval
 }
 
-func (me *MatchingEngine) drainPendingWork() {
-	for {
-		select {
-		case order := <-me.OrderCh:
-			me.processOrder(order)
-		case cmd := <-me.CancelCh:
-			me.processCancel(cmd)
-		default:
-			return
-		}
-	}
-}
 
 // Stop은 엔진 루프에 종료를 지시합니다. 루프는 접수된 주문/취소를 드레인한 뒤
 // ExecutionCh·SnapshotCh를 닫고 Done()을 통해 완료를 알립니다.
@@ -476,57 +615,102 @@ func (me *MatchingEngine) GetOrderBook(coinSymbol string) *OrderBook {
 	return book
 }
 
-func (me *MatchingEngine) Match(order *Order) {
-	if order == nil {
-		return
-	}
+// activeSweep은 조각 사이에 살아남는 유일한 sweep 상태다. 재개에 필요한 것은
+// 주문 포인터뿐이다 — 네 match 루프는 반복 사이에 지역 상태를 들고 가지 않고
+// 매번 bestMatchable*로 상대를 새로 찾는다. 그것이 조각 사이에 처리된 취소를
+// 반영하는 유일하게 안전한 방법이다.
+type activeSweep struct {
+	order  *Order
+	book   *OrderBook
+	trades int
+}
 
-	book := me.GetOrderBook(order.CoinSymbol)
-
+// matchSlice는 최대 budget개의 체결을 만들고 돌아온다.
+// done=true는 "더 체결할 수 없다"이고, budget 소진(done=false)과 다르다.
+func (me *MatchingEngine) matchSlice(book *OrderBook, order *Order, budget int) (int, bool) {
 	switch order.Side {
 	case model.OrderSideBuy:
 		if order.OrderType == model.OrderTypeMarket {
-			me.matchMarketBuy(book, order)
-		} else {
-			if !order.Amount.GreaterThan(decimal.Zero) {
-				return
-			}
-			me.matchBuy(book, order)
+			return me.matchMarketBuy(book, order, budget)
 		}
+		return me.matchBuy(book, order, budget)
 	case model.OrderSideSell:
-		if !order.Amount.GreaterThan(decimal.Zero) {
-			return
-		}
 		if order.OrderType == model.OrderTypeMarket {
-			me.matchMarketSell(book, order)
-		} else {
-			me.matchSell(book, order)
+			return me.matchMarketSell(book, order, budget)
 		}
-	default:
-		return
+		return me.matchSell(book, order, budget)
 	}
+	return 0, true
+}
 
+// finishOrder는 마지막 조각에서만 부른다.
+// 시장가면 MarketOrderDone 1회, 지정가 잔량이 있으면 book에 등록한다.
+func (me *MatchingEngine) finishOrder(book *OrderBook, order *Order) {
 	if order.OrderType == model.OrderTypeMarket {
 		me.emitMarketOrderDone(order)
 		return
 	}
-
 	if order.Amount.GreaterThan(decimal.Zero) {
 		book.AddOrder(order)
+		me.markDirty(order.CoinSymbol)
 	}
 }
 
-func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
+// admitOrder는 주문을 슬롯에 올린다. 슬롯을 만들 수 없는 즉시 완료 주문은
+// nil을 반환하되 observer는 정확히 1회 호출한다(nil 주문 제외).
+// 이 가드들은 조각화 이전 Match 앞머리의 조기 반환과 의미가 같아야 한다.
+func (me *MatchingEngine) admitOrder(order *Order) *activeSweep {
+	if order == nil {
+		return nil
+	}
+	if !order.EnqueuedAt.IsZero() {
+		me.Observers.orderAdmitted(time.Since(order.EnqueuedAt))
+	}
+	if !me.orderIsAdmissible(order) {
+		me.observeMatchLatency(order)
+		return nil
+	}
+	return &activeSweep{order: order, book: me.GetOrderBook(order.CoinSymbol)}
+}
+
+func (me *MatchingEngine) observeMatchLatency(order *Order) {
+	if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
+		me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
+	}
+}
+
+// Match는 조각화 없이 주문을 끝까지 처리한다. 테스트·벤치 약 30곳이 이
+// 시그니처를 쓰므로 그대로 둔다. budget 0이 무제한 sentinel이다.
+func (me *MatchingEngine) Match(order *Order) {
+	sweep := me.admitOrder(order)
+	if sweep == nil {
+		return
+	}
+	me.matchSlice(sweep.book, sweep.order, 0)
+	me.finishOrder(sweep.book, sweep.order)
+}
+
+// budget 0은 무제한(public Match 전용) sentinel이다. budget > 0이면 trades가
+// budget에 닿을 때 yield한다. 반환값 done=true는 "더 체결할 수 없다"이고
+// budget 소진(done=false)과 다르다.
+//
+// 예산 검사는 루프 조건 **뒤**에 있다. 예산 경계에서 정확히 전량 체결된
+// sweep이 같은 조각에서 done=true로 끝나야 빈 조각이 생기지 않는다.
+func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order, budget int) (int, bool) {
+	trades := 0
 	for order.Amount.GreaterThan(decimal.Zero) {
+		if budget > 0 && trades >= budget {
+			return trades, false
+		}
 		sellLevel, orderIndex, ok := bestMatchableSellOrder(book, order)
 		if !ok {
-			return
+			return trades, true
 		}
 
 		sellOrder := sellLevel.Orders.At(orderIndex)
 		tradeQty := decimal.Min(order.Amount, sellOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
-			return
+			return trades, true
 		}
 
 		order.Amount = order.Amount.Sub(tradeQty)
@@ -542,20 +726,26 @@ func (me *MatchingEngine) matchBuy(book *OrderBook, order *Order) {
 		}
 
 		me.emitTrade(me.newTrade(order.CoinSymbol, sellLevel.Price, tradeQty, order.ID, sellOrder.ID))
+		trades++
 	}
+	return trades, true
 }
 
-func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
+func (me *MatchingEngine) matchSell(book *OrderBook, order *Order, budget int) (int, bool) {
+	trades := 0
 	for order.Amount.GreaterThan(decimal.Zero) {
+		if budget > 0 && trades >= budget {
+			return trades, false
+		}
 		buyLevel, orderIndex, ok := bestMatchableBuyOrder(book, order)
 		if !ok {
-			return
+			return trades, true
 		}
 
 		buyOrder := buyLevel.Orders.At(orderIndex)
 		tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
-			return
+			return trades, true
 		}
 
 		order.Amount = order.Amount.Sub(tradeQty)
@@ -571,14 +761,20 @@ func (me *MatchingEngine) matchSell(book *OrderBook, order *Order) {
 		}
 
 		me.emitTrade(me.newTrade(order.CoinSymbol, buyLevel.Price, tradeQty, buyOrder.ID, order.ID))
+		trades++
 	}
+	return trades, true
 }
 
-func (me *MatchingEngine) matchMarketBuy(book *OrderBook, order *Order) {
+func (me *MatchingEngine) matchMarketBuy(book *OrderBook, order *Order, budget int) (int, bool) {
+	trades := 0
 	for order.QuoteAmount.GreaterThan(decimal.Zero) {
+		if budget > 0 && trades >= budget {
+			return trades, false
+		}
 		sellLevel, orderIndex, ok := bestMarketSellOrder(book, order)
 		if !ok {
-			return
+			return trades, true
 		}
 
 		sellOrder := sellLevel.Orders.At(orderIndex)
@@ -589,7 +785,7 @@ func (me *MatchingEngine) matchMarketBuy(book *OrderBook, order *Order) {
 		maxQtyByQuote, _ := order.QuoteAmount.QuoRem(sellLevel.Price, int32(decimal.DivisionPrecision))
 		tradeQty := decimal.Min(maxQtyByQuote, sellOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
-			return
+			return trades, true
 		}
 		executionQuote := sellLevel.Price.Mul(tradeQty)
 
@@ -607,20 +803,26 @@ func (me *MatchingEngine) matchMarketBuy(book *OrderBook, order *Order) {
 		}
 
 		me.emitTrade(me.newTrade(order.CoinSymbol, sellLevel.Price, tradeQty, order.ID, sellOrder.ID))
+		trades++
 	}
+	return trades, true
 }
 
-func (me *MatchingEngine) matchMarketSell(book *OrderBook, order *Order) {
+func (me *MatchingEngine) matchMarketSell(book *OrderBook, order *Order, budget int) (int, bool) {
+	trades := 0
 	for order.Amount.GreaterThan(decimal.Zero) {
+		if budget > 0 && trades >= budget {
+			return trades, false
+		}
 		buyLevel, orderIndex, ok := bestMarketBuyOrder(book, order)
 		if !ok {
-			return
+			return trades, true
 		}
 
 		buyOrder := buyLevel.Orders.At(orderIndex)
 		tradeQty := decimal.Min(order.Amount, buyOrder.Amount)
 		if !tradeQty.GreaterThan(decimal.Zero) {
-			return
+			return trades, true
 		}
 		executionQuote := buyLevel.Price.Mul(tradeQty)
 
@@ -638,7 +840,9 @@ func (me *MatchingEngine) matchMarketSell(book *OrderBook, order *Order) {
 		}
 
 		me.emitTrade(me.newTrade(order.CoinSymbol, buyLevel.Price, tradeQty, buyOrder.ID, order.ID))
+		trades++
 	}
+	return trades, true
 }
 
 func (me *MatchingEngine) emitTrade(trade *model.Trade) {
@@ -649,7 +853,6 @@ func (me *MatchingEngine) emitTrade(trade *model.Trade) {
 	if me.ExecutionCh != nil {
 		me.sendExecution(EmitTrade, ExecutionEvent{Trade: trade})
 	}
-	me.lastMatchTrades++
 }
 
 // sendExecution은 ExecutionCh로의 블로킹 send 시간을 관측한다.

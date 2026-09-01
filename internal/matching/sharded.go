@@ -136,6 +136,21 @@ func (se *ShardedEngine) RequestOrderBookSnapshot(coinSymbol string, depth int) 
 }
 
 // SetMatchLatencyObserver는 전 샤드에 같은 옵저버를 설정한다.
+// NewShardedEngineWithQuantum은 검증된 quantum 설정을 전 샤드에 주입한다.
+// 무인자 NewShardedEngine은 테스트용 기본값을 유지하므로 그대로 둔다 —
+// 기존 호출부를 건드리지 않기 위해서다.
+func NewShardedEngineWithQuantum(shardCount int, cfg QuantumConfig) (*ShardedEngine, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	se := NewShardedEngine(shardCount)
+	for _, shard := range se.shards {
+		shard.maxMatchesPerTurn = cfg.MaxMatchesPerTurn
+		shard.maxConsecutiveCancels = cfg.MaxConsecutiveCancels
+	}
+	return se, nil
+}
+
 // SetObservers는 전 샤드에 같은 계측 콜백 묶음을 설정한다.
 // Start() 전에만 부른다 — 실행 중 재대입은 data race다.
 func (se *ShardedEngine) SetObservers(observers EngineObservers) {
