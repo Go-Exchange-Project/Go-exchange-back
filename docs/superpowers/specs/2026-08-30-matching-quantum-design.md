@@ -37,11 +37,11 @@ A를 고른 이유는 **price-time priority를 깨지 않는 유일한 후보**�
 
 | # | 단계 | 체크포인트 |
 |---|---|---|
-| 1 | 행동 변경 없는 계측 + 목적형 하니스 추가, 커밋 | **CP1-A** |
-| 2 | 그 SHA에서 baseline 수집 → SHA·JSON 보존 | **CP1-A** |
-| 3 | 두 quantum 구현 | **CP1-B** |
-| 4 | 같은 하니스로 20조합 측정, 보존된 baseline과 비교해 값 확정 | **CP2** |
-| 5 | GCP 500 VU 1회 — 값 탐색이 아니라 **최종 회귀 게이트로만** | **CP3** |
+| 1 | 행동 변경 없는 계측 + 목적형 하니스 추가, 커밋 | **CP A** |
+| 2 | 그 SHA에서 baseline 3회 수집 → SHA·JSON 보존 | **CP A** |
+| 3 | 두 quantum 구현 | **CP A** |
+| 4 | 같은 하니스로 6조합 3회 탐색 → 상위 2개 5회 확증 → 값 확정 → 전체 로컬 검증·CI | **CP A** |
+| 5 | GCP 500 VU 1회 — 값 탐색이 아니라 **최종 회귀 게이트로만** | **CP B** |
 
 1·2가 같은 체크포인트인 이유는 §13에, baseline을 4에서 다시 재지 않는 이유는 §8.4에 있다.
 
@@ -487,9 +487,9 @@ sweep 중 큐 상태를 볼 수 없다. 즉시 완료 경로(§2.3)도 `OrderAdm
 시간이 `emit_block_per_slice`에서 통째로 빠진다. 하필 그 emit이 하류 포화 시 가장 오래
 막히는 지점이므로, 순서가 뒤집히면 측정이 실패를 가장 잘 보여줘야 할 구간에서 침묵한다.
 
-**CP1-A도 `Slice`를 호출해야 한다.** 조각화 이전에는 "조각 = 주문 전체"이므로 `Slice(총 체결 수,
-그 주문의 emit 블로킹 누적)`으로 1회 부른다. CP1-A가 `Slice`를 안 부르면
-`matches_per_slice`·`emit_block_per_slice`의 baseline이 비어 CP2에서 전후 비교가 불가능해진다.
+**계측 커밋에서도 `Slice`를 호출해야 한다.** 조각화 이전에는 "조각 = 주문 전체"이므로 `Slice(총 체결 수,
+그 주문의 emit 블로킹 누적)`으로 1회 부른다. 계측 커밋이 `Slice`를 안 부르면
+`matches_per_slice`·`emit_block_per_slice`의 baseline이 비어 탐색 단계에서 전후 비교가 불가능해진다.
 
 `CancelOrderCommand`에 `EnqueuedAt time.Time`을 추가하고
 [engine.go:350 `CancelOrder`](../../../internal/matching/engine.go) 한 곳에서 채운다. 제로값이면
@@ -515,7 +515,7 @@ sweep 중 큐 상태를 볼 수 없다. 즉시 완료 경로(§2.3)도 `OrderAdm
 
 ### 4.3 계측 오버헤드를 먼저 격리한다
 
-CP1-A는 **행동 변경이 0**이어야 한다. 계측만 넣은 상태에서 기존 `engine_bench_test.go`를 전후
+계측 커밋은 **행동 변경이 0**이어야 한다. 계측만 넣은 상태에서 기존 `engine_bench_test.go`를 전후
 비교하고 **계측 자체의 오버헤드를 먼저 기록**한다. 이 숫자를 따로 잡아두지 않으면 4단계에서
 quantum 비용과 계측 비용이 섞여 구분이 불가능해진다.
 
@@ -609,9 +609,9 @@ active sweep 중인 주문은 book에 없으므로 엔진 취소는 not-found를
 k6는 HTTP·DB를 함께 태우므로 엔진 스케줄러 신호가 묻힌다. 여기서 필요한 것은 엔진 goroutine
 하나의 지연 분포다. 그래서 `internal/matching/quantum_harness_test.go`로 구현한다.
 
-**하니스는 CP1-B(quantum 구현)가 아니라 CP1-A(계측 only)의 산출물이다.** baseline은 행동이
+**하니스는 quantum 구현이 아니라 계측 커밋의 산출물이다.** baseline은 행동이
 바뀌기 전 코드에서, 그리고 나중에 후보를 잴 때와 **같은 하니스 코드로** 나와야 한다. 하니스를
-CP1-B 이후에 쓰면 baseline과 후보 측정이 서로 다른 하니스 버전에서 나오게 되고, 전후 차이에
+quantum 구현 이후에 쓰면 baseline과 후보 측정이 서로 다른 하니스 버전에서 나오게 되고, 전후 차이에
 하니스 변경분이 섞인다.
 
 **opt-in 빌드 태그로 격리한다.** 파일 머리에 `//go:build quantumharness`를 두고
@@ -623,22 +623,32 @@ goroutine으로 붙이고, 관측 콜백으로 샘플을 수집한 뒤 분위수
 
 ### 8.2 시나리오
 
-| 시나리오 | 구성 | 1차 지표 |
-|---|---|---|
-| **H0 무취소 control** | **H1과 주문 수·producer·consumer 조건이 동일하고 취소율만 0** | `order_queue_wait` p99 |
-| H1 cancel flood | 대기 주문 N개 + 초당 C건 취소 유입 | `order_queue_wait` p99 |
-| H2 sweep 크기별 | maker **1 / 64 / 256 / 1024 / 5000** 소진 taker, sweep 중간에 취소 1건 | `cancel_queue_wait` p99, sweep 총 시간 |
-| H3 backpressure | `ExecutionCh` 소비자를 high-watermark 근처로 늦춤 | `emit_block_seconds` p99, `emit_block_per_slice_seconds` |
-| H4 스냅샷 신선도 | H2 실행 중 `SnapshotCh` 수신 간격 | 최대 간격 |
-| H5 혼합 | H1 + H2 동시 | 위 전부 |
+**시나리오는 다섯 개뿐이다.** 각각이 판정표의 특정 기준 하나를 먹인다. 그 대응이 없는
+시나리오는 측정 비용만 늘린다.
 
-**시드 고정 · 반복 5회 · p99의 중앙값을 주 판정으로.** 단발 실행은 GC와 스케줄링 지터에 흔들린다.
+| 시나리오 | 구성 | 1차 지표 | 먹이는 기준 |
+|---|---|---|---|
+| **H0 무취소 control** | H1과 주문 수·producer·consumer가 동일하고 **취소율만 0** | `order_queue_wait` p99 | C2의 기준값 |
+| **H1 cancel flood** | 대기 주문 N개 + 취소 C건 유입 | `order_queue_wait` p99 | C2 |
+| **H2-1 작은 sweep control** | maker 1건 소진 taker, sweep 중 취소 1건 | `cancel_queue_wait` p99 | C1의 기준값 |
+| **H2-5000 큰 sweep** | maker 5,000건 소진 taker, sweep 중 취소 1건 | `cancel_queue_wait` p99, sweep 총 시간 | C1, C3 |
+| **H4 snapshot freshness** | H2-5000과 같은 부하에서 `SnapshotCh` 수신 간격 | 최대 간격 | C4 |
+
+**시드 고정. baseline과 1차 탐색은 시나리오당 3회, 확증은 5회.** 단발 실행은 GC와 스케줄링
+지터에 흔들린다.
+
+**제외한 것.** 이전 초안의 H3(backpressure)과 H5(혼합)는 뺐다. 둘 다 판정표의 어떤 기준도
+먹이지 않고 관찰용이었다. `emit_block_seconds`는 실행 중 항상 수집되므로 전용 시나리오 없이도
+보인다. 혼합 부하는 GCP 500 VU 회귀 게이트가 대신한다.
 
 **H0을 별도 시나리오로 세우는 이유.** C2의 상한은 "취소가 없을 때의 주문 지연"을 기준으로
 계산된다. 그 control을 H1과 다른 구성(주문 수, producer 주입 속도, consumer 소비 속도)에서
 재면 비교가 성립하지 않는다 — 상한이 실제보다 느슨하거나 촘촘해지고, 그 차이가 어디서 왔는지
 사후에 분리할 수 없다. **H0은 H1에서 취소율만 0으로 바꾼 것이어야 하며, 다른 파라미터를
-공유해야 한다.** H0의 고정 시드 5회 p99와 JSON은 CP1-A baseline에 함께 보존한다.
+공유해야 한다.**
+
+**H2-1이 필요한 이유도 같다.** C1의 상한은 "sweep이 작을 때의 취소 지연"에서 나온다.
+H2-5000과 같은 코드 경로를 maker 수만 바꿔 돌려야 그 차이가 sweep 크기 때문임이 분리된다.
 
 ### 8.3 watchdog과 censored 처리
 
@@ -659,13 +669,13 @@ H1은 기아를 재현하는 시나리오다. **수정 전 baseline에서는 주
 각 회차는 JSON으로 저장한다: 시나리오, 시드, 후보 값, 전 지표의 p50/p95/p99/max, censored 개수,
 표본 수.
 
-**CP1-A에서 baseline을 실제로 보존한다.** 계측 + 하니스를 먼저 커밋하고, 그 커밋 SHA에서
-H0~H5를 각 5회 돌려 JSON을 남긴 뒤에야 CP1-B로 넘어간다. 보존 대상:
+**baseline을 실제로 보존한다.** 계측 + 하니스를 먼저 커밋하고, 그 커밋 SHA에서 다섯 시나리오를
+각 3회 돌려 JSON을 남긴 뒤에야 quantum 구현으로 넘어간다. 보존 대상:
 
 | 항목 | 내용 |
 |---|---|
-| baseline SHA | 계측 + 하니스만 들어간 CP1-A 커밋 |
-| baseline JSON | **파일 10개** — H0, H1, H2-1, H2-64, H2-256, H2-1024, H2-5000, H3, H4, H5. 각 파일에 회차 5개 |
+| baseline SHA | 계측 + 하니스만 들어간 커밋 |
+| baseline JSON | **파일 5개** — `H0.json`, `H1.json`, `H2-1.json`, `H2-5000.json`, `H4.json`. 각 파일에 회차 3개 |
 | censored 개수 | 시나리오별. H1의 censored는 "고치려는 문제의 크기"다 |
 | 계측 오버헤드 | `engine_bench_test.go` 계측 전후 비교 수치 |
 
@@ -677,18 +687,31 @@ H0~H5를 각 5회 돌려 JSON을 남긴 뒤에야 CP1-B로 넘어간다. 보존 
 
 ## 9. quantum 탐색과 사전 등록 판정표
 
-### 9.1 탐색 격자
+### 9.1 2단계 탐색
 
-`maxMatchesPerTurn ∈ {8, 16, 32, 64, 128}` × `maxConsecutiveCancels ∈ {8, 16, 32, 64}` = 20조합.
 **전부 로컬에서. GCP에서는 탐색하지 않는다.**
 
+| 단계 | 격자 | 회차 | 목적 |
+|---|---|---|---|
+| 1차 탐색 | `maxMatchesPerTurn ∈ {16, 64, 128}` × `maxConsecutiveCancels ∈ {8, 32}` = **6조합** | 시나리오당 **3회** | 후보 좁히기 |
+| 확증 | 1차 통과 조합 중 §9.4 규칙 상위 **2개** | 시나리오당 **5회** | 최종 판정 |
+
+**최종 선택은 확증 측정에서 C1~C6을 통과한 조합만 대상으로 한다.** 1차 통과는 확증 대상을
+고르는 데만 쓰고, 판정 근거로 쓰지 않는다 — 3회는 지터를 걸러내기에 얇다.
+
+**확증에서 두 조합 모두 실패하면 P1 중단이다.** 임계값을 완화하거나 격자를 자동으로 넓히지
+않는다.
+
+이전 초안의 20조합(5×4)에서 줄인 이유는 측정 시간이다. 6조합 3회 + 2조합 5회는 20조합 5회의
+약 1/5이고, 확증 단계가 있으므로 판정의 신뢰도는 오히려 높다.
+
 설정은 `GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN`·`GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS`
-env 오버라이드로 준다. 재컴파일 없이 20조합을 돌리기 위해서다. 파싱·주입 규칙은 §2.2.1·§2.2.2를
+env 오버라이드로 준다. 재컴파일 없이 조합을 바꾸기 위해서다. 파싱·주입 규칙은 §2.2.1·§2.2.2를
 따른다.
 
 ### 9.2 절대 임계값을 지금 못 박지 않는 이유
 
-CP1-A baseline이 나오기 전에 절대 숫자를 적으면 그것은 근거가 아니라 사후 정당화다. 대신
+baseline이 나오기 전에 절대 숫자를 적으면 그것은 근거가 아니라 사후 정당화다. 대신
 **판정식과 선택 규칙을 지금 등록**하고, 숫자는 baseline에서 기계적으로 유도한다.
 
 C1·C2의 상한에는 **하한 바닥(floor)** 을 둔다. control p99가 마이크로초 단위면 `×3`이
@@ -707,13 +730,17 @@ C1·C2의 상한에는 **하한 바닥(floor)** 을 둔다. control p99가 마�
 
 | # | 기준 | 식 | 유형 |
 |---|---|---|---|
-| C1 | sweep 중 취소 지연 | H2(5000) `cancel_queue_wait` p99 5회 **중앙값** ≤ `max(H2(1) baseline p99 × 3, 300ms)` | 게이트 |
-| C2 | cancel flood 중 주문 지연 | H1 `order_queue_wait` p99 5회 **중앙값** ≤ `max(H0 p99 5회 중앙값 × 3, 300ms)` | 게이트 |
-| C3 | 처리량 보존 | H2(5000) sweep 총 시간 중앙값 ≤ baseline × 1.05 | 게이트 |
-| C4 | 스냅샷 신선도 | H4 최대 간격 ≤ 300ms | 게이트 |
-| C5 | censored 부재 | **후보** 측정의 전 시나리오 5회 합계 censored **0건** (baseline의 censored는 §8.3대로 보존·보고하며 이 게이트 대상이 아니다) | 게이트 |
-| C6 | 의미 교차 검증 | B-1~B-5 전부 통과 | 게이트 |
+| # | 기준 | 식 | 유형 |
+|---|---|---|---|
+| C1 | sweep 중 취소 지연 | H2-5000 `cancel_queue_wait` p99 **중앙값** ≤ `max(H2-1 baseline p99 중앙값 × 3, 300ms)` | 게이트 |
+| C2 | cancel flood 중 주문 지연 | H1 `order_queue_wait` p99 **중앙값** ≤ `max(H0 baseline p99 중앙값 × 3, 300ms)` | 게이트 |
+| C3 | 처리량 보존 | H2-5000 sweep 총 시간 중앙값 ≤ baseline 중앙값 × 1.05 | 게이트 |
+| C4 | 스냅샷 신선도 | **H4** 최대 간격 ≤ 300ms | 게이트 |
+| C5 | censored 부재 | **후보** 측정의 전 시나리오 합계 censored **0건** (baseline의 censored는 §8.3대로 보존·보고하며 이 게이트 대상이 아니다) | 게이트 |
+| C6 | 의미 교차 검증 | B′·A′ 의미 테스트 전부 통과 | 게이트 |
 | C7 | yield 비용 | `quantum_yields_total` / 주문 수가 sweep 크기에 선형 이하 | 관찰 |
+
+중앙값의 회차 수는 단계에 따라 다르다 — baseline·1차 탐색은 3회, 확증은 5회(§9.1).
 
 **개별 회차가 상한을 넘었으나 중앙값이 통과한 경우, 통과로 판정하되 보고서의 "한계" 절에
 회차별 값과 초과 폭을 그대로 기록한다.** 숨기지 않는다.
@@ -740,10 +767,22 @@ C1~C6을 모두 통과한 조합 중:
 func selectQuantum(candidates []candidateResult, base baselineStats) (quantumChoice, error)
 ```
 
-단위 테스트는 합성 표로 고정한다: 단일 통과, 1번 규칙 동률 → 2번으로 해소, 1·2번 동률 →
-3번으로 해소, censored 포함 후보 탈락, **통과 0개 → 에러**.
+단위 테스트는 합성 표로 **세 개만** 고정한다: (1) 통과 후보 선택과 동률 규칙, (2) censored·
+semantic 실패 탈락, (3) 통과 후보 0개 → 에러.
 
 측정 없이 판정 로직을 검증할 수 있어야 튜닝 단계에서 규칙을 슬쩍 바꾸는 일이 생기지 않는다.
+
+**집계기는 판정 전에 run-set을 정확히 한 번 검증한다.** 검증 항목은 아래 다섯이고, **censored
+조기 반환보다 먼저** 수행한다 — censored를 이유로 일찍 빠져나가면 run-set이 깨진 것을 영영
+못 본다.
+
+| # | 검증 |
+|---|---|
+| V1 | 필요한 각 시나리오가 **정확한 회차 수**로 존재 |
+| V2 | 모든 JSON의 `max_matches_per_turn`·`max_consecutive_cancels`가 디렉터리의 후보 설정과 일치 |
+| V3 | 시나리오 안에 **중복 seed 없음** |
+| V4 | **H4가 누락되면 에러.** max gap = 0으로 조용히 통과하지 않는다 |
+| V5 | baseline도 후보 선택 **전에** 실제 parser로 읽어 V1~V3을 통과 |
 
 **통과 조합이 0개면 P1 중단이다.** 임계값을 완화해서 통과시키지 않는다. 그 경우 quantum만으로
 해결되지 않는다는 증거이므로 보고하고 멈춘다.
@@ -800,7 +839,10 @@ lifecycle 전제와 모순되므로 그렇게 쓰지 않는다.
 않으면, 회귀 게이트가 검증하는 것이 무엇인지 알 수 없다. 기본값으로 뜬 서버를 측정하고 선택된
 값을 측정했다고 기록하는 것이 가장 흔한 실패 방식이다. 세 곳을 본다.
 
-1. compose/env 파일의 `GOEXCHANGE_MATCHING_MAX_*` (미설정이면 코드 기본값 상수를 확인)
+선택된 두 값은 **측정용 compose override에 명시적으로 넣는다. 미설정 기본값에 의존하지 않는다** —
+기본값에 기대면 코드가 바뀌었을 때 측정이 조용히 다른 값으로 돈다.
+
+1. `docker compose config` 출력의 `GOEXCHANGE_MATCHING_MAX_*`
 2. 실행 중 컨테이너의 실제 환경 (`docker compose exec ... env | grep MATCHING`)
 3. 서버 기동 로그의 `matching engine sharded: ... maxMatchesPerTurn=N maxConsecutiveCancels=M`
 
@@ -847,8 +889,9 @@ lifecycle 전제와 모순되므로 그렇게 쓰지 않는다.
 | 항목 | 기준 |
 |---|---|
 | 신규 지표 8종 — metric family 존재 | 8종 전부 `/metrics`에 노출 |
-| 신규 지표 — 표본 수 | `turn_duration`·`order_queue_wait`·`executions_per_order`·`matches_per_slice`·`emit_block{event="trade"}`의 `_count` > 0 |
-| 신규 지표 — **0이어도 정상인 것** | `quantum_yields_total`, `cancel_queue_wait_count`, `emit_block{event="done"}`, `emit_block_per_slice`의 0은 **실패가 아니다**. 워크로드에 시장가·취소·yield가 없었을 수 있으므로, 0이면 그 사실을 워크로드 구성으로 설명해 보고서에 적는다 |
+| 신규 지표 — 표본 수 | `turn_duration`·`order_queue_wait`·`executions_per_order`·`matches_per_slice`·`emit_block{event="trade"}`·**`emit_block_per_slice_seconds`** 의 `_count` > 0 |
+| `emit_block_per_slice_seconds` | 주문 slice가 존재하는 한 **`_count` 0은 배선 실패다.** `_sum`이 0인 것은 허용한다 — 하류가 한 번도 막히지 않았을 수 있다 |
+| 신규 지표 — **0이어도 정상인 것** | `quantum_yields_total`, `cancel_queue_wait_count`, `emit_block{event="done"}`의 0은 **실패가 아니다**. 워크로드에 시장가·취소·yield가 없었을 수 있으므로, 0이면 그 사실을 워크로드 구성으로 설명해 보고서에 적는다 |
 | p95 | **참고값으로만 기록.** quantum 효과로 귀속하지 않는다 (사전 등록된 정량 게이트가 없다 — 36번 §8과 동일한 이유) |
 
 ### 11.4 산출물 시크릿 게이트 — 필수 중단 조건
@@ -893,49 +936,60 @@ VM 4대를 정지하고, **`gcloud`로 4대가 TERMINATED로 조회된 결과**�
 
 ## 13. 구현 체크포인트
 
-**P1만 작업을 중단한다. P2는 후속 목록에 누적한다.**
+**체크포인트는 두 개다. P1만 작업을 중단한다. P2는 구현 중 바로 정리한다.**
 
-| CP | 범위 | 산출물 | 검증 |
-|---|---|---|---|
-| **CP1-A** | **계측 + 하니스, 행동 변경 0** | `EngineObservers` 7콜백·지표 8종·bucket, `CancelOrderCommand.EnqueuedAt`, prometheus 배선, H0~H5 하니스 (`-tags quantumharness`) | 기존 matching 테스트 전량 통과. **커밋 후** 그 SHA에서 baseline 4종(§8.4) 실제 수집·보존 |
-| **CP1-B** | quantum 구현 | `matchSlice`/`finishOrder`/`activeSweep`, §3 상태 기계, `strictPositiveEnv` + `QuantumConfig` 주입, `drainPendingWork` 대체 | S2-1~8, SCH-1~7, D-1~4, A-1, A-5 |
-| **CP2** | 후보 측정·선택 | 20조합 측정, `selectQuantum` 순수 함수 + 단위 테스트, 값 확정 | C1~C7 판정, `selectQuantum` 단위 테스트, B-1~B-5, A-2~A-4 |
-| **CP3** | 회귀 + GCP + 문서 | 통합 회귀, GCP 500 VU 1회, 벤치마크 37번, 설계·계획 문서 갱신 | §11.3 전 항목 |
+| CP | 범위 | 승인 |
+|---|---|---|
+| **A. 로컬 완료** | 계측·하니스·baseline → quantum 구현 → 로컬 탐색·값 선택 → 전체 로컬 검증·CI | **중간 승인 없이 연속 진행.** 측정 무효화·정확성 훼손 P1에서만 즉시 중단 |
+| **B. GCP 완료** | 500 VU 1회 → VM 정지·TERMINATED 조회 → 분석 → 보고서·문서 | **별도 유료 승인 후에만 시작** |
 
-**CP1-A와 CP1-B를 분리하는 이유:** 같은 커밋에 계측과 행동 변경이 섞이면, 이후 모든 전후
-비교의 기준선이 "이미 quantum이 들어간 상태"가 된다. baseline은 **행동이 바뀌기 전 SHA에서**
-나와야 한다.
+CP A 안에서도 **계측·하니스 커밋과 quantum 구현 커밋은 분리한다.** 같은 커밋에 계측과 행동
+변경이 섞이면 이후 모든 전후 비교의 기준선이 "이미 quantum이 들어간 상태"가 된다. baseline은
+**행동이 바뀌기 전 SHA에서** 나와야 한다. 하니스도 그 커밋에 함께 들어가야 baseline과 후보
+측정이 같은 하니스 코드에서 나온다(§8.1).
 
-**하니스가 CP1-A에 있어야 하는 이유:** baseline과 후보 측정이 같은 하니스 코드에서 나와야
-전후 차이에 하니스 변경분이 섞이지 않는다(§8.1).
-
-**CP2는 baseline을 다시 재지 않는다.** CP1-A에서 보존한 JSON을 읽어 판정식의 기준값으로 쓰고,
-20조합 측정과 `selectQuantum` 적용만 담당한다. CP2에서 baseline을 재수집하면 그것은 이미
-quantum이 들어간 코드에서 나온 값이므로 baseline이 아니다.
+**탐색 단계는 baseline을 다시 재지 않는다.** 보존한 JSON을 읽어 판정식의 기준값으로 쓴다.
+재수집하면 그것은 이미 quantum이 들어간 코드에서 나온 값이므로 baseline이 아니다.
 
 ### 13.1 테스트 실행 정책
 
-- 작업 중에는 **focused test만** 실행한다 (`go test ./internal/matching -run <Name>`)
-- **전체 통합 · `-race` · `go vet`은 체크포인트마다 정확히 1회**
-- `-tags quantumharness`는 **CP1-A(baseline 수집)와 CP2(후보 측정)에서만** 실행한다.
-  일반 `go test`와 CI에 포함하지 않는다
-- 각 수정은 mutation 검증(되돌려서 의도한 테스트만 RED)을 거친다
-- 복원은 **파일 백업**으로 한다. `git checkout --`는 사용하지 않는다
-- 커밋은 두 저장소를 분리하고, 커밋 전 `commit-message` 스킬을 거치며, 기존 커밋
-  amend/rebase/force-push는 하지 않는다
+- 작업 중에는 **focused test만** 실행한다. 해당 코드를 작성할 때만이다.
+- 로컬 구현이 **전부 끝난 뒤 정확히 한 번**:
 
-### 13.2 중단 조건
+```
+go test -count=1 ./...
+go test -count=1 -race ./internal/matching ./internal/service
+go vet ./...
+go build -trimpath ./cmd
+```
 
-기준 HEAD 불일치 / 사용자 변경과 충돌 / CI 실패 / GCP preflight 불일치 /
-**runbook §7.5 시크릿 게이트 히트** / 측정 도구·워크로드 비교 조건 복구 불가 /
-**추가 유료 실행 승인 필요(§11 진입 포함)** / 인프라·보안 설정 변경 필요 /
-데이터 손실 가능 destructive 작업 필요 / **§9 통과 조합 0개**.
+- `-tags quantumharness`는 baseline 수집과 후보 측정에서만 실행한다. 일반 `go test`와 CI에
+  포함하지 않는다.
+- **mutation 검증은 하지 않는다.** 파일을 변이했다 복구하는 절차 자체가 과거에 미커밋 작업을
+  날린 사고의 원인이었고, 여기서 얻는 확신에 비해 비용과 위험이 크다. 대신 각 테스트가 계약을
+  **직접 단언**하도록 쓴다.
+- 커밋 전 `commit-message` 스킬을 거치며, 기존 커밋 amend/rebase/force-push는 하지 않는다.
+
+### 13.2 커밋 단위
+
+1. 축소된 설계·계획 문서
+2. 계측·하니스·baseline
+3. quantum 구현·선택값·로컬 검증
+4. GCP 보고서·최종 문서
+
+### 13.3 중단 조건
+
+- 정확성 계약을 지킬 수 없는 **구조적 P1**
+- **baseline 또는 후보 run-set이 유효하지 않음** (§9.4 V1~V5)
+- **통과 후보 0개** — 임계값을 완화하거나 격자를 자동 확대하지 않는다
+- 전체 로컬 검증 또는 **CI 실패**
+- **GCP 유료 승인 필요 시점**
+- **runbook §7.5 시크릿 게이트 실패**
 
 중단 시: 안전 종료 가능한 프로세스·VM을 종료하고, 코드·산출물·원본 로그를 보존하며,
 임의 rollback/reset/force-push를 하지 않고, 정확한 차단 지점과 재개 명령을 보고한다.
 
 ---
-
 ## 14. 열린 위험
 
 | # | 항목 | 유형 | 처리 |
@@ -943,7 +997,7 @@ quantum이 들어간 코드에서 나온 값이므로 baseline이 아니다.
 | R1 | `ExecutionCh` 블로킹 send에 timeout이 없어 wall-clock 진행성은 quantum으로 보장 불가 | **accepted limitation** | §3.4에 명시. `emit_block_seconds`로 계측만. 해결은 §12로 분리 |
 | R2 | §9에서 C1~C6 통과 조합이 0개 | **조건부 P1 (중단)** | 임계값 완화 금지. 보고 후 중단 |
 | R3 | `MatchLatencyObserver` 값 상승 | **control** | §2.5 고지문 + sweep 크기별 분리 비교. 회귀로 판정하지 않는다 |
-| R5 | 계측 오버헤드가 quantum 효과와 섞임 | **control** | CP1-A/CP1-B 분리 + §4.3 오버헤드 선기록 |
+| R5 | 계측 오버헤드가 quantum 효과와 섞임 | **control** | 계측 커밋과 quantum 커밋 분리 + §4.3 오버헤드 선기록 |
 | R6 | no-op 주문의 dirty 제거로 스냅샷 브로드캐스트 빈도 감소 | P2 | 의도된 변경. S2-6으로 고정 |
 | R7 | 조각마다 `bestMatchable*` 재탐색 O(log n) 비용 | P2 | 캐싱은 조각 사이 취소를 놓치므로 불채택. 실측에서 문제가 되면 후속 |
 | R8 | `maxConsecutiveCancels` 기본값이 샤드마다 동일 | P2 | 심볼별 차등은 근거 없음. 단일 값 유지 |
@@ -955,4 +1009,4 @@ R4(취소 재시도 횟수 상한이 sweep보다 짧을 가능성)는 **삭제�
 확인했다. 재시도는 백오프만 늘어나며 command를 조기 종결시키지 않는다.
 
 **사용자 선택이 필요한 열린 P1은 없다.** R2는 발생 시 중단 후 보고하는 조건이고,
-§11 진입에 필요한 유료 승인은 CP3 시작 시점에 별도로 요청한다.
+§11 진입에 필요한 유료 승인은 CP B 시작 시점에 별도로 요청한다.
