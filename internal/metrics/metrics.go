@@ -209,6 +209,56 @@ var (
 		Help:    "Worker start to logical job completion (includes retries and fallback).",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"result"})
+
+	MatchingEngineExecutionsPerOrder = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_executions_per_order",
+		Help:    "Number of trades produced by a single order, observed when the order completes.",
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096},
+	})
+
+	// 상단 bucket이 maxMatchesPerTurn 후보 최대값(128)보다 한 칸 큰 것은
+	// 의도적이다 — 상한을 넘는 관측이 나오면 그 자체가 버그 신호이므로
+	// bucket에 잡혀야 한다.
+	MatchingEngineMatchesPerSlice = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_matches_per_slice",
+		Help:    "Number of trades produced by one matching slice (quantum unit).",
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256},
+	})
+
+	MatchingEngineTurnDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_turn_duration_seconds",
+		Help:    "Work duration of one scheduler turn, excluding time blocked waiting for input.",
+		Buckets: prometheus.ExponentialBuckets(1e-5, 4, 8),
+	})
+
+	MatchingEngineOrderQueueWait = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_order_queue_wait_seconds",
+		Help:    "Time an order waited in the engine queue before admission.",
+		Buckets: prometheus.ExponentialBuckets(1e-4, 4, 9),
+	})
+
+	MatchingEngineCancelQueueWait = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_cancel_queue_wait_seconds",
+		Help:    "Time a cancel command waited in the engine queue before processing.",
+		Buckets: prometheus.ExponentialBuckets(1e-4, 4, 9),
+	})
+
+	MatchingEngineQuantumYields = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "matching_engine_quantum_yields_total",
+		Help: "Number of matching slices that returned because the per-turn trade budget was exhausted.",
+	})
+
+	MatchingEngineEmitBlock = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "matching_engine_emit_block_seconds",
+		Help:    "Duration of a single blocking send into ExecutionCh. This send has no timeout.",
+		Buckets: prometheus.ExponentialBuckets(1e-6, 5, 9),
+	}, []string{"event"})
+
+	MatchingEngineEmitBlockPerSlice = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_emit_block_per_slice_seconds",
+		Help:    "Total ExecutionCh blocking time accumulated within one matching slice.",
+		Buckets: prometheus.ExponentialBuckets(1e-6, 5, 9),
+	})
 )
 
 // hot path에서 라벨 map 조회를 피하기 위해 초기화 시 1회 resolve한다.

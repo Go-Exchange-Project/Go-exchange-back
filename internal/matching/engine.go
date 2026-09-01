@@ -59,6 +59,23 @@ type MatchingEngine struct {
 
 	MatchLatencyObserver func(time.Duration)
 
+	// Observers는 quantum 계측용 콜백 묶음이다. 제로값이면 전부 비활성이다.
+	// Start() 전에 설정하고 실행 중 교체하지 않는다 — 재대입은 data race다.
+	Observers EngineObservers
+
+	// lastMatchTrades·sliceEmitBlock은 한 조각의 누적값이다. 엔진
+	// goroutine에서만 쓴다. processOrder가 매 주문 시작 시 0으로 되돌린다 —
+	// Match 안에서 초기화하면 Match를 직접 부르는 테스트 30여 곳의 누적값이
+	// 섞인다.
+	lastMatchTrades int
+	sliceEmitBlock  time.Duration
+
+	// quantum 값. 0은 matchSlice의 무제한 sentinel과 충돌하므로 항상 1
+	// 이상이어야 한다. 여기 기본값은 개발·테스트용이며, production 값은
+	// 로컬 탐색 결과로 확정한다.
+	maxMatchesPerTurn     int
+	maxConsecutiveCancels int
+
 	// snapshotCache는 심볼별 최신 스냅샷(*OrderBookSnapshot)을 담는다. 엔진 goroutine이
 	// 코얼레싱 티커에서 Store하고, REST 핸들러가 락 없이 Load한다.
 	snapshotCache    sync.Map
@@ -88,6 +105,9 @@ type CancelOrderCommand struct {
 	OrderID    uint
 	Side       model.OrderSide
 	Price      decimal.Decimal
+	// EnqueuedAt은 CancelOrder가 채운다. 제로값이면 큐 대기 관측을 건너뛴다 —
+	// 테스트가 직접 구성한 command가 가짜 지연을 만들지 않게 하기 위해서다.
+	EnqueuedAt time.Time
 	ResponseCh chan CancelOrderResult
 }
 
@@ -146,6 +166,9 @@ func NewMatchingEngine() *MatchingEngine {
 		engineID:         newEngineID(),
 		dirtySymbols:     make(map[string]bool),
 		snapshotInterval: defaultSnapshotInterval,
+
+		maxMatchesPerTurn:     defaultMaxMatchesPerTurn,
+		maxConsecutiveCancels: defaultMaxConsecutiveCancels,
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 	}
@@ -200,14 +223,50 @@ func (me *MatchingEngine) processOrder(order *Order) {
 	if order == nil {
 		return
 	}
+	if !order.EnqueuedAt.IsZero() {
+		me.Observers.orderAdmitted(time.Since(order.EnqueuedAt))
+	}
+	// 조각화 이전에는 "조각 = 주문 전체"다. 조각화 후와 같은 지표를 채우기
+	// 위해 Slice/OrderDone을 여기서 1회 낸다. 이 둘이 비면
+	// matches_per_slice와 emit_block_per_slice의 baseline이 없어 전후
+	// 비교가 불가능하다.
+	me.lastMatchTrades = 0
+	me.sliceEmitBlock = 0
+	admissible := me.orderIsAdmissible(order)
 	me.Match(order)
 	if me.MatchLatencyObserver != nil && !order.EnqueuedAt.IsZero() {
 		me.MatchLatencyObserver(time.Since(order.EnqueuedAt))
 	}
+	// 즉시 완료 경로는 매칭을 수행하지 않으므로 셀 체결이 없다. 여기서
+	// OrderDone(0)/Slice(0)를 내면 executions_per_order 분포가 0으로
+	// 오염되고, "OrderAdmitted만 발생" 계약과 어긋난다.
+	//
+	// Slice는 Match(= 잔량 등록·MarketOrderDone 포함) 뒤에 부른다. 마지막
+	// emit의 블로킹 시간이 sliceEmitBlock에 들어간 뒤여야 한다 — 순서가
+	// 뒤집히면 하류 포화 시 가장 오래 막히는 지점이 측정에서 빠진다.
+	if admissible {
+		me.Observers.slice(me.lastMatchTrades, me.sliceEmitBlock)
+		me.Observers.orderDone(me.lastMatchTrades)
+	}
 	me.markDirty(order.CoinSymbol)
 }
 
+// orderIsAdmissible은 Match가 실제 매칭을 수행할 주문인지를 Match와 같은
+// 기준으로 판단한다.
+func (me *MatchingEngine) orderIsAdmissible(order *Order) bool {
+	switch order.Side {
+	case model.OrderSideBuy:
+		return order.OrderType == model.OrderTypeMarket || order.Amount.GreaterThan(decimal.Zero)
+	case model.OrderSideSell:
+		return order.Amount.GreaterThan(decimal.Zero)
+	}
+	return false
+}
+
 func (me *MatchingEngine) processCancel(cmd CancelOrderCommand) {
+	if !cmd.EnqueuedAt.IsZero() {
+		me.Observers.cancel(time.Since(cmd.EnqueuedAt))
+	}
 	result := me.handleCancel(cmd)
 	if cmd.ResponseCh != nil {
 		cmd.ResponseCh <- result
@@ -350,6 +409,9 @@ func (me *MatchingEngine) IsIntakeAdmissible(coinSymbol string) bool {
 func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult {
 	if me == nil || me.CancelCh == nil {
 		return CancelOrderResult{Err: ErrCancelOrderEngineUnavailable}
+	}
+	if cmd.EnqueuedAt.IsZero() {
+		cmd.EnqueuedAt = time.Now()
 	}
 	if cmd.ResponseCh == nil {
 		cmd.ResponseCh = make(chan CancelOrderResult, 1)
@@ -585,15 +647,37 @@ func (me *MatchingEngine) emitTrade(trade *model.Trade) {
 	default:
 	}
 	if me.ExecutionCh != nil {
-		me.ExecutionCh <- ExecutionEvent{Trade: trade}
+		me.sendExecution(EmitTrade, ExecutionEvent{Trade: trade})
 	}
+	me.lastMatchTrades++
+}
+
+// sendExecution은 ExecutionCh로의 블로킹 send 시간을 관측한다.
+// send 자체에는 timeout이 없다 — 하류가 멈추면 여기서 무기한 블로킹한다.
+// 그래서 quantum은 emit "시도 횟수"만 보장하고 wall-clock은 보장하지 않는다.
+//
+// 막히지 않은 send도 관측한다. 그래야 emit_block_seconds의 표본 수가 곧
+// emit 횟수이고, GCP에서 _count > 0을 배선 확인으로 쓸 수 있다.
+// 논블로킹 fast path로 time.Now() 두 번을 아끼는 안을 재봤지만, 계측
+// 오버헤드 자체가 실행 간 변동(±10~20%)에 묻히는 수준이라(중앙값 기준
+// BulkFill +3.3%, _workspace/quantum/bench-*.txt) 지표 의미를 흐릴 만한
+// 이유가 되지 못했다.
+//
+// 이 머신의 클럭 해상도는 ~645µs이므로 막히지 않은 send는 0으로 기록된다.
+// 그것이 정상이다 — _sum이 0이어도 _count는 emit 횟수와 같아야 한다.
+func (me *MatchingEngine) sendExecution(kind EmitKind, event ExecutionEvent) {
+	start := time.Now()
+	me.ExecutionCh <- event
+	blocked := time.Since(start)
+	me.Observers.emitBlock(kind, blocked)
+	me.sliceEmitBlock += blocked
 }
 
 func (me *MatchingEngine) emitMarketOrderDone(order *Order) {
 	if me.ExecutionCh == nil {
 		return
 	}
-	me.ExecutionCh <- ExecutionEvent{
+	me.sendExecution(EmitMarketDone, ExecutionEvent{
 		MarketOrderDone: &MarketOrderDone{
 			OrderID:              order.ID,
 			CoinSymbol:           order.CoinSymbol,
@@ -603,7 +687,7 @@ func (me *MatchingEngine) emitMarketOrderDone(order *Order) {
 			RemainingAmount:      order.Amount,
 			RemainingQuoteAmount: order.QuoteAmount,
 		},
-	}
+	})
 }
 
 func (me *MatchingEngine) emitOrderCancelled(cmd CancelOrderCommand) {
@@ -611,7 +695,7 @@ func (me *MatchingEngine) emitOrderCancelled(cmd CancelOrderCommand) {
 		return
 	}
 	_, eventID := me.nextTradeEvent()
-	me.ExecutionCh <- ExecutionEvent{
+	me.sendExecution(EmitCancelled, ExecutionEvent{
 		OrderCancelled: &OrderCancelled{
 			CommandID:     cmd.CommandID,
 			OrderID:       cmd.OrderID,
@@ -619,7 +703,7 @@ func (me *MatchingEngine) emitOrderCancelled(cmd CancelOrderCommand) {
 			Side:          cmd.Side,
 			EngineEventID: eventID,
 		},
-	}
+	})
 }
 
 func (me *MatchingEngine) newTrade(coinSymbol string, price decimal.Decimal, quantity decimal.Decimal, buyOrderID uint, sellOrderID uint) *model.Trade {

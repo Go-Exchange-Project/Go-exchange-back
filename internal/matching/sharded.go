@@ -136,6 +136,14 @@ func (se *ShardedEngine) RequestOrderBookSnapshot(coinSymbol string, depth int) 
 }
 
 // SetMatchLatencyObserver는 전 샤드에 같은 옵저버를 설정한다.
+// SetObservers는 전 샤드에 같은 계측 콜백 묶음을 설정한다.
+// Start() 전에만 부른다 — 실행 중 재대입은 data race다.
+func (se *ShardedEngine) SetObservers(observers EngineObservers) {
+	for _, shard := range se.shards {
+		shard.Observers = observers
+	}
+}
+
 func (se *ShardedEngine) SetMatchLatencyObserver(observer func(time.Duration)) {
 	for _, shard := range se.shards {
 		shard.MatchLatencyObserver = observer

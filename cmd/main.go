@@ -75,6 +75,7 @@ func main() {
 	me.SetMatchLatencyObserver(func(d time.Duration) {
 		metrics.OrderPipelineMatchLatency.Observe(d.Seconds())
 	})
+	me.SetObservers(metrics.NewMatchingEngineObservers())
 	metrics.RegisterMatchingEngineChannelLenGauges(
 		me.OrderChannelLen,
 		me.CancelChannelLen,
