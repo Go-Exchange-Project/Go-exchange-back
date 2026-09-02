@@ -147,6 +147,9 @@ func reportGate(t *testing.T, name string, got, limit time.Duration, samples int
 	require.LessOrEqual(t, got, limit, "%s가 안전 상한을 넘었다", name)
 }
 
+// newGateEngine은 엔진을 **구성만** 하고 Start하지 않는다. 호출자가 준비를
+// 끝낸 뒤 직접 me.Start()를 부른다 — C2는 채널을 미리 채워야 하므로 시작
+// 시점을 통제해야 한다.
 func newGateEngine(t *testing.T, c *gateCollector) (*MatchingEngine, func()) {
 	t.Helper()
 	cfg := selectedConfig()
@@ -174,7 +177,6 @@ func newGateEngine(t *testing.T, c *gateCollector) (*MatchingEngine, func()) {
 			c.mu.Unlock()
 		}
 	}()
-	me.Start()
 	return me, func() {
 		me.Stop()
 		select {
@@ -196,6 +198,7 @@ func TestSelectedConfigC1CancelDuringSweepAndC4Snapshot(t *testing.T) {
 	c := newGateCollector()
 	me, shutdown := newGateEngine(t, c)
 	defer shutdown()
+	me.Start()
 
 	for i := 0; i < makers; i++ {
 		me.OrderCh <- contractOrder(uint(i+1), contractMakerUser, model.OrderSideSell, 50000, 1)
@@ -257,6 +260,18 @@ func TestSelectedConfigC1CancelDuringSweepAndC4Snapshot(t *testing.T) {
 }
 
 // C2: 취소 홍수 중 신규 주문의 큐 대기가 안전 상한 안에 있다.
+//
+// **엔진을 Start하기 전에 모든 입력을 적재한다.** 이것이 홍수를 결정적으로
+// 만드는 유일한 방법이다. producer goroutine을 먼저 띄우고 관측 신호를
+// 기다리는 방식은 "취소 N건이 관측됐다"만 증명할 뿐, probe가 들어가는 순간
+// CancelCh에 취소가 남아 있다는 것은 증명하지 못한다 — producer가 잠시 밀리면
+// probe가 홍수 없이 처리될 수 있다.
+//
+// 준비 순서:
+//   1. resting 주문을 오더북에 직접 넣는다 (엔진 시작 전이므로 안전하다)
+//   2. 테스트 전용 CancelCh(용량 >= 15,000)에 취소를 전부 넣는다
+//   3. OrderCh에 probe 500건을 넣는다
+//   4. 측정을 켜고 Start한다
 func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 	const resting = 20000
 	const probes = 500
@@ -266,42 +281,37 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 	me, shutdown := newGateEngine(t, c)
 	defer shutdown()
 
+	// 1) resting 주문은 오더북에 직접 넣는다. 엔진이 아직 돌지 않으므로
+	//    book을 테스트 goroutine이 만져도 race가 아니다. 이렇게 하면 setup이
+	//    observer 표본을 만들지 않아 측정 구간이 probe·취소로만 채워진다.
+	book := me.GetOrderBook("BTC")
 	for i := 0; i < resting; i++ {
-		me.OrderCh <- contractOrder(uint(i+1), contractMakerUser, model.OrderSideSell, int64(60000+i), 1)
+		book.AddOrder(contractOrder(uint(i+1), contractMakerUser, model.OrderSideSell, int64(60000+i), 1))
 	}
-	for i := 0; i < resting; i++ {
-		<-c.admitted
-		<-c.done
+
+	// 2) 취소를 전부 미리 넣는다. 기본 CancelCh는 1024라 15,000건을 담지
+	//    못하므로 테스트 전용으로 교체한다. 중복 없는 실존 ID만 쓴다 —
+	//    복원추출하면 not-found가 섞여 취소 처리 비용이 실제와 달라진다.
+	me.CancelCh = make(chan CancelOrderCommand, cancels)
+	for i := 0; i < cancels; i++ {
+		me.CancelCh <- CancelOrderCommand{
+			CoinSymbol: "BTC", OrderID: uint(i + 1),
+			Side: model.OrderSideSell, Price: decimal.NewFromInt(int64(60000 + i)),
+			EnqueuedAt: time.Now(),
+		}
 	}
+	require.Equal(t, cancels, len(me.CancelCh), "Start 전에 취소 backlog가 가득 차 있어야 한다")
+
+	// 3) probe도 미리 넣는다. 어떤 것과도 체결되지 않는 가격이므로
+	//    재는 것은 체결이 아니라 큐 대기다. OrderCh 기본 용량 1024 >= 500.
+	for i := 0; i < probes; i++ {
+		me.OrderCh <- contractOrder(uint(resting+i+1), contractTakerUser, model.OrderSideBuy, 100, 1)
+	}
+	require.Equal(t, probes, len(me.OrderCh))
+
+	// 4) 이 시점에 두 큐가 모두 가득 차 있다. 이제 측정을 켜고 시작한다.
 	c.start()
-
-	// 취소 producer만 먼저 시작한다. probe와 동시에 시작하면 backlog가
-	// 형성되기 전에 probe가 admit될 수 있고, 그러면 "취소 홍수 중"을 잰 것이
-	// 아니다.
-	//
-	// 중복 없는 실존 ID만 취소한다. 복원추출하면 not-found가 섞여 취소 처리
-	// 비용이 실제와 달라진다.
-	go func() {
-		for i := 0; i < cancels; i++ {
-			me.CancelCh <- CancelOrderCommand{
-				CoinSymbol: "BTC", OrderID: uint(i + 1),
-				Side: model.OrderSideSell, Price: decimal.NewFromInt(int64(60000 + i)),
-				EnqueuedAt: time.Now(),
-			}
-		}
-	}()
-
-	// 장벽: 취소가 실제로 처리되고 있음을 관측한 뒤에 probe를 보낸다.
-	// 채널 전송 완료(flood.Wait)는 처리 완료가 아니므로 판정 근거로 쓰지 않는다.
-	const floodBarrier = 2000
-	waitCancelSignals(t, c.cancels, floodBarrier, "취소 홍수 형성 장벽")
-
-	go func() {
-		for i := 0; i < probes; i++ {
-			// 어떤 것과도 체결되지 않는 가격 — 재는 것은 큐 대기다.
-			me.OrderCh <- contractOrder(uint(resting+i+1), contractTakerUser, model.OrderSideBuy, 100, 1)
-		}
-	}()
+	me.Start()
 
 	deadline := time.After(60 * time.Second)
 	for i := 0; i < probes; i++ {
@@ -311,9 +321,9 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 			t.Fatalf("C5: probe 주문 %d/%d만 admit됐다 (censored)", i, probes)
 		}
 	}
-
-	// 측정을 끝내기 전에 취소 15,000건이 **전부 처리**됐는지 확인한다.
-	waitCancelSignals(t, c.cancels, cancels-floodBarrier, "취소 처리 완료")
+	// Cancel observer는 handleCancel보다 먼저 불리므로 "처리 완료"가 아니라
+	// **queue-wait 표본 수집 완료**를 뜻한다.
+	waitCancelSignals(t, c.cancels, cancels, "취소 queue-wait 표본 수집")
 	c.stop()
 
 	c.mu.Lock()
@@ -326,7 +336,9 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 	reportGate(t, "C2 취소 홍수 중 주문 대기", c.p99(c.orderWaits), gateSafetyLimit, orderSamples)
 }
 
-// waitCancelSignals는 Cancel observer 신호 n개를 기다린다.
+// waitCancelSignals는 Cancel observer 신호 n개를 기다린다. 이 신호는
+// processCancel 진입 시점에 발생하므로 "취소 처리 완료"가 아니라
+// **queue-wait 표본이 n개 수집됐다**는 뜻이다.
 func waitCancelSignals(t *testing.T, ch <-chan struct{}, n int, what string) {
 	t.Helper()
 	deadline := time.After(60 * time.Second)
@@ -334,7 +346,7 @@ func waitCancelSignals(t *testing.T, ch <-chan struct{}, n int, what string) {
 		select {
 		case <-ch:
 		case <-deadline:
-			t.Fatalf("%s: %d/%d만 처리됐다 (censored)", what, i, n)
+			t.Fatalf("%s: %d/%d만 수집됐다 (censored)", what, i, n)
 		}
 	}
 }
