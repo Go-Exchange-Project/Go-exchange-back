@@ -3598,76 +3598,90 @@ Expected: `ok`.
 
 ---
 
-## Task 8: 로컬 값 탐색 (v2 묶음 측정)
+## Task 8: 선택값 확정과 focused 검증
 
-> **단일 sweep C3는 폐기됐다.** 실측에서 5회 중앙값 오차가 ±9~11%로 C3의 ±5%를 구분하지
-> 못했다(설계 §8.4). 이전 `baseline`/`explore`/`confirm` 산출물은 **파일만 보존하고 어떤
-> 선택에도 쓰지 않는다.**
+> **로컬 wall-clock C3는 `LOCAL_NOT_MEASURABLE`로 종료됐다**(설계 §8.4).
+> 단일 sweep(±9~11%), 묶음 64(32.55%), 묶음 128(13.34%) 모두 ±5% 구분력 확보에 실패했다.
+> 작업량 불일치와 0ns는 제거됐지만 실행 간 시간 변동이 남았고, **그 근본 원인은 미확정**이다.
+> 시간 격자 탐색을 다시 돌리지 않는다.
 
-**Files:** `_workspace/quantum/precision/`, `explore-v2/`, `confirm-v2/`
+**Files:** `internal/matching/quantum_config.go`, `config/runtime.go`,
+`internal/matching/quantum_contract_test.go`(신규),
+`internal/matching/quantum_selected_gates_test.go`(신규)
 
-**측정 계약은 설계 §8.5~§8.6·§9.1·§9.3에 사전 등록돼 있다.** 요약:
+**선택값은 사전 등록 규칙으로 결정된다. 시간 측정값은 순위에 넣지 않는다.**
 
-- 같은 실행 파일 안에서 **대조군**(`maxMatchesPerTurn = maxConsecutiveCancels = 1,000,000`)과
-  후보를 짝지어 비교한다. 대조군은 **quantum yield가 0**이어야 하며, 아니면 측정 실패다.
-- 한 기록값은 단일 sweep이 아니라 **묶음 평균**(`sweep_batch_mean_ns`)이다.
-  워밍업 8 sweep은 기록하지 않는다. 각 sweep은 정확히 5,000 trades.
-- maker·taker·victim은 서로 겹치지 않는 고정 UserID를 쓴다(자기 주문 제외 = 0).
-- 준비 주문은 타이머 시작 **전에** 모두 적재하고 완료 장벽을 통과한다.
-- 작업량·필드·시간값 계약 위반은 `censored`가 아니라 **`measurement_invalid`** 이고,
-  그 run-set 전체를 즉시 실패시킨다.
-- `measurement_schema_version = 2`. 집계기는 이전 결과·필드 누락·묶음 크기 혼합·
-  `measurement_invalid` 포함·H2-5000/H4의 0ns를 거부한다.
+1. `maxMatchesPerTurn`이 큰 값 우선 → 128
+2. 같으면 `maxConsecutiveCancels`가 작은 값 우선 → 8
 
-- [ ] **Step 1: 정밀도 시험 (묶음 64)**
+→ **`m128-c8`**. "가장 빠른 값"이 아니라 **격자 중 추가 yield가 가장 적고(5,000 체결당 39회)
+progress 전 연속 취소 상한이 가장 작은** 값이다.
 
-전체 격자 전에 측정 도구가 5% 차이를 구분하는지 먼저 확인한다. 환경변수 두 개
-(`GOEXCHANGE_QUANTUM_BATCH=64`, `GOEXCHANGE_QUANTUM_OUTDIR=precision/b64`)를 준 뒤:
+- [ ] **Step 1: 시간 기반 C3 경로를 제거한다**
 
+다음을 삭제한다. 방치하지 않는다.
+
+- `quantum_precision_test.go` (precision 64/128 실행기)
+- `quantum_batch_test.go`, `quantum_batch_contract_test.go` (묶음 타이밍 하니스)
+- `quantum_aggregate.go`, `quantum_select.go`와 각 테스트 (시간 비율 C3 게이트)
+- `cmd/quantumselect` (시간 기반 C3 적용)
+- `quantum_scenarios_test.go`, `quantum_harness_test.go`, `quantum_diagnostic_test.go`
+  (무효화된 자료의 생성기·진단기)
+
+산출물 JSON은 `_workspace/quantum/`에 **전부 보존**한다. `precision/`은 실패 증거다.
+
+- [ ] **Step 2: 결정적 계수 계약을 추가한다**
+
+`internal/matching/quantum_config.go`에 순수 함수를 둔다.
+
+```go
+func ExpectedSlices(trades, maxMatchesPerTurn int) int  // ceil, budget<=0이면 1
+func ExpectedYields(trades, maxMatchesPerTurn int) int  // slices - 1
 ```
-go test -tags quantumharness -count=1 ./internal/matching -timeout 90m -v -run TestPrecisionTrial
-```
 
-대조군과 `m16-c8`을 동일 seed로 5쌍, 순서를 번갈아(홀수 쌍 대조군→후보, 짝수 쌍 후보→대조군)
-실행한다. 각 쌍의 `candidate_batch_mean_ns / control_batch_mean_ns` 비율 5개를 구해
-중앙값 대비 **최대 편차 ≤ 2.5%** 면 PASS.
+**이 값은 처리량 손실률이 아니다.** sweep을 몇 조각으로 나눴고 제어점으로 몇 번 더 돌아왔는지만
+뜻한다.
 
-실행 후 두 환경변수는 지운다.
+- [ ] **Step 3: 선택값을 두 곳에 확정한다**
 
-- [ ] **Step 2: FAIL이면 묶음 128로 한 번만 재시험**
+`internal/matching/quantum_config.go`와 `config/runtime.go`의 기본값을 **같은 값으로**
+128 / 8로 바꾼다. 두 곳이 어긋나면 테스트와 프로덕션이 다른 값으로 돈다.
 
-`GOEXCHANGE_QUANTUM_BATCH=128`, `GOEXCHANGE_QUANTUM_OUTDIR=precision/b128`로 같은 명령을
-한 번 더 실행한다.
+- [ ] **Step 4: 결정적 계약 focused 테스트 (빌드 태그 없음)**
 
-**128에서도 FAIL이면 측정을 중단하고 보고한다.** 묶음 크기를 계속 늘리거나 5% 기준을 바꾸지
-않는다.
+`quantum_contract_test.go` — 시계와 무관하므로 일반 `go test`에서 돈다.
 
-- [ ] **Step 3: 1차 탐색 — 6조합 × 3쌍**
+- `ExpectedSlices`/`ExpectedYields` 순수 함수 11 케이스
+- `m128-c8`에서 5,000 체결 sweep의 실제 yield == 39, 체결 수 == 5,000, 잔량 == 0
+- 취소 상한이 설정값(8, 32)에 따라 실제로 움직임
 
-정밀도를 통과한 묶음 크기를 고정한다. 모든 후보를 **바로 옆의 대조군과 짝지어** 실행한다.
-각 쌍은 같은 seed, 홀수 반복은 대조군→후보, 짝수 반복은 후보→대조군.
+- [ ] **Step 5: 안전 상한 focused 측정 (빌드 태그 `quantumharness`)**
 
-`maxMatchesPerTurn ∈ {16, 64, 128}` × `maxConsecutiveCancels ∈ {8, 32}`,
-산출물은 `explore-v2/m<M>-c<C>`.
+`quantum_selected_gates_test.go` — 시간 단언이 있어 CI에서 흔들릴 수 있으므로 태그를 건다.
 
-- [ ] **Step 4: C1·C2·C4용 baseline과 조합별 의미 테스트 (C6)**
+**후보 간 미세 비교가 아니라 300ms 안전 상한 확인이다.** 선택값 하나만 돌린다.
 
-C3만 바뀌었다. C1·C2·C4·C5·C6의 의미와 제한은 그대로이므로 H0·H1·H2-1·H4는 종전 방식으로
-수집한다. 조합별 의미 테스트는 `PASS` 개수를 눈으로 확인한다 — 정규식이 어긋나 0건 매치가
-되면 `go test`는 성공으로 끝난다.
+- C1: **첫 trade 관측 뒤** 취소를 넣고 그 취소 대기를 측정 (순서가 계약이다)
+- C4: 같은 sweep 도중의 스냅샷 최대 간격
+- C2: 취소 홍수 중 신규 주문 큐 대기
+- C5: 표본 누락 0
 
-- [ ] **Step 5: 상위 2조합 × 5쌍 확증**
+측정값이 시계 해상도 이하면 **"0초"라고 단정하지 않고 "측정 해상도 이하"로 기록**한다.
 
-산출물은 `confirm-v2/m<M>-c<C>`. **최종 선택은 확증 결과만 대상으로 한다.**
+- [ ] **Step 6: C6 의미 테스트를 선택값으로 확인한다**
 
-**두 조합 모두 실패하면 P1 중단.** 임계값을 완화하거나 격자를 넓히지 않는다.
+B′ 4건 + crash hook 1건 + 스케줄러 계약 5건 + 조각화 2건.
 
-- [ ] **Step 6: 선택값을 확정한다**
+**하나라도 실패하면 다음 후보로 자동 이동하지 말고 중단·보고한다.**
 
-`config/runtime.go`의 두 상수와 `internal/matching/quantum_config.go`의 기본값을 **같은 값으로**
-바꾸고, 근거를 `_workspace/quantum/selection.md`에 남긴다. 측정 SHA와 config를 함께 적는다.
+- [ ] **Step 7: 문서에 판정을 남긴다**
 
-**재측정 중 `measurement_invalid`나 0ns가 한 번이라도 나오면 즉시 중단한다.**
+- 취소 기아 방지 구조: 검증됨
+- `m128-c8` 결정적 스케줄링 계약: 검증됨
+- 로컬 ±5% 처리량 보존: **판정 불가**
+- 실제 처리량·500 VU 회귀: **최종 통합 GCP까지 보류**
+- 이전 "5.11ms → 0s": 정확한 성능 비교값으로 사용하지 않음
+- GCP: 지금 실행하지 않음
 
 ---
 

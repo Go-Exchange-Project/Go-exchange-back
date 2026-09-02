@@ -78,8 +78,8 @@ func MatchingQuantumFromEnv() (maxMatchesPerTurn int, maxConsecutiveCancels int,
 // 로컬 탐색으로 확정할 때까지의 임시 개발값이다.
 // internal/matching/quantum_config.go의 값과 반드시 같아야 한다.
 const (
-	defaultMatchingMaxMatchesPerTurn     = 64
-	defaultMatchingMaxConsecutiveCancels = 32
+	defaultMatchingMaxMatchesPerTurn     = 128
+	defaultMatchingMaxConsecutiveCancels = 8
 )
 
 const defaultSettlementWorkers = 10
