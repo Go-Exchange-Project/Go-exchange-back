@@ -3598,104 +3598,76 @@ Expected: `ok`.
 
 ---
 
-## Task 8: 2단계 탐색과 값 확정
+## Task 8: 로컬 값 탐색 (v2 묶음 측정)
 
-**Files:** `_workspace/quantum/explore/m<M>-c<C>/*.json`, `_workspace/quantum/confirm/m<M>-c<C>/*.json`, `_workspace/quantum/semantic.json`, `_workspace/quantum/selection.md`, `config/runtime.go`, `internal/matching/engine.go`
+> **단일 sweep C3는 폐기됐다.** 실측에서 5회 중앙값 오차가 ±9~11%로 C3의 ±5%를 구분하지
+> 못했다(설계 §8.4). 이전 `baseline`/`explore`/`confirm` 산출물은 **파일만 보존하고 어떤
+> 선택에도 쓰지 않는다.**
 
-**보존된 baseline을 다시 측정하지 않는다.** `_workspace/quantum/baseline/`은 읽기만 한다.
+**Files:** `_workspace/quantum/precision/`, `explore-v2/`, `confirm-v2/`
 
-- [ ] **Step 1: 1차 탐색 — 6조합 × 3회**
+**측정 계약은 설계 §8.5~§8.6·§9.1·§9.3에 사전 등록돼 있다.** 요약:
 
-```powershell
-cd Go-exchange-back
-$env:GOEXCHANGE_QUANTUM_RUNS = "3"
-$pattern = 'TestHarnessH0NoCancelControl|TestHarnessH1CancelFlood|TestHarnessH2Small|TestHarnessH2Large|TestHarnessH4SnapshotFreshness'
-foreach ($m in 16,64,128) {
-  foreach ($c in 8,32) {
-    $env:GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN = "$m"
-    $env:GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS = "$c"
-    $env:GOEXCHANGE_QUANTUM_OUTDIR = "explore/m$m-c$c"
-    go test -tags quantumharness -count=1 ./internal/matching -timeout 90m -run $pattern
-    if (-not $?) { throw "measurement failed for m$m-c$c" }
-  }
-}
-Remove-Item Env:GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN, Env:GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS, Env:GOEXCHANGE_QUANTUM_OUTDIR, Env:GOEXCHANGE_QUANTUM_RUNS
+- 같은 실행 파일 안에서 **대조군**(`maxMatchesPerTurn = maxConsecutiveCancels = 1,000,000`)과
+  후보를 짝지어 비교한다. 대조군은 **quantum yield가 0**이어야 하며, 아니면 측정 실패다.
+- 한 기록값은 단일 sweep이 아니라 **묶음 평균**(`sweep_batch_mean_ns`)이다.
+  워밍업 8 sweep은 기록하지 않는다. 각 sweep은 정확히 5,000 trades.
+- maker·taker·victim은 서로 겹치지 않는 고정 UserID를 쓴다(자기 주문 제외 = 0).
+- 준비 주문은 타이머 시작 **전에** 모두 적재하고 완료 장벽을 통과한다.
+- 작업량·필드·시간값 계약 위반은 `censored`가 아니라 **`measurement_invalid`** 이고,
+  그 run-set 전체를 즉시 실패시킨다.
+- `measurement_schema_version = 2`. 집계기는 이전 결과·필드 누락·묶음 크기 혼합·
+  `measurement_invalid` 포함·H2-5000/H4의 0ns를 거부한다.
+
+- [ ] **Step 1: 정밀도 시험 (묶음 64)**
+
+전체 격자 전에 측정 도구가 5% 차이를 구분하는지 먼저 확인한다. 환경변수 두 개
+(`GOEXCHANGE_QUANTUM_BATCH=64`, `GOEXCHANGE_QUANTUM_OUTDIR=precision/b64`)를 준 뒤:
+
+```
+go test -tags quantumharness -count=1 ./internal/matching -timeout 90m -v -run TestPrecisionTrial
 ```
 
-- [ ] **Step 2: 조합별 의미 테스트로 C6 입력을 만든다**
+대조군과 `m16-c8`을 동일 seed로 5쌍, 순서를 번갈아(홀수 쌍 대조군→후보, 짝수 쌍 후보→대조군)
+실행한다. 각 쌍의 `candidate_batch_mean_ns / control_batch_mean_ns` 비율 5개를 구해
+중앙값 대비 **최대 편차 ≤ 2.5%** 면 PASS.
 
-```powershell
-cd Go-exchange-back
-$semantic = @{}
-$sem = 'TestActiveSweepCancelReturnsNotFoundThenRemovesRemainder|TestActiveSweepFullFillLeavesNothingToCancel|TestActiveMarketSweepCancelIsNotPreempted|TestMakerCancelledBetweenSlicesEscapesFill|TestCrashBetweenSlicesBeforeTradeOutboxCommit|TestCrashBetweenSlicesAfterPartialOutboxCommit'
-foreach ($m in 16,64,128) {
-  foreach ($c in 8,32) {
-    $env:GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN = "$m"
-    $env:GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS = "$c"
-    $out = go test -count=1 -timeout 600s ./internal/service -v -run $sem 2>&1 | Out-String
-    $pass = ([regex]::Matches($out, '(?m)^--- PASS')).Count
-    if ($pass -ne 6) { throw "m$m-c$c: PASS $pass건, 6건이어야 한다 — 정규식이 테스트를 못 찾았을 수 있다" }
-    $semantic["m$m-c$c"] = ($LASTEXITCODE -eq 0)
-  }
-}
-$semantic | ConvertTo-Json | Out-File -Encoding utf8 _workspace\quantum\semantic.json
-Remove-Item Env:GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN, Env:GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS
-```
+실행 후 두 환경변수는 지운다.
 
-**`PASS` 개수를 6건으로 단언하는 것이 핵심이다.** 정규식이 어긋나면 `go test`가 0건 성공으로 끝나 조용히 통과하고, 그러면 C6이 아무것도 검증하지 않은 채 전 조합이 통과한다.
+- [ ] **Step 2: FAIL이면 묶음 128로 한 번만 재시험**
 
-- [ ] **Step 3: 상위 2개를 고른다**
+`GOEXCHANGE_QUANTUM_BATCH=128`, `GOEXCHANGE_QUANTUM_OUTDIR=precision/b128`로 같은 명령을
+한 번 더 실행한다.
 
-```powershell
-cd Go-exchange-back; go run ./cmd/quantumselect -baseline _workspace/quantum/baseline -baseline-runs 3 -candidates _workspace/quantum/explore -runs 3 -semantic _workspace/quantum/semantic.json -top 2
-```
+**128에서도 FAIL이면 측정을 중단하고 보고한다.** 묶음 크기를 계속 늘리거나 5% 기준을 바꾸지
+않는다.
 
-Expected: 조합 6줄 + `PASSED n/6` + `RANK1 m<M>-c<C>` / `RANK2 m<M>-c<C>`.
+- [ ] **Step 3: 1차 탐색 — 6조합 × 3쌍**
 
-**exit 2면 P1 중단.** 임계값을 완화하거나 격자를 넓히지 않는다.
+정밀도를 통과한 묶음 크기를 고정한다. 모든 후보를 **바로 옆의 대조군과 짝지어** 실행한다.
+각 쌍은 같은 seed, 홀수 반복은 대조군→후보, 짝수 반복은 후보→대조군.
 
-- [ ] **Step 4: 상위 2개를 5회 확증한다**
+`maxMatchesPerTurn ∈ {16, 64, 128}` × `maxConsecutiveCancels ∈ {8, 32}`,
+산출물은 `explore-v2/m<M>-c<C>`.
 
-```powershell
-cd Go-exchange-back
-$env:GOEXCHANGE_QUANTUM_RUNS = "5"
-foreach ($combo in @("m<RANK1>","m<RANK2>")) { }  # Step 3 출력값으로 아래 루프를 채운다
-```
+- [ ] **Step 4: C1·C2·C4용 baseline과 조합별 의미 테스트 (C6)**
 
-Step 3의 `RANK1`·`RANK2` 값으로 두 조합을 돌린다. `GOEXCHANGE_QUANTUM_OUTDIR`는 `confirm/m<M>-c<C>`.
+C3만 바뀌었다. C1·C2·C4·C5·C6의 의미와 제한은 그대로이므로 H0·H1·H2-1·H4는 종전 방식으로
+수집한다. 조합별 의미 테스트는 `PASS` 개수를 눈으로 확인한다 — 정규식이 어긋나 0건 매치가
+되면 `go test`는 성공으로 끝난다.
 
-```powershell
-cd Go-exchange-back; go run ./cmd/quantumselect -baseline _workspace/quantum/baseline -baseline-runs 3 -candidates _workspace/quantum/confirm -runs 5 -semantic _workspace/quantum/semantic.json -top 1
-```
+- [ ] **Step 5: 상위 2조합 × 5쌍 확증**
 
-**최종 선택은 확증 결과만 대상으로 한다.** 1차 통과는 확증 대상을 고르는 데만 썼다.
+산출물은 `confirm-v2/m<M>-c<C>`. **최종 선택은 확증 결과만 대상으로 한다.**
 
-**두 조합 모두 실패하면 P1 중단.**
+**두 조합 모두 실패하면 P1 중단.** 임계값을 완화하거나 격자를 넓히지 않는다.
 
-- [ ] **Step 5: production 기본값을 확정한다**
+- [ ] **Step 6: 선택값을 확정한다**
 
-`config/runtime.go`의 두 상수와 `internal/matching/engine.go`의 `NewMatchingEngine` 기본값을 **같은 값으로** 바꾼다. 두 곳이 어긋나면 테스트와 프로덕션이 다른 값으로 돈다.
+`config/runtime.go`의 두 상수와 `internal/matching/quantum_config.go`의 기본값을 **같은 값으로**
+바꾸고, 근거를 `_workspace/quantum/selection.md`에 남긴다. 측정 SHA와 config를 함께 적는다.
 
-```go
-// 2단계 탐색(6조합 3회 → 상위 2개 5회 확증)에서 사전 등록 규칙으로 선택된
-// 값이다. 근거: _workspace/quantum/selection.md
-const (
-	defaultMaxMatchesPerTurn     = <확증 출력값>
-	defaultMaxConsecutiveCancels = <확증 출력값>
-)
-```
-
-- [ ] **Step 6: `selection.md`를 쓴다**
-
-baseline에서 유도한 C1·C2·C3 상한, 1차 6조합의 통과/탈락과 사유, 상위 2개 선정 근거, 확증 결과, 최종 선택값과 규칙 1~3 중 무엇이 결정했는지, `ExceedingRuns`로 뽑은 회차별 초과 목록.
-
-- [ ] **Step 7: 확정 값으로 의미 테스트를 다시 돌린다**
-
-```powershell
-cd Go-exchange-back; go test -count=1 -timeout 600s ./internal/service -v -run 'TestActiveSweepCancelReturnsNotFoundThenRemovesRemainder|TestActiveSweepFullFillLeavesNothingToCancel|TestActiveMarketSweepCancelIsNotPreempted|TestMakerCancelledBetweenSlicesEscapesFill|TestCrashBetweenSlicesBeforeTradeOutboxCommit|TestCrashBetweenSlicesAfterPartialOutboxCommit|TestCancelCommandWorker|TestStaleMarket'
-```
-
-Expected: 전부 PASS. 확정 값에서 실패하면 C6 위반이므로 선택을 무효화하고 **P1 중단**.
+**재측정 중 `measurement_invalid`나 0ns가 한 번이라도 나오면 즉시 중단한다.**
 
 ---
 

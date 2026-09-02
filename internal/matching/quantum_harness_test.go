@@ -32,9 +32,6 @@ const (
 	harnessOutputDir = "../../_workspace/quantum"
 )
 
-// InfNs는 censored 때문에 분위수가 정의되지 않음을 뜻한다.
-// JSON에 Infinity를 쓸 수 없어 -1로 표현한다. 집계기가 이 값을 보고 에러를 낸다.
-const InfNs int64 = -1
 
 func harnessRuns(t *testing.T) int {
 	t.Helper()
