@@ -61,7 +61,7 @@ func strictPositiveEnv(key string, def int) (int, error) {
 // matching 타입을 반환하지 않는 것은 config → matching 의존을 만들지
 // 않기 위해서다. main이 두 값으로 matching.QuantumConfig를 구성한다.
 //
-// 기본값은 matching 패키지의 개발용 상수와 같아야 한다. 어긋나면 테스트와
+// 기본값은 matching 패키지의 상수와 같아야 한다. 어긋나면 테스트와
 // 프로덕션이 다른 값으로 돈다.
 func MatchingQuantumFromEnv() (maxMatchesPerTurn int, maxConsecutiveCancels int, err error) {
 	maxMatchesPerTurn, err = strictPositiveEnv(EnvGOExchangeMatchingMaxMatchesPerTurn, defaultMatchingMaxMatchesPerTurn)
@@ -75,7 +75,8 @@ func MatchingQuantumFromEnv() (maxMatchesPerTurn int, maxConsecutiveCancels int,
 	return maxMatchesPerTurn, maxConsecutiveCancels, nil
 }
 
-// 로컬 탐색으로 확정할 때까지의 임시 개발값이다.
+// 사전 등록된 결정적 순위로 확정한 기본값이다(설계 §9.1).
+// 로컬 wall-clock 최적값이 아니다 — 그 판정은 측정 정밀도 부족으로 종료됐다.
 // internal/matching/quantum_config.go의 값과 반드시 같아야 한다.
 const (
 	defaultMatchingMaxMatchesPerTurn     = 128

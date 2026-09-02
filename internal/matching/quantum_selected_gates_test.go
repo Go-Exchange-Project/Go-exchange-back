@@ -275,12 +275,13 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 	}
 	c.start()
 
-	var flood sync.WaitGroup
-	flood.Add(1)
+	// 취소 producer만 먼저 시작한다. probe와 동시에 시작하면 backlog가
+	// 형성되기 전에 probe가 admit될 수 있고, 그러면 "취소 홍수 중"을 잰 것이
+	// 아니다.
+	//
+	// 중복 없는 실존 ID만 취소한다. 복원추출하면 not-found가 섞여 취소 처리
+	// 비용이 실제와 달라진다.
 	go func() {
-		defer flood.Done()
-		// 중복 없는 실존 ID만 취소한다. 복원추출하면 not-found가 섞여
-		// 취소 처리 비용이 실제와 달라진다.
 		for i := 0; i < cancels; i++ {
 			me.CancelCh <- CancelOrderCommand{
 				CoinSymbol: "BTC", OrderID: uint(i + 1),
@@ -290,6 +291,11 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 		}
 	}()
 
+	// 장벽: 취소가 실제로 처리되고 있음을 관측한 뒤에 probe를 보낸다.
+	// 채널 전송 완료(flood.Wait)는 처리 완료가 아니므로 판정 근거로 쓰지 않는다.
+	const floodBarrier = 2000
+	waitCancelSignals(t, c.cancels, floodBarrier, "취소 홍수 형성 장벽")
+
 	go func() {
 		for i := 0; i < probes; i++ {
 			// 어떤 것과도 체결되지 않는 가격 — 재는 것은 큐 대기다.
@@ -297,7 +303,7 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 		}
 	}()
 
-	deadline := time.After(30 * time.Second)
+	deadline := time.After(60 * time.Second)
 	for i := 0; i < probes; i++ {
 		select {
 		case <-c.admitted:
@@ -305,12 +311,30 @@ func TestSelectedConfigC2OrderWaitUnderCancelFlood(t *testing.T) {
 			t.Fatalf("C5: probe 주문 %d/%d만 admit됐다 (censored)", i, probes)
 		}
 	}
-	flood.Wait()
+
+	// 측정을 끝내기 전에 취소 15,000건이 **전부 처리**됐는지 확인한다.
+	waitCancelSignals(t, c.cancels, cancels-floodBarrier, "취소 처리 완료")
 	c.stop()
 
 	c.mu.Lock()
-	samples := len(c.orderWaits)
+	orderSamples := len(c.orderWaits)
+	cancelSamples := len(c.cancelWaits)
 	c.mu.Unlock()
-	require.GreaterOrEqual(t, samples, probes, "C5: 표본 부족 (censored)")
-	reportGate(t, "C2 취소 홍수 중 주문 대기", c.p99(c.orderWaits), gateSafetyLimit, samples)
+
+	require.Equal(t, probes, orderSamples, "C5: order wait 표본이 정확히 %d개여야 한다", probes)
+	require.Equal(t, cancels, cancelSamples, "C5: cancel wait 표본이 정확히 %d개여야 한다", cancels)
+	reportGate(t, "C2 취소 홍수 중 주문 대기", c.p99(c.orderWaits), gateSafetyLimit, orderSamples)
+}
+
+// waitCancelSignals는 Cancel observer 신호 n개를 기다린다.
+func waitCancelSignals(t *testing.T, ch <-chan struct{}, n int, what string) {
+	t.Helper()
+	deadline := time.After(60 * time.Second)
+	for i := 0; i < n; i++ {
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("%s: %d/%d만 처리됐다 (censored)", what, i, n)
+		}
+	}
 }
