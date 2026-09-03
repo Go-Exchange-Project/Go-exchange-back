@@ -63,6 +63,14 @@ func main() {
 		&model.LedgerEntry{},
 		&model.ReconciliationViolation{},
 		&model.TradeOutboxEvent{},
+		// 복식부기 원장 7개 표. 제약은 migrations/009가 건다.
+		&model.Account{},
+		&model.AccountBalance{},
+		&model.JournalEntry{},
+		&model.Posting{},
+		&model.TransferRequest{},
+		&model.TransferStatusEvent{},
+		&model.UserAssetStat{},
 	); err != nil {
 		log.Fatal("auto migrate failed: ", err)
 	}

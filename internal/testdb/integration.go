@@ -28,7 +28,10 @@ func OpenIntegrationDB(t testing.TB) *gorm.DB {
 		fatalIfErr(t, sqlDB.Close())
 	})
 
-	fatalIfErr(t, db.AutoMigrate(&model.User{}, &model.Order{}, &model.Wallet{}, &model.Trade{}, &model.FailedSettlement{}, &model.FailedMarketCompletion{}, &model.FailedOrderCancellation{}, &model.LedgerEntry{}, &model.ReconciliationViolation{}, &model.TradeOutboxEvent{}))
+	// 이 목록은 cmd/main.go의 AutoMigrate 목록과 항상 같아야 한다 — 다르면
+	// 통합 테스트와 운영 스키마가 갈린다.
+	fatalIfErr(t, db.AutoMigrate(&model.User{}, &model.Order{}, &model.Wallet{}, &model.Trade{}, &model.FailedSettlement{}, &model.FailedMarketCompletion{}, &model.FailedOrderCancellation{}, &model.LedgerEntry{}, &model.ReconciliationViolation{}, &model.TradeOutboxEvent{},
+		&model.Account{}, &model.AccountBalance{}, &model.JournalEntry{}, &model.Posting{}, &model.TransferRequest{}, &model.TransferStatusEvent{}, &model.UserAssetStat{}))
 	fatalIfErr(t, dbmigration.Up(db))
 	return db
 }
