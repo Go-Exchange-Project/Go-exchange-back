@@ -50,10 +50,21 @@ func (r *AccountRepository) EnsureAccounts(specs []AccountSpec) ([]model.Account
 		return nil, nil
 	}
 
+	// 중복 제거는 값으로 한다. AccountSpec을 그대로 map 키로 쓰면 OwnerUserID가
+	// 포인터라 값이 같아도 주소가 다르면 다른 키가 되고, 같은 계정이 여러 번
+	// 남아 아래 개수 검사가 어긋난다.
+	type dedupeKey struct {
+		accountType model.AccountType
+		ownerUserID uint // 시스템 계정은 0
+		asset       string
+	}
 	unique := make([]AccountSpec, 0, len(specs))
-	seen := make(map[AccountSpec]bool, len(specs))
+	seen := make(map[dedupeKey]bool, len(specs))
 	for _, spec := range specs {
-		key := spec
+		key := dedupeKey{accountType: spec.AccountType, asset: spec.Asset}
+		if spec.OwnerUserID != nil {
+			key.ownerUserID = *spec.OwnerUserID
+		}
 		if seen[key] {
 			continue
 		}
