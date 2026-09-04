@@ -128,7 +128,7 @@ func main() {
 
 	// [②] 자금 홀드 그룹커밋: CreateOrder의 persist+hold를 배치로 묶어 처리한다.
 	// 종료 순서는 아래 graceful shutdown 체인 참고 — HTTP drain 이후에만 Shutdown().
-	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, walletRepo, repository.NewLedgerRepository(config.DB), repository.NewOrderIdempotencyRepository(config.DB), config.HoldBatchSizeFromEnv())
+	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, service.NewLedgerService(config.DB), repository.NewOrderIdempotencyRepository(config.DB), config.HoldBatchSizeFromEnv())
 	go holdCoordinator.Run()
 	orderService.HoldCoordinator = holdCoordinator
 

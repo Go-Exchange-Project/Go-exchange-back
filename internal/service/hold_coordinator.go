@@ -84,11 +84,10 @@ func groupIdempotentRequests(reqs []holdRequest) (owners []int, followers map[in
 }
 
 type HoldCoordinator struct {
-	DB         *gorm.DB
-	OrderRepo  *repository.OrderRepository
-	WalletRepo *repository.WalletRepository
-	LedgerRepo *repository.LedgerRepository
-	IdemRepo   *repository.OrderIdempotencyRepository
+	DB        *gorm.DB
+	OrderRepo *repository.OrderRepository
+	Ledger    *LedgerService
+	IdemRepo  *repository.OrderIdempotencyRepository
 
 	BatchSize     int           // 기본 64
 	FlushInterval time.Duration // 기본 5ms
@@ -134,51 +133,20 @@ func (c *HoldCoordinator) HoldBatch(reqs []holdRequest) ([]holdResult, error) {
 
 	err := c.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := c.OrderRepo.WithTx(tx)
-		walletRepo := c.WalletRepo.WithTx(tx)
-		ledgerRepo := c.LedgerRepo.WithTx(tx)
 
 		activeOwners, err := c.claimIdempotencyKeys(tx, reqs, owners, results)
 		if err != nil {
 			return err
 		}
 
-		// 1. 지갑 키 수집(dedup) → 2. FindByKeys로 ID 확보 → ID 오름차순 LockByIDs.
-		keySet := map[repository.WalletKey]bool{}
-		keys := make([]repository.WalletKey, 0, len(activeOwners))
-		for _, i := range activeOwners {
-			k := holdWalletKey(reqs[i].order)
-			if !keySet[k] {
-				keySet[k] = true
-				keys = append(keys, k)
-			}
-		}
-		found, err := walletRepo.FindByKeys(keys)
-		if err != nil {
-			return err
-		}
-		ids := make([]uint, 0, len(found))
-		for i := range found {
-			ids = append(ids, found[i].ID)
-		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		locked, err := walletRepo.LockByIDs(ids)
-		if err != nil {
-			return err
-		}
-		walletByKey := map[repository.WalletKey]*model.Wallet{}
-		for i := range locked {
-			w := &locked[i]
-			walletByKey[repository.WalletKey{UserID: w.UserID, CoinSymbol: w.CoinSymbol}] = w
-		}
-
-		// 3. 순차 fold-검증. 통과분만 수집.
+		// 통과분만 수집한다. 잔고 검증은 주문 INSERT 뒤 분개를 만들 때
+		// LedgerService가 계정을 잠근 상태에서 한 번만 한다 — 미리 읽어 비교하면
+		// 읽은 뒤 잠그기 전에 잔액이 바뀔 수 있다.
 		type passingHold struct {
 			idx   int
 			order *model.Order
-			entry model.LedgerEntry // ReferenceID는 INSERT 후 채움
 		}
 		var passing []passingHold
-		changedWallets := map[uint]*model.Wallet{}
 
 		// hold 검증에 실패한 owner의 키는 이번 트랜잭션에서 지운다. HoldBatch는 실패분을
 		// results에 격리하고 나머지와 함께 커밋하므로, 지우지 않으면 "검증 실패는 키를
@@ -190,32 +158,75 @@ func (c *HoldCoordinator) HoldBatch(reqs []holdRequest) ([]holdResult, error) {
 			}
 		}
 
+		// 1. 잠글 계정을 모아 한 번에 확보하고 account_id 오름차순으로 잠근다.
+		//    LedgerService가 나중에 같은 계정을 다시 잠그지만 이미 이 트랜잭션이
+		//    쥐고 있으므로 대기가 없다.
+		accountRepo := c.Ledger.Accounts.WithTx(tx)
+		specs := make([]repository.AccountSpec, 0, len(activeOwners))
 		for _, i := range activeOwners {
 			order := reqs[i].order
-			wallet := walletByKey[holdWalletKey(order)]
-			if wallet == nil { // 지갑 없음 = 잔고 부족과 동일
+			userID := order.UserID
+			specs = append(specs, repository.AccountSpec{
+				AccountType: model.AccountUserAvailable,
+				OwnerUserID: &userID,
+				Asset:       orderHoldAsset(order),
+			})
+		}
+		accounts, err := accountRepo.EnsureAccounts(specs)
+		if err != nil {
+			return err
+		}
+		accountIDByKey := map[repository.AccountSpec]uint{}
+		accountIDs := make([]uint, 0, len(accounts))
+		for _, account := range accounts {
+			accountIDs = append(accountIDs, account.ID)
+		}
+		sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+		balances, err := accountRepo.LockBalances(accountIDs)
+		if err != nil {
+			return err
+		}
+		available := make(map[uint]decimal.Decimal, len(balances))
+		for _, balance := range balances {
+			available[balance.AccountID] = balance.Balance
+		}
+		for _, account := range accounts {
+			owner := uint(0)
+			if account.OwnerUserID != nil {
+				owner = *account.OwnerUserID
+			}
+			accountIDByKey[repository.AccountSpec{
+				AccountType: account.AccountType,
+				OwnerUserID: &owner,
+				Asset:       account.Asset,
+			}] = account.ID
+		}
+
+		// 2. 순차 fold-검증. 잠근 상태에서 하므로 검사와 기록 사이에 잔액이
+		//    바뀌지 않는다. 같은 사용자의 두 주문이 같은 잔액을 두 번 쓰는 것도
+		//    여기서 막힌다 — 앞 주문이 차감한 값을 뒤 주문이 본다.
+		for _, i := range activeOwners {
+			order := reqs[i].order
+			owner := order.UserID
+			accountID, ok := accountIDByKey[repository.AccountSpec{
+				AccountType: model.AccountUserAvailable,
+				OwnerUserID: &owner,
+				Asset:       orderHoldAsset(order),
+			}]
+			if !ok {
 				results[i] = holdResult{Err: NewConflictErrorf("insufficient available balance")}
 				failIdempotent(i)
 				continue
 			}
 			amount := holdAmountFor(order)
-			var update WalletBalanceUpdate
-			var herr error
-			if order.Side == model.OrderSideBuy {
-				update, herr = applyBuyOrderHold(wallet, amount)
-			} else {
-				update, herr = applySellOrderHold(wallet, amount)
-			}
-			if herr != nil { // ConflictError(잔고 부족) 격리
-				results[i] = holdResult{Err: herr}
+			remaining := available[accountID].Sub(amount)
+			if remaining.IsNegative() {
+				results[i] = holdResult{Err: insufficientBalanceError(order.Side)}
 				failIdempotent(i)
 				continue
 			}
-			// 원장 엔트리는 fold 전에 계산(delta = update - 현재 잔고).
-			entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, 0, "")
-			foldWalletBalanceUpdate(wallet, update) // 다음 주문이 차감된 잔고를 본다
-			changedWallets[wallet.ID] = wallet
-			passing = append(passing, passingHold{idx: i, order: order, entry: entry})
+			available[accountID] = remaining
+			passing = append(passing, passingHold{idx: i, order: order})
 		}
 
 		// 전원 실패 조기 반환 경로에도 같은 정리가 필요하다.
@@ -243,27 +254,12 @@ func (c *HoldCoordinator) HoldBatch(reqs []holdRequest) ([]holdResult, error) {
 			return err
 		}
 
-		// 5. 변경 지갑 일괄 UPDATE.
-		updates := make([]repository.WalletBatchUpdate, 0, len(changedWallets))
-		for _, w := range changedWallets {
-			updates = append(updates, repository.WalletBatchUpdate{
-				WalletID: w.ID, AvailableBalance: w.AvailableBalance, LockedBalance: w.LockedBalance,
-				KRW: w.KRW, Quantity: w.Quantity, AvgBuyPrice: w.AvgBuyPrice,
-			})
-		}
-		if err := walletRepo.BatchUpdateBalances(updates); err != nil {
-			return err
-		}
-
-		// 6. OrderHold 원장 일괄 INSERT(새 order.ID 참조).
-		entries := make([]model.LedgerEntry, len(passing))
+		// 5. 주문마다 잠금 분개 1건. 위에서 이미 잠근 계정이라 대기가 없고,
+		//    fold가 통과시킨 주문이므로 음수 검사도 통과한다.
 		for j := range passing {
-			e := passing[j].entry
-			e.ReferenceID = passing[j].order.ID
-			entries[j] = e
-		}
-		if err := ledgerRepo.CreateMany(entries); err != nil {
-			return err
+			if err := holdOrderAssets(c.Ledger, tx, passing[j].order); err != nil {
+				return err
+			}
 		}
 
 		// 성공한 owner의 레코드에 order_id와 PENDING을 기록한다. ACCEPTED로 앞당겨
@@ -393,12 +389,12 @@ func (c *HoldCoordinator) claimIdempotencyKeys(tx *gorm.DB, reqs []holdRequest, 
 	return active, nil
 }
 
-func NewHoldCoordinator(db *gorm.DB, orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, idemRepo *repository.OrderIdempotencyRepository, batchSize int) *HoldCoordinator {
+func NewHoldCoordinator(db *gorm.DB, orderRepo *repository.OrderRepository, ledger *LedgerService, idemRepo *repository.OrderIdempotencyRepository, batchSize int) *HoldCoordinator {
 	if batchSize <= 0 {
 		batchSize = defaultHoldBatchSize
 	}
 	return &HoldCoordinator{
-		DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo, IdemRepo: idemRepo,
+		DB: db, OrderRepo: orderRepo, Ledger: ledger, IdemRepo: idemRepo,
 		BatchSize: batchSize, FlushInterval: defaultHoldFlushInterval,
 		input: make(chan holdRequest, holdCoordinatorInputCap), done: make(chan struct{}),
 	}
@@ -499,7 +495,7 @@ func (c *HoldCoordinator) fallbackPerRequest(reqs []holdRequest) []holdResult {
 // 주문·hold를 만든다. 검증 실패는 이 트랜잭션 전체를 롤백하므로 키도 함께 사라진다 —
 // 배치 경로의 DeleteByIDs와 같은 효과다.
 func (c *HoldCoordinator) persistAndHoldOne(req holdRequest) holdResult {
-	return persistAndHoldIdempotent(c.DB, c.OrderRepo, c.WalletRepo, c.LedgerRepo, c.IdemRepo, req)
+	return persistAndHoldIdempotent(c.DB, c.OrderRepo, c.Ledger, c.IdemRepo, req)
 }
 
 // persistAndHoldIdempotent는 단건 경로의 본체다. 코디네이터 폴백과, 코디네이터가
@@ -507,13 +503,12 @@ func (c *HoldCoordinator) persistAndHoldOne(req holdRequest) holdResult {
 func persistAndHoldIdempotent(
 	db *gorm.DB,
 	orderRepo *repository.OrderRepository,
-	walletRepo *repository.WalletRepository,
-	ledgerRepo *repository.LedgerRepository,
+	ledger *LedgerService,
 	idemRepo *repository.OrderIdempotencyRepository,
 	req holdRequest,
 ) holdResult {
 	if req.idem == nil {
-		err := persistAndHold(db, orderRepo, walletRepo, ledgerRepo, req.order)
+		err := persistAndHold(db, orderRepo, ledger, req.order)
 		return holdResult{Order: req.order, Err: err}
 	}
 
@@ -549,7 +544,7 @@ func persistAndHoldIdempotent(
 		if err := orderRepo.WithTx(tx).CreateOrder(req.order); err != nil {
 			return err
 		}
-		if err := holdOrderAssets(walletRepo.WithTx(tx), ledgerRepo.WithTx(tx), req.order); err != nil {
+		if err := holdOrderAssets(ledger, tx, req.order); err != nil {
 			return err
 		}
 		if err := txIdemRepo.SetOrderAndOutcome(

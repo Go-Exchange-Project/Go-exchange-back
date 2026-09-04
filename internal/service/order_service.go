@@ -22,6 +22,8 @@ type OrderService struct {
 	MatchingEngine    matching.Engine
 	TradeRepository   *repository.TradeRepository
 	LedgerRepository  *repository.LedgerRepository
+	AccountRepository *repository.AccountRepository
+	Ledger            *LedgerService
 	MarketRules       *MarketRulesRegistry
 	AcceptanceTimeout time.Duration    // 0이면 defaultAcceptanceTimeout
 	HoldCoordinator   *HoldCoordinator // nil이면 persistAndHold 직접 호출(기존 테스트 경로)
@@ -120,6 +122,8 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 	if repo != nil && repo.DB != nil {
 		service.TradeRepository = repository.NewTradeRepository(repo.DB)
 		service.LedgerRepository = repository.NewLedgerRepository(repo.DB)
+		service.AccountRepository = repository.NewAccountRepository(repo.DB)
+		service.Ledger = NewLedgerService(repo.DB)
 		service.CancelCommandRepository = repository.NewCancelCommandRepository(repo.DB)
 		service.OrderIdempotencyRepository = repository.NewOrderIdempotencyRepository(repo.DB)
 	}
@@ -128,15 +132,12 @@ func NewOrderService(repo *repository.OrderRepository, walletRepo *repository.Wa
 
 // persistAndHold는 주문 1건을 한 트랜잭션에 영속화하고 자금을 홀드한다.
 // no-coordinator 경로와 배치 실패 폴백이 공유하는 단건 경로 — 정합성의 진실.
-func persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
+func persistAndHold(db *gorm.DB, orderRepo *repository.OrderRepository, ledger *LedgerService, order *model.Order) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		or := orderRepo.WithTx(tx)
-		wr := walletRepo.WithTx(tx)
-		lr := ledgerRepo.WithTx(tx)
-		if err := or.CreateOrder(order); err != nil {
+		if err := orderRepo.WithTx(tx).CreateOrder(order); err != nil {
 			return err
 		}
-		return holdOrderAssets(wr, lr, order)
+		return holdOrderAssets(ledger, tx, order)
 	})
 }
 
@@ -250,7 +251,7 @@ func (s *OrderService) holdWithIdempotency(order *model.Order, idem *idempotency
 		return s.HoldCoordinator.SubmitWithIdempotency(order, idem)
 	}
 	res := persistAndHoldIdempotent(
-		s.OrderRepository.DB, s.OrderRepository, s.WalletRepository, s.LedgerRepository,
+		s.OrderRepository.DB, s.OrderRepository, s.Ledger,
 		s.OrderIdempotencyRepository, holdRequest{order: order, idem: idem},
 	)
 	return res, res.Err
@@ -711,14 +712,16 @@ func (s *OrderService) GetOrder(userID uint, orderID uint) (*model.Order, error)
 	return s.OrderRepository.FindByUserIDAndID(userID, orderID)
 }
 
-func (s *OrderService) ListWallets(userID uint) ([]model.Wallet, error) {
+// ListWallets는 원장 잔액을 자산별로 돌려준다. 이름과 라우트는 그대로 두어
+// 핸들러를 건드리지 않는다 — 바뀐 것은 잔액을 어디서 읽는가뿐이다.
+func (s *OrderService) ListWallets(userID uint) ([]repository.UserAssetBalance, error) {
 	if userID == 0 {
 		return nil, NewValidationErrorf("user_id is required")
 	}
-	if s == nil || s.WalletRepository == nil {
-		return nil, fmt.Errorf("wallet repository is required")
+	if s == nil || s.AccountRepository == nil {
+		return nil, fmt.Errorf("account repository is required")
 	}
-	return s.WalletRepository.ListByUserID(userID)
+	return s.AccountRepository.ListUserBalances(userID)
 }
 
 func (s *OrderService) ListTrades(input ListTradesInput) ([]repository.UserTrade, error) {
@@ -846,51 +849,6 @@ func (s *OrderService) marketRulesRegistry() *MarketRulesRegistry {
 		return s.MarketRules
 	}
 	return defaultMarketRulesRegistry
-}
-
-func holdOrderAssets(walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order) error {
-	switch order.Side {
-	case model.OrderSideBuy:
-		wallet, err := walletRepo.FindKRWWalletByUserIDForUpdate(order.UserID)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return NewConflictErrorf("insufficient available KRW balance")
-			}
-			return err
-		}
-		required := quoteAmountWithTradingFee(order.Price.Mul(order.Amount))
-		if order.OrderType == model.OrderTypeMarket {
-			required = order.QuoteAmount
-		}
-		update, err := applyBuyOrderHold(wallet, required)
-		if err != nil {
-			return err
-		}
-		if err := walletRepo.UpdateBalances(order.UserID, model.KRWAssetSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
-			return err
-		}
-		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID, "")
-		return ledgerRepo.Create(&entry)
-	case model.OrderSideSell:
-		wallet, err := walletRepo.FindByUserIDAndCoinSymbolForUpdate(order.UserID, order.CoinSymbol)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return NewConflictErrorf("insufficient available coin balance")
-			}
-			return err
-		}
-		update, err := applySellOrderHold(wallet, order.Amount)
-		if err != nil {
-			return err
-		}
-		if err := walletRepo.UpdateBalances(order.UserID, order.CoinSymbol, update.AvailableBalance, update.LockedBalance); err != nil {
-			return err
-		}
-		entry := ledgerEntryFromWalletUpdate(wallet, update, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID, "")
-		return ledgerRepo.Create(&entry)
-	default:
-		return NewValidationErrorf("invalid order side")
-	}
 }
 
 func releaseOrderHold(walletRepo *repository.WalletRepository, ledgerRepo *repository.LedgerRepository, order *model.Order, remaining decimal.Decimal) (string, decimal.Decimal, error) {

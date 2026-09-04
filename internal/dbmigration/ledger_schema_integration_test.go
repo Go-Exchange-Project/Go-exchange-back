@@ -94,7 +94,7 @@ func TestLedgerSchemaIntegration(t *testing.T) {
 						 status, client_request_key, check_attempts, review_reason,
 						 failure_reason, created_at, updated_at)
 					VALUES (1, 'WITHDRAWAL', 'BANK', 'KRW', 1000, 0, 'KRW',
-						 'RECEIVED', ?, 0, '', '', now(), now())
+						 'RECEIVED', ?, 0, NULL, '', now(), now())
 					RETURNING id`, uniqueKey("deferred-ok")).Scan(&requestID).Error; err != nil {
 					return err
 				}
@@ -114,10 +114,61 @@ func TestLedgerSchemaIntegration(t *testing.T) {
 						 status, client_request_key, check_attempts, review_reason,
 						 failure_reason, created_at, updated_at)
 					VALUES (1, 'WITHDRAWAL', 'BANK', 'KRW', 1000, 0, 'KRW',
-						 'RECEIVED', ?, 0, '', '', now(), now())`,
+						 'RECEIVED', ?, 0, NULL, '', now(), now())`,
 					uniqueKey("deferred-bad")).Error
 			})
 			require.Error(t, err, "잠금 없는 출금이 커밋됐다")
+		})
+	})
+
+	// 깃발과 사유는 함께 움직여야 한다. 사유 없는 깃발은 운영자가 무엇을 봐야
+	// 할지 알 수 없고, 깃발 없는 사유는 아무도 보지 않는다.
+	//
+	// NULL 비교로 제약을 쓰면 review_reason이 NULL일 때 CHECK 식이 NULL이 되어
+	// 통과해 버린다. 아래 두 경우가 그것을 막는다.
+	t.Run("운영 확인 표시는 두 열이 함께 움직인다", func(t *testing.T) {
+		t.Run("깃발만 있으면 거부된다", func(t *testing.T) {
+			err := db.Exec(`
+				INSERT INTO transfer_requests
+					(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
+					 status, client_request_key, check_attempts, review_required_at,
+					 review_reason, failure_reason, created_at, updated_at)
+				VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0,
+					 now(), NULL, '', now(), now())`, uniqueKey("review-flag-only")).Error
+			require.Error(t, err, "사유 없는 확인 깃발이 통과했다")
+		})
+
+		t.Run("사유만 있으면 거부된다", func(t *testing.T) {
+			err := db.Exec(`
+				INSERT INTO transfer_requests
+					(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
+					 status, client_request_key, check_attempts, review_required_at,
+					 review_reason, failure_reason, created_at, updated_at)
+				VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0,
+					 NULL, 'EXTERNAL_UNKNOWN', '', now(), now())`, uniqueKey("review-reason-only")).Error
+			require.Error(t, err, "깃발 없는 사유가 통과했다")
+		})
+
+		t.Run("빈 문자열 사유는 거부된다", func(t *testing.T) {
+			err := db.Exec(`
+				INSERT INTO transfer_requests
+					(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
+					 status, client_request_key, check_attempts, review_required_at,
+					 review_reason, failure_reason, created_at, updated_at)
+				VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0,
+					 now(), '', '', now(), now())`, uniqueKey("review-empty")).Error
+			require.Error(t, err, "빈 사유가 통과했다")
+		})
+
+		t.Run("둘 다 있으면 통과한다", func(t *testing.T) {
+			err := db.Exec(`
+				INSERT INTO transfer_requests
+					(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
+					 status, client_request_key, check_attempts, review_required_at,
+					 review_reason, failure_reason, created_at, updated_at)
+				VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0,
+					 now(), 'EXTERNAL_UNKNOWN', '', now(), now())`, uniqueKey("review-both")).Error
+			require.NoError(t, err, "정상 조합이 막혔다")
 		})
 	})
 
@@ -154,7 +205,7 @@ func insertTransferRequest(db *gorm.DB, row transferRow) error {
 			(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
 			 status, client_request_key, hold_journal_id, check_attempts,
 			 review_reason, failure_reason, created_at, updated_at)
-		VALUES (1, ?, 'BANK', 'KRW', 1000, 0, 'KRW', ?, ?, ?, 0, '', '', now(), now())`,
+		VALUES (1, ?, 'BANK', 'KRW', 1000, 0, 'KRW', ?, ?, ?, 0, NULL, '', now(), now())`,
 		row.direction, row.status, row.key, row.holdID).Error
 }
 
@@ -166,7 +217,7 @@ func mustInsertDeposit(t *testing.T, db *gorm.DB, key string) uint {
 			(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
 			 status, client_request_key, check_attempts, review_reason,
 			 failure_reason, created_at, updated_at)
-		VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0, '', '', now(), now())
+		VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0, NULL, '', now(), now())
 		RETURNING id`, key).Scan(&id).Error)
 	return id
 }

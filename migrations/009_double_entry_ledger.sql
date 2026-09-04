@@ -221,13 +221,21 @@ BEGIN
     END IF;
 
     -- 운영 확인 표시는 두 열이 함께 움직인다. 사유 없는 깃발은 운영자가
-    -- 무엇을 봐야 할지 알 수 없다.
+    -- 무엇을 봐야 할지 알 수 없고, 깃발 없는 사유는 아무도 보지 않는다.
+    --
+    -- NULL 비교로 쓰면 안 된다: review_reason이 NULL일 때 (review_reason = '')는
+    -- FALSE가 아니라 NULL이 되고, CHECK는 FALSE일 때만 거부하므로 잘못된 조합이
+    -- 그대로 통과한다. 허용 조합을 직접 나열한다.
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'transfer_requests'::regclass AND conname = 'transfer_requests_review_pair_check'
     ) THEN
         ALTER TABLE transfer_requests ADD CONSTRAINT transfer_requests_review_pair_check
-            CHECK ((review_required_at IS NULL) = (review_reason = ''));
+            CHECK (
+                (review_required_at IS NULL AND review_reason IS NULL)
+                OR
+                (review_required_at IS NOT NULL AND review_reason IS NOT NULL AND review_reason <> '')
+            );
     END IF;
 
     IF NOT EXISTS (
