@@ -21,26 +21,14 @@ func TestIntegrationReconciliationWorkerRecordsInjectedViolations(t *testing.T) 
 	userID := serviceTestUserID(90)
 	defer cleanupServiceUsers(t, db, userID)
 
-	// 정상 지갑: 원장과 지갑이 정확히 일치 → 위반이 없어야 한다.
-	cleanWallet := seedReconciliationWallet(t, db, userID, model.KRWAssetSymbol,
-		decimal.NewFromInt(1000), decimal.Zero)
-	seedReconciliationLedgerEntry(t, db, userID, model.KRWAssetSymbol,
-		decimal.NewFromInt(1000), decimal.Zero, decimal.NewFromInt(1000), decimal.Zero)
+	// 정상 계정: 지급만 하고 캐시를 건드리지 않음 → 위반이 없어야 한다.
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(1000))
+	cleanAccountID := userAvailableAccountID(t, db, userID, model.KRWAssetSymbol)
 
-	// 진짜 버그: 원장 델타 합(500)과 지갑(700)이 어긋난 지갑.
+	// 드리프트 주입: 전기 없이 잔액 캐시만 어긋나게 만든 계정 → balance_cache_drift.
 	bugUserID := serviceTestUserID(91)
 	defer cleanupServiceUsers(t, db, bugUserID)
-	bugWallet := seedReconciliationWallet(t, db, bugUserID, model.KRWAssetSymbol,
-		decimal.NewFromInt(700), decimal.Zero)
-	seedReconciliationLedgerEntry(t, db, bugUserID, model.KRWAssetSymbol,
-		decimal.NewFromInt(500), decimal.Zero, decimal.NewFromInt(500), decimal.Zero)
-
-	// 레거시 패턴: 첫 원장 항목의 after-delta가 100 → 추적 안 된 초기 잔액 100이
-	// available gap(70-(-30)=100)을 정확히 설명하고 locked gap은 0 → legacy_mismatch.
-	legacyWallet := seedReconciliationWallet(t, db, bugUserID, "BTC",
-		decimal.NewFromInt(70), decimal.NewFromInt(30))
-	seedReconciliationLedgerEntry(t, db, bugUserID, "BTC",
-		decimal.NewFromInt(-30), decimal.NewFromInt(30), decimal.NewFromInt(70), decimal.NewFromInt(30))
+	driftAccountID := seedBalanceCacheDrift(t, db, bugUserID, model.KRWAssetSymbol, decimal.NewFromInt(200))
 
 	// 오래된 시장가 주문: 10분 전 생성된 PENDING → stale_market_order.
 	staleOrder := model.Order{
@@ -57,11 +45,10 @@ func TestIntegrationReconciliationWorkerRecordsInjectedViolations(t *testing.T) 
 	}
 	require.NoError(t, db.Create(&staleOrder).Error)
 
-	cleanSubject := fmt.Sprintf("wallet:%d", cleanWallet.ID)
-	bugSubject := fmt.Sprintf("wallet:%d", bugWallet.ID)
-	legacySubject := fmt.Sprintf("wallet:%d", legacyWallet.ID)
+	cleanSubject := fmt.Sprintf("account:%d", cleanAccountID)
+	driftSubject := fmt.Sprintf("account:%d", driftAccountID)
 	orderSubject := fmt.Sprintf("order:%d", staleOrder.ID)
-	subjects := []string{cleanSubject, bugSubject, legacySubject, orderSubject}
+	subjects := []string{cleanSubject, driftSubject, orderSubject}
 	defer func() {
 		require.NoError(t, db.Where("subject_key IN ?", subjects).Delete(&model.ReconciliationViolation{}).Error)
 	}()
@@ -73,12 +60,11 @@ func TestIntegrationReconciliationWorkerRecordsInjectedViolations(t *testing.T) 
 	worker.RunOnce()
 
 	violations := findViolationsBySubject(t, db, subjects)
-	assert.Empty(t, violations[cleanSubject], "정상 지갑은 위반이 없어야 한다")
-	require.Len(t, violations[bugSubject], 1)
-	assert.Equal(t, "ledger_wallet", violations[bugSubject][0].CheckName)
-	assert.Contains(t, violations[bugSubject][0].Detail, "available_balance=700")
-	require.Len(t, violations[legacySubject], 1)
-	assert.Equal(t, "legacy_mismatch", violations[legacySubject][0].CheckName)
+	assert.Empty(t, violations[cleanSubject], "정상 계정은 위반이 없어야 한다")
+	require.Len(t, violations[driftSubject], 1)
+	assert.Equal(t, "balance_cache_drift", violations[driftSubject][0].CheckName)
+	assert.Contains(t, violations[driftSubject][0].Detail, "cached=")
+	assert.Contains(t, violations[driftSubject][0].Detail, "computed=")
 	require.Len(t, violations[orderSubject], 1)
 	assert.Equal(t, "stale_market_order", violations[orderSubject][0].CheckName)
 }
@@ -89,12 +75,9 @@ func TestIntegrationReconciliationWorkerStopsRecordingAfterResolution(t *testing
 	userID := serviceTestUserID(92)
 	defer cleanupServiceUsers(t, db, userID)
 
-	wallet := seedReconciliationWallet(t, db, userID, model.KRWAssetSymbol,
-		decimal.NewFromInt(700), decimal.Zero)
-	seedReconciliationLedgerEntry(t, db, userID, model.KRWAssetSymbol,
-		decimal.NewFromInt(500), decimal.Zero, decimal.NewFromInt(500), decimal.Zero)
+	accountID := seedBalanceCacheDrift(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(200))
 
-	subject := fmt.Sprintf("wallet:%d", wallet.ID)
+	subject := fmt.Sprintf("account:%d", accountID)
 	defer func() {
 		require.NoError(t, db.Where("subject_key = ?", subject).Delete(&model.ReconciliationViolation{}).Error)
 	}()
@@ -109,9 +92,8 @@ func TestIntegrationReconciliationWorkerStopsRecordingAfterResolution(t *testing
 	require.NoError(t, db.Model(&model.ReconciliationViolation{}).Where("subject_key = ?", subject).Count(&afterFirst).Error)
 	require.Equal(t, int64(1), afterFirst)
 
-	// 지갑을 원장과 일치하도록 "복구"하면 더 이상 기록되지 않는다.
-	require.NoError(t, db.Model(&model.Wallet{}).Where("id = ?", wallet.ID).
-		Updates(map[string]interface{}{"available_balance": decimal.NewFromInt(500), "krw": decimal.NewFromInt(500)}).Error)
+	// 캐시를 전기 합과 다시 맞춘다("해소").
+	resolveBalanceCacheDrift(t, db, accountID)
 
 	worker.RunOnce()
 	var afterSecond int64
@@ -119,39 +101,48 @@ func TestIntegrationReconciliationWorkerStopsRecordingAfterResolution(t *testing
 	assert.Equal(t, int64(1), afterSecond, "해소된 위반은 새 행을 만들지 않아야 한다")
 }
 
-func seedReconciliationWallet(t *testing.T, db *gorm.DB, userID uint, coinSymbol string, available decimal.Decimal, locked decimal.Decimal) model.Wallet {
+// userAvailableAccountID는 사용자·자산의 USER_AVAILABLE 계정 ID를 찾는다.
+func userAvailableAccountID(t *testing.T, db *gorm.DB, userID uint, asset string) uint {
 	t.Helper()
 
-	total := available.Add(locked)
-	wallet := model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       coinSymbol,
-		AvailableBalance: available,
-		LockedBalance:    locked,
-	}
-	if coinSymbol == model.KRWAssetSymbol {
-		wallet.KRW = total
-	} else {
-		wallet.Quantity = total
-	}
-	require.NoError(t, db.Create(&wallet).Error)
-	return wallet
+	var accountID uint
+	require.NoError(t, db.Raw(`
+		SELECT a.id FROM accounts a
+		WHERE a.owner_user_id = ? AND a.asset = ? AND a.account_type = 'USER_AVAILABLE'`,
+		userID, asset).Scan(&accountID).Error)
+	require.NotZero(t, accountID, "계정이 아직 없다 — 지급을 먼저 해야 한다")
+	return accountID
 }
 
-func seedReconciliationLedgerEntry(t *testing.T, db *gorm.DB, userID uint, coinSymbol string, availableDelta, lockedDelta, availableAfter, lockedAfter decimal.Decimal) {
+// seedBalanceCacheDrift는 전기 없이 잔액 캐시만 바꿔 검사 2(balance_cache_drift)가
+// 잡을 위반을 만든다.
+//
+// 이 주입은 전역이다 — 검사는 계정 전체를 훑는다. 복구를 t.Cleanup으로 걸어 두지
+// 않으면 테스트가 중간에 실패했을 때 공유 DB에 드리프트가 영구히 남고,
+// TestOrderAndSettlementPreserveAssets의 "검산 4종 위반 0건" 단언이 그때부터 계속
+// 깨진다. 복구는 델타를 빼는 대신 전기 합으로 다시 계산해 SET한다(resolveBalanceCacheDrift)
+// — 그래야 테스트가 중간에 이미 캐시를 되돌려도(해소 시나리오) cleanup이 다시
+// 어긋나지 않는다.
+func seedBalanceCacheDrift(t *testing.T, db *gorm.DB, userID uint, asset string, delta decimal.Decimal) (accountID uint) {
 	t.Helper()
 
-	require.NoError(t, db.Create(&model.LedgerEntry{
-		UserID:                userID,
-		CoinSymbol:            coinSymbol,
-		EntryType:             model.LedgerEntryTypeDevFund,
-		AvailableDelta:        availableDelta,
-		LockedDelta:           lockedDelta,
-		AvailableBalanceAfter: availableAfter,
-		LockedBalanceAfter:    lockedAfter,
-		ReferenceType:         model.LedgerReferenceTypeDevFund,
-		ReferenceID:           0,
-	}).Error)
+	seedLedgerFunds(t, db, userID, asset, decimal.NewFromInt(1000))
+	accountID = userAvailableAccountID(t, db, userID, asset)
+
+	require.NoError(t, db.Exec(`UPDATE account_balances SET balance = balance + ? WHERE account_id = ?`,
+		delta, accountID).Error)
+	t.Cleanup(func() { resolveBalanceCacheDrift(t, db, accountID) })
+	return accountID
+}
+
+// resolveBalanceCacheDrift는 잔액 캐시를 전기 합으로 다시 맞춘다. 상대값을 빼는
+// 게 아니라 절대값으로 SET하므로 몇 번을 불러도 안전하다.
+func resolveBalanceCacheDrift(t *testing.T, db *gorm.DB, accountID uint) {
+	t.Helper()
+	require.NoError(t, db.Exec(`
+		UPDATE account_balances SET balance = COALESCE(
+			(SELECT SUM(amount) FROM postings WHERE account_id = ?), 0)
+		WHERE account_id = ?`, accountID, accountID).Error)
 }
 
 func findViolationsBySubject(t *testing.T, db *gorm.DB, subjects []string) map[string][]model.ReconciliationViolation {

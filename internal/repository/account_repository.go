@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
@@ -72,6 +73,19 @@ func (r *AccountRepository) EnsureAccounts(specs []AccountSpec) ([]model.Account
 		unique = append(unique, spec)
 	}
 
+	// 신규 계정 INSERT 순서를 (종류, 소유자, 자산)으로 고정한다. 호출자가 넘긴
+	// 순서를 그대로 쓰면, 같은 두 계정을 서로 반대 순서로 만들려는 두 트랜잭션이
+	// 유니크 인덱스에서 서로를 기다려 교착상태가 된다.
+	sort.Slice(unique, func(i, j int) bool {
+		if unique[i].AccountType != unique[j].AccountType {
+			return unique[i].AccountType < unique[j].AccountType
+		}
+		if ownerValue(unique[i].OwnerUserID) != ownerValue(unique[j].OwnerUserID) {
+			return ownerValue(unique[i].OwnerUserID) < ownerValue(unique[j].OwnerUserID)
+		}
+		return unique[i].Asset < unique[j].Asset
+	})
+
 	rows := make([]model.Account, 0, len(unique))
 	for _, spec := range unique {
 		rows = append(rows, model.Account{
@@ -101,6 +115,10 @@ func (r *AccountRepository) EnsureAccounts(specs []AccountSpec) ([]model.Account
 	for i := range accounts {
 		ids = append(ids, accounts[i].ID)
 	}
+	// 잔액 캐시 행 INSERT도 account_id 오름차순으로 한다. findBySpecs의 반환
+	// 순서는 DB가 정하므로, 정렬하지 않으면 같은 계정 집합을 서로 다른 순서로
+	// INSERT하는 두 트랜잭션이 생긴다.
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	if err := r.ensureBalanceRows(ids); err != nil {
 		return nil, err
 	}
@@ -149,6 +167,14 @@ func (r *AccountRepository) ListUserBalances(userID uint) ([]UserAssetBalance, e
 		GROUP BY a.asset
 		ORDER BY a.asset ASC`, userID).Scan(&rows).Error
 	return rows, err
+}
+
+// ownerValue는 소유자를 비교 가능한 값으로 만든다. 시스템 계정(nil)은 0이다.
+func ownerValue(ownerUserID *uint) uint {
+	if ownerUserID == nil {
+		return 0
+	}
+	return *ownerUserID
 }
 
 func (r *AccountRepository) findBySpecs(specs []AccountSpec) ([]model.Account, error) {

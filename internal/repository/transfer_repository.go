@@ -142,3 +142,15 @@ func (r *TransferRepository) DueForCheck(now time.Time, limit int) ([]model.Tran
 		Find(&requests).Error
 	return requests, err
 }
+
+// requireRowsAffected는 갱신이 실제로 행을 건드렸는지 확인한다. 0행은 조건에
+// 맞는 행이 없었다는 뜻이므로 성공으로 넘기면 호출자가 갱신됐다고 오해한다.
+func requireRowsAffected(result *gorm.DB, operation string) error {
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("%s affected no rows", operation)
+	}
+	return nil
+}

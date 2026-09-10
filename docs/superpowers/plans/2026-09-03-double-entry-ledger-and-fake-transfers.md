@@ -261,7 +261,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   func (r *TransferRepository) DueForCheck(now time.Time, limit int) ([]model.TransferRequest, error)
   ```
 
-- [ ] **Step 1: `migrations/009_double_entry_ledger.sql` 작성**
+- [x] **Step 1: `migrations/009_double_entry_ledger.sql` 작성**
 
   goose 형식(`-- +goose Up`, 여러 문장을 묶을 때는 `-- +goose StatementBegin`)을 따른다. 기존 [migrations/008_order_idempotency_keys.sql](../../../migrations/008_order_idempotency_keys.sql)이 참고 형식이다. AutoMigrate가 만드는 표에 **GORM이 표현하지 못하는 것만** 여기서 건다:
 
@@ -301,7 +301,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   **`external_ref`는 `RECEIVED` 동안 NULL이다.** 외부 제출 전에는 외부 거래번호가 없다. 그래서 `UNIQUE`를 `WHERE external_ref IS NOT NULL` 부분 인덱스로 걸고, 제출 이후 상태에서는 NOT NULL을 CHECK로 강제한다.
 
-- [ ] **Step 2: 모델 4개 파일 작성 후 AutoMigrate 목록에 배선**
+- [x] **Step 2: 모델 4개 파일 작성 후 AutoMigrate 목록에 배선**
 
   위 Produces의 구조체를 GORM 태그와 함께 작성한다. `cmd/main.go:55-66`과 `internal/testdb/integration.go:31`의 목록에 **7개 모두** 추가한다:
 
@@ -314,14 +314,14 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   `user_asset_stats`도 여기서 함께 만든다. Task 4에서 뒤늦게 추가하면 **이미 적용된 009를 고치거나 010을 새로 만드는 흐름**이 생기는데, 적용된 마이그레이션을 수정하는 습관은 만들지 않는다.
 
-- [ ] **Step 3: 리포지토리 3개 작성**
+- [x] **Step 3: 리포지토리 3개 작성**
 
   위 Produces의 시그니처대로 구현한다. 세 가지만 주의한다.
   - `InsertOrGet`·`InsertEventIfAbsent`는 `clause.OnConflict{Columns: …, DoNothing: true}` + `RETURNING`을 쓴다. `RowsAffected == 0`이 "이미 있음"이다.
   - `LockBalances`는 반드시 `account_id` 오름차순으로 정렬한 뒤 `FOR UPDATE` 한다. 기존 [wallet_reporsitory.go:104](../../../internal/repository/wallet_reporsitory.go) `LockByIDs`와 같은 이유(AB-BA 데드락 방지)이며 그 구현을 본떠도 된다.
   - `ApplyBalanceDeltas`는 [wallet_reporsitory.go:274](../../../internal/repository/wallet_reporsitory.go) `BatchUpdateBalances`의 `UPDATE … FROM (VALUES …)` 패턴을 따라 1왕복으로 처리한다. 없는 행은 0에서 시작하도록 upsert한다.
 
-- [ ] **Step 4: 스키마 테스트 작성**
+- [x] **Step 4: 스키마 테스트 작성**
 
   `internal/dbmigration/ledger_schema_integration_test.go`에 `TestLedgerSchemaIntegration`을 만든다. 패키지는 `dbmigration_test`다(testdb가 dbmigration을 import하므로 import cycle 방지 — [cancel_command_integration_test.go](../../../internal/dbmigration/cancel_command_integration_test.go) 머리 주석과 같은 이유). 그 파일이 007을 검증하는 방식을 그대로 따라 다음 넷만 확인한다:
   - 허용값 밖 `status`·`outcome` INSERT가 거부된다
@@ -333,7 +333,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   **새 테스트 함수를 만들지 않는다** — 전부 `TestLedgerSchemaIntegration`의 `t.Run` 하위 경우다.
 
-- [ ] **Step 5: 테스트 실행**
+- [x] **Step 5: 테스트 실행**
 
   ```bash
   go test ./internal/dbmigration/ -run TestLedgerSchemaIntegration -v
@@ -385,7 +385,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   func (r *LedgerReconciliationRepository) CheckNegativeAccounts() ([]NegativeAccountRow, error)       // 검사 4
   ```
 
-- [ ] **Step 1: `Record`의 실패 테스트 4개를 먼저 쓴다**
+- [x] **Step 1: `Record`의 실패 테스트 4개를 먼저 쓴다**
 
   `internal/service/ledger_service_integration_test.go`에 아래 넷을 쓴다. 구현이 없으므로 컴파일 실패로 시작한다.
 
@@ -398,14 +398,14 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   T3의 롤백은 시간이나 실행 순서에 의존하지 않는다 — 호출자 트랜잭션 안에서 `Record` 성공 후 테스트가 명시적으로 오류를 반환해 롤백시킨다.
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
   ```bash
   go test ./internal/service/ -run 'TestLedger(RejectsUnbalancedJournal|RecordIsIdempotent|RollsBackJournalPostingAndBalance|RejectsNegativeUserAccount)' -v
   ```
   Expected: 컴파일 실패 (`undefined: NewLedgerService`).
 
-- [ ] **Step 3: `LedgerService.Record` 구현**
+- [x] **Step 3: `LedgerService.Record` 구현**
 
   순서를 고정한다. **멱등 판정이 잔액 검사보다 먼저다.**
 
@@ -421,18 +421,18 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   **신규 분개를 INSERT한 뒤 6번에서 실패해도 찌꺼기는 남지 않는다.** `Record`는 호출자의 트랜잭션 안에서 돌고, 오류를 반환하면 호출자가 트랜잭션 전체를 롤백한다. 분개만 남고 전기가 없는 상태는 커밋되지 않는다 — T3가 이것을 고정한다.
 
-- [ ] **Step 4: 검산 4종 쿼리 구현**
+- [x] **Step 4: 검산 4종 쿼리 구현**
 
   설계 §9의 SQL 넷을 그대로 옮긴다. 검사 2는 `account_balances.balance`와 `SUM(postings.amount)`를 `IS DISTINCT FROM`으로 비교한다. 기존 [reconciliation_repository.go](../../../internal/repository/reconciliation_repository.go)의 페이지네이션 방식(`afterID` + `limit`)을 따라 큰 표에서도 한 번에 다 읽지 않게 한다. **`ReconciliationWorker` 배선은 Task 5에서 한다** — 지금 붙이면 아직 원장이 비어 있어 옛 검사와 새 검사가 동시에 돌아간다.
 
-- [ ] **Step 5: 통과 확인**
+- [x] **Step 5: 통과 확인**
 
   ```bash
   go test ./internal/service/ -run 'TestLedger(RejectsUnbalancedJournal|RecordIsIdempotent|RollsBackJournalPostingAndBalance|RejectsNegativeUserAccount)' -v
   ```
   Expected: 4 PASS.
 
-- [ ] **Step 6: 커밋**
+- [x] **Step 6: 커밋**
 
   Task 1·2를 한 커밋으로 묶지 않는다. `commit-message` 스킬을 거쳐 각각 커밋한다(CLAUDE.md §5). **전환 구간에 들어가기 전 마지막 커밋 지점이다.**
 
@@ -477,7 +477,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   ```
   `WalletResponse`의 JSON 필드 6개(`id`·`coin_symbol`·`available_balance`·`locked_balance`·`total_balance`·`avg_buy_price`)는 **그대로 유지한다.** 프런트가 정확히 이 여섯 개를 소비한다(조사 D).
 
-- [ ] **Step 1: 개발용 지급 테스트를 먼저 쓴다**
+- [x] **Step 1: 개발용 지급 테스트를 먼저 쓴다**
 
   `internal/service/dev_fund_ledger_integration_test.go`:
   - `TestDevFundCreatesMintToAvailableJournal` — 지급 후 `DEV_MINT` 전기 `−amount`, `USER_AVAILABLE` 전기 `+amount`, 자산별 합 0
@@ -485,14 +485,14 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   두 번째는 T2(원장 계층 멱등)와 다르다. 여기서 고정하는 것은 **dev funding이 요청 키를 실제로 분개 멱등성 키로 넘기는가**이지, 원장이 멱등한가가 아니다.
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
   ```bash
   go test ./internal/service/ -run 'TestDevFund' -v
   ```
   Expected: 컴파일 실패 또는 두 번째 지급이 잔액을 두 배로 만들어 FAIL.
 
-- [ ] **Step 3: `DevWalletService`를 원장 경유로 재작성**
+- [x] **Step 3: `DevWalletService`를 원장 경유로 재작성**
 
   `upsertFundedWallet`([dev_wallet_service.go:74](../../../internal/service/dev_wallet_service.go))과 `devFundLedgerEntry`([ledger.go:32](../../../internal/service/ledger.go)) 호출을 지우고, 한 트랜잭션에서 `Ledger.Record`를 1회 호출한다.
 
@@ -501,7 +501,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   - **잔액을 직접 쓰는 코드가 이 서비스에 남으면 안 된다.** `gorm.Expr("… + ?")` 사용처가 0인지 확인한다.
   - `RequestKey`가 비면 검증 오류로 거부한다. 자동 생성하지 않는다 — 자동 생성하면 재시도가 항상 새 키가 되어 멱등이 무의미해진다.
 
-- [ ] **Step 4: 잔액 조회 API를 `account_balances` 기반으로 바꾼다**
+- [x] **Step 4: 잔액 조회 API를 `account_balances` 기반으로 바꾼다**
 
   `OrderHandler.ListWallets`([order_handler.go:180](../../../internal/handler/order_handler.go))가 `WalletRepository.ListByUserID` 대신 `AccountRepository.ListUserBalances`를 부르게 한다. `walletResponse`([order_handler.go:321](../../../internal/handler/order_handler.go))는 `UserAssetBalance`를 받도록 바꾸되 **JSON 필드 이름·개수·문자열 형식을 바꾸지 않는다.**
 
@@ -511,11 +511,11 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   값을 실제로 채우는 것은 Task 4의 매수 정산이다 — 그때까지는 매수한 적 없는 자산과 같은 0이다.
 
-- [ ] **Step 5: 프런트 `fundWallet`에 요청 키 추가**
+- [x] **Step 5: 프런트 `fundWallet`에 요청 키 추가**
 
   [Go-exchange-front/src/lib/api.ts:237](../../../../Go-exchange-front/src/lib/api.ts)의 `fundWallet` 입력에 `request_key: string`을 추가하고, 호출부에서 `crypto.randomUUID()`로 생성해 넘긴다. 재시도 시에는 **같은 키를 다시 보낸다** — 버튼을 다시 누르는 것과 네트워크 재시도를 구분하는 것이 이 키의 목적이다.
 
-- [ ] **Step 6: 통과 확인**
+- [x] **Step 6: 통과 확인**
 
   ```bash
   go test ./internal/service/ -run 'TestDevFund' -v
@@ -543,7 +543,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
       reservedDebit, executionDebit, sellerQuoteNet decimal.Decimal) []PostingInput
   ```
 
-- [ ] **Step 1: 자산 보존 통합 테스트를 먼저 쓴다**
+- [x] **Step 1: 자산 보존 통합 테스트를 먼저 쓴다**
 
   `internal/service/ledger_order_settlement_integration_test.go`에 `TestOrderAndSettlementPreserveAssets`를 만든다. 하나의 시나리오를 끝까지 돌린다:
 
@@ -557,14 +557,14 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   **이 테스트가 §1.6의 "수수료가 사라진다"를 닫는 증거다.**
 
-- [ ] **Step 2: 실패 확인**
+- [x] **Step 2: 실패 확인**
 
   ```bash
   go test ./internal/service/ -run TestOrderAndSettlementPreserveAssets -v
   ```
   Expected: FAIL — 아직 잠금·정산이 `wallets`에 쓴다.
 
-- [ ] **Step 3: 주문 잠금·해제를 원장으로 전환**
+- [x] **Step 3: 주문 잠금·해제를 원장으로 전환**
 
   `HoldBatch`([hold_coordinator.go:127](../../../internal/service/hold_coordinator.go))의 지갑 조회·fold·`BatchUpdateBalances`·`ledgerRepo.CreateMany`를 **주문 1건당 `Ledger.Record` 1회**로 바꾼다. 트랜잭션 경계는 그대로 둔다 — 멱등성 키 선점과 주문 INSERT가 같은 트랜잭션에 있어야 한다는 성질(조사 B)은 유지해야 한다.
 
@@ -572,7 +572,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   - 잔고 부족은 `Record`가 T9 검증에서 오류를 내므로, 그 오류를 기존 `NewConflictErrorf("insufficient available balance")`로 변환해 `holdResult.Err`에 넣는다. **배치 전체를 롤백시키지 않는다** — 기존 격리 동작(hold_coordinator.go:196-213)을 유지한다.
   - 해제 4개 지점(조사 B의 표) 전부를 같은 헬퍼로 바꾼다. 하나라도 남으면 `wallets` DROP이 컴파일 오류로 잡아 준다.
 
-- [ ] **Step 4: 체결 정산 두 경로를 함께 전환**
+- [x] **Step 4: 체결 정산 두 경로를 함께 전환**
 
   `SettleTrade`([settlement_service.go:96](../../../internal/service/settlement_service.go))와 `SettleTradeBatch`([settlement_batch.go:48](../../../internal/service/settlement_batch.go))가 **같은 `tradePostings` 헬퍼**를 쓰게 한다. 배치는 `Record`를 체결 건수만큼 호출한다 — 한 트랜잭션에 분개 여러 개가 들어가는 것은 설계 §13.4가 허용한 형태다.
 
@@ -591,11 +591,11 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   **`settlement_batch.go:27-30`의 등가성 불변식을 깨지 않는다** — 배치 결과가 단건 N회와 같아야 한다. 헬퍼를 공유하면 자동으로 성립한다.
 
-- [ ] **Step 5: `FailedSettlement`에 수수료를 저장하고 재시도가 그 값을 쓰게 한다**
+- [x] **Step 5: `FailedSettlement`에 수수료를 저장하고 재시도가 그 값을 쓰게 한다**
 
   설계 §13.2. `model.FailedSettlement`에 `BuyerFee`·`SellerFee`·`FeeRate` 필드를 추가하고, [settlement_retry_worker.go:244](../../../internal/service/settlement_retry_worker.go) 부근의 재계산을 저장값 사용으로 바꾼다. 재계산 값이 원본과 다르면 분개 합계가 어긋난다.
 
-- [ ] **Step 6: `avg_buy_price` 갱신 — 표는 이미 있다**
+- [x] **Step 6: `avg_buy_price` 갱신 — 표는 이미 있다**
 
   `user_asset_stats`는 Task 1에서 만들었다. 여기서는 **값을 채우는 것만** 한다. 009를 고치지 않는다.
 
@@ -612,7 +612,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   `TestOrderAndSettlementPreserveAssets`의 단언에 **`avg_buy_price`가 단건 N회와 배치 1회에서 같다**를 추가한다. 새 테스트 함수를 만들지 않는다.
 
-- [ ] **Step 7: 통과 확인**
+- [x] **Step 7: 통과 확인**
 
   ```bash
   go test ./internal/service/ -run TestOrderAndSettlementPreserveAssets -v
@@ -629,23 +629,23 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 - Create: `migrations/010_drop_legacy_wallets.sql`
 - Test: 기존 `internal/service` 통합 스위트 전체
 
-- [ ] **Step 1: 옛 표를 참조하는 코드를 전부 지운다**
+- [x] **Step 1: 옛 표를 참조하는 코드를 전부 지운다**
 
   Delete 목록의 파일을 지우고 `go build ./...`를 돌린다. **컴파일 오류가 남은 참조 지점의 완전한 목록이다.** 하나씩 지워 나간다. 이 단계에서 `walletAvailableBalance`의 0-fallback 분기(§1.1 문제 2)와 레거시 거울 필드 `KRW`·`Quantity`(문제 1)가 함께 사라진다.
 
   `balance.go`에서 `applyBuyOrderHold`·`releaseBuyOrderHold` 등 원장으로 대체된 함수는 지우고, 순수 산술(`amountAfterFee` 등 `fee.go`에 있는 것)은 남긴다.
 
-- [ ] **Step 2: 검산 워커를 새 검사 4종으로 교체**
+- [x] **Step 2: 검산 워커를 새 검사 4종으로 교체**
 
   `ReconciliationWorker`([reconciliation_worker.go:53](../../../internal/service/reconciliation_worker.go) `RunOnce`)의 `runLedgerWalletCheck`·`runAssetConservationCheck`를 Task 2의 검사 1~4로 바꾼다. `runStaleMarketOrderCheck`는 원장과 무관하므로 그대로 둔다.
 
   **[reconciliation_repository.go:73](../../../internal/repository/reconciliation_repository.go)의 수수료 보정항이 여기서 사라진다.** `Σ(wallets) + Σ(fees) == Σ(DEV_FUND)`는 수수료가 사라지는 것을 전제한 쿼리였다. 새 검사 3은 보정 없이 `Σ postings.amount == 0`이다.
 
-- [ ] **Step 3: DROP 마이그레이션 작성**
+- [x] **Step 3: DROP 마이그레이션 작성**
 
   `migrations/010_drop_legacy_wallets.sql`에 `DROP TABLE IF EXISTS wallets, ledger_entries CASCADE;`를 넣는다. AutoMigrate 목록(두 곳)에서도 `&model.Wallet{}`·`&model.LedgerEntry{}`를 뺀다. **목록에서 빼지 않고 DROP만 하면 다음 기동에서 AutoMigrate가 다시 만든다.**
 
-- [ ] **Step 4: 개발 DB 재생성**
+- [x] **Step 4: 개발 DB 재생성**
 
   개발·테스트 DB를 비우고 새 스키마로 다시 만든다. 옛 데이터를 옮기지 않는다.
 
@@ -653,12 +653,15 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   psql "$GOEXCHANGE_TEST_DATABASE_DSN" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
   ```
 
-- [ ] **Step 5: 전환 창이 닫혔는지 확인 — 이 Task의 판정**
+- [x] **Step 5: 전환 창이 닫혔는지 확인 — 이 Task의 판정**
 
   ```bash
-  go test ./internal/service/ ./internal/repository/ ./internal/handler/ -count=1
+  go test -p 1 ./internal/service/ ./internal/repository/ ./internal/handler/ -count=1 -timeout=240s
   ```
-  Expected: 전부 PASS. **Task 3에서 열린 빨간 창이 여기서 닫힌다.** 하나라도 빨간 것이 남으면 전환이 끝나지 않은 것이므로 다음 Task로 넘어가지 않는다.
+  세 패키지가 같은 스키마의 공유 test DB를 쓰므로 `-p 1`로 직렬화한다 — CI의 Postgres
+  통합 테스트도 이미 이렇게 돈다. Expected: 전부 PASS. **Task 3에서 열린 빨간 창이
+  여기서 닫힌다.** 하나라도 빨간 것이 남으면 전환이 끝나지 않은 것이므로 다음
+  Task로 넘어가지 않는다.
 
 ---
 

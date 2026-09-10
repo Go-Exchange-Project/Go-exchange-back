@@ -55,12 +55,10 @@ func main() {
 	if err := config.DB.AutoMigrate(
 		&model.User{},
 		&model.Order{},
-		&model.Wallet{},
 		&model.Trade{},
 		&model.FailedSettlement{},
 		&model.FailedMarketCompletion{},
 		&model.FailedOrderCancellation{},
-		&model.LedgerEntry{},
 		&model.ReconciliationViolation{},
 		&model.TradeOutboxEvent{},
 		// 복식부기 원장 7개 표. 제약은 migrations/009가 건다.
@@ -115,20 +113,19 @@ func main() {
 	}
 
 	orderRepo := repository.NewOrderRepository(config.DB)
-	walletRepo := repository.NewWalletRepository(config.DB)
 	userRepo := repository.NewUserRepository(config.DB)
 	tokenManager, err := auth.NewTokenManagerFromEnv()
 	if err != nil {
 		log.Fatal("auth token manager failed: ", err)
 	}
 	authService := service.NewAuthService(userRepo, tokenManager)
-	orderService := service.NewOrderService(orderRepo, walletRepo, me)
+	orderService := service.NewOrderService(orderRepo, me)
 	orderService.MarketRules = marketRulesRegistry
 	orderService.AcceptanceTimeout = config.OrderAcceptanceTimeoutFromEnv()
 
 	// [②] 자금 홀드 그룹커밋: CreateOrder의 persist+hold를 배치로 묶어 처리한다.
 	// 종료 순서는 아래 graceful shutdown 체인 참고 — HTTP drain 이후에만 Shutdown().
-	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, walletRepo, repository.NewLedgerRepository(config.DB), repository.NewOrderIdempotencyRepository(config.DB), config.HoldBatchSizeFromEnv())
+	holdCoordinator := service.NewHoldCoordinator(config.DB, orderRepo, service.NewLedgerService(config.DB), repository.NewOrderIdempotencyRepository(config.DB), config.HoldBatchSizeFromEnv())
 	go holdCoordinator.Run()
 	orderService.HoldCoordinator = holdCoordinator
 
@@ -139,7 +136,7 @@ func main() {
 	orderService.CancelCommandRepository = cancelCommandRepo
 	orderService.CancelCommandWake = cancelWorker.Wake
 	metrics.RegisterHoldCoordinatorInputGauge(func() int { return holdCoordinator.InputLen() })
-	settlementService := service.NewSettlementService(config.DB, orderRepo, walletRepo)
+	settlementService := service.NewSettlementService(config.DB, orderRepo)
 	failedSettlementService := service.NewFailedSettlementService(repository.NewFailedSettlementRepository(config.DB))
 	failedMarketCompletionService := service.NewFailedMarketCompletionService(repository.NewFailedMarketCompletionRepository(config.DB))
 	failedOrderCancellationService := service.NewFailedOrderCancellationService(repository.NewFailedOrderCancellationRepository(config.DB))

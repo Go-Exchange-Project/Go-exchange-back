@@ -120,8 +120,12 @@ type TransferRequest struct {
 	CheckAttempts       int `gorm:"not null;default:0"`
 	// ReviewRequiredAt은 사람을 부르는 깃발이지 처리를 멈추는 스위치가 아니다.
 	// 이 값이 켜져 있어도 상태 조회는 계속된다.
+	//
+	// ReviewReason이 포인터인 이유: 깃발과 사유는 항상 함께 움직여야 하는데,
+	// 값 타입이면 "깃발은 없는데 사유는 빈 문자열"과 "깃발도 사유도 없음"을
+	// DB에서 구분할 수 없다. 둘 다 NULL이거나 둘 다 값이어야 한다.
 	ReviewRequiredAt *time.Time
-	ReviewReason     string `gorm:"size:64"`
+	ReviewReason     *string `gorm:"size:64"`
 	FailureReason    string
 	CreatedAt        time.Time `gorm:"not null"`
 	UpdatedAt        time.Time `gorm:"not null"`

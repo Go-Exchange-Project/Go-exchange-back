@@ -57,16 +57,18 @@ func TestOrderResponseUsesDecimalStringsAndRemaining(t *testing.T) {
 }
 
 func TestWalletResponseUsesAvailableLockedAndTotalStrings(t *testing.T) {
-	wallet := model.Wallet{
-		ID:               1,
-		CoinSymbol:       "BTC",
-		AvailableBalance: decimal.RequireFromString("1.5"),
-		LockedBalance:    decimal.RequireFromString("0.25"),
-		AvgBuyPrice:      decimal.RequireFromString("90000"),
+	balance := repository.UserAssetBalance{
+		AvailableAccountID: 1,
+		Asset:              "BTC",
+		Available:          decimal.RequireFromString("1.5"),
+		Locked:             decimal.RequireFromString("0.25"),
+		AvgBuyPrice:        decimal.RequireFromString("90000"),
 	}
 
-	response := walletResponse(wallet)
+	response := walletResponse(balance)
 
+	assert.Equal(t, uint(1), response.ID)
+	assert.Equal(t, "BTC", response.CoinSymbol)
 	assert.Equal(t, "1.5", response.AvailableBalance)
 	assert.Equal(t, "0.25", response.LockedBalance)
 	assert.Equal(t, "1.75", response.TotalBalance)

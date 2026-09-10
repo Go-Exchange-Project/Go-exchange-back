@@ -6,6 +6,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// KRWAssetSymbol은 원화 자산의 심볼이다. 코인 심볼과 같은 자리에 들어간다 —
+// 원장은 통화와 코인을 구분하지 않고 둘 다 자산으로 센다.
+const KRWAssetSymbol = "KRW"
+
 // AccountType은 돈이 담기는 칸의 종류다. 계정은 (종류, 소유자, 자산)으로 유일하다.
 type AccountType string
 

@@ -61,11 +61,7 @@ func newCancelHandlerRequest(t *testing.T, handler *OrderHandler, userID uint, o
 }
 
 func newIntegrationOrderHandler(db *gorm.DB) *OrderHandler {
-	orderService := service.NewOrderService(
-		repository.NewOrderRepository(db),
-		repository.NewWalletRepository(db),
-		nil,
-	)
+	orderService := service.NewOrderService(repository.NewOrderRepository(db), nil)
 	return NewOrderHandler(orderService)
 }
 

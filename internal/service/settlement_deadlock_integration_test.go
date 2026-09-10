@@ -23,11 +23,21 @@ func TestIntegrationConcurrentReversedSettlementsDoNotDeadlock(t *testing.T) {
 	userB := serviceTestUserID(71)
 	defer cleanupServiceUsers(t, db, userA, userB)
 
-	seedDeadlockWallets(t, db, userA, userB)
 	buyAB, sellAB := seedDeadlockOrderPair(t, db, userA, userB)
 	buyBA, sellBA := seedDeadlockOrderPair(t, db, userB, userA)
 
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	// 원장에 "available → locked" 분개로 잠긴 잔액을 만든다. 계정에 직접 값을
+	// 써넣지 않는다 — 그러면 전기 합과 잔액 캐시가 어긋나 검산 2가 걸린다.
+	// orderID는 멱등성 키의 참조일 뿐이라 각 사용자의 실제 매수/매도 역할에 맞는
+	// 주문 ID를 아무거나 골라 써도 된다.
+	lockedKRW := decimal.NewFromInt(1_000_000)
+	lockedBTC := decimal.NewFromInt(1_000)
+	seedLockedBalance(t, db, userA, model.KRWAssetSymbol, lockedKRW, buyAB.ID)
+	seedLockedBalance(t, db, userA, "BTC", lockedBTC, sellBA.ID)
+	seedLockedBalance(t, db, userB, model.KRWAssetSymbol, lockedKRW, buyBA.ID)
+	seedLockedBalance(t, db, userB, "BTC", lockedBTC, sellAB.ID)
+
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	const rounds = 30
 	testRunID := time.Now().UnixNano()
@@ -58,20 +68,6 @@ func TestIntegrationConcurrentReversedSettlementsDoNotDeadlock(t *testing.T) {
 		Where("buy_order_id IN ?", []uint{buyAB.ID, buyBA.ID}).
 		Count(&tradeCount).Error)
 	assert.Equal(t, int64(rounds*2), tradeCount)
-}
-
-func seedDeadlockWallets(t *testing.T, db *gorm.DB, userA uint, userB uint) {
-	t.Helper()
-
-	lockedKRW := decimal.NewFromInt(1_000_000)
-	lockedBTC := decimal.NewFromInt(1_000)
-	wallets := []model.Wallet{
-		{UserID: userA, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRW, AvailableBalance: decimal.Zero, LockedBalance: lockedKRW},
-		{UserID: userA, CoinSymbol: "BTC", Quantity: lockedBTC, AvailableBalance: decimal.Zero, LockedBalance: lockedBTC},
-		{UserID: userB, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRW, AvailableBalance: decimal.Zero, LockedBalance: lockedKRW},
-		{UserID: userB, CoinSymbol: "BTC", Quantity: lockedBTC, AvailableBalance: decimal.Zero, LockedBalance: lockedBTC},
-	}
-	require.NoError(t, db.Create(&wallets).Error)
 }
 
 func seedDeadlockOrderPair(t *testing.T, db *gorm.DB, buyerID uint, sellerID uint) (model.Order, model.Order) {

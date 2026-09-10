@@ -241,8 +241,10 @@ func orderCancelledFromFailure(failure *model.FailedOrderCancellation) matching.
 
 // tradeFromFailedSettlement는 저장된 실패 기록에서 정산 재시도용 trade를 복원합니다.
 // 멱등성 키를 원본 그대로 보존하므로 이중 정산이 발생하지 않습니다.
-// 수수료는 SettleTrade의 applyTradeFeePolicy가 price×quantity에서 결정적으로
-// 재계산합니다 — 수수료율이 사용자별로 달라지면 실패 기록에 수수료도 저장해야 합니다.
+// 수수료는 최초 시도에서 저장된 값을 그대로 씁니다 — applyTradeFeePolicy는 이미
+// 양수인 FeeRate를 덮어쓰지 않습니다(설계 §13.2). 다만 정산의 예약 차감액은 현재
+// 요율로 계산되므로, 이 복원이 요율 변경 후의 재시도까지 보장하지는 않습니다.
+// 현재는 요율 0.0005 고정을 전제로 둘이 항상 같은 값을 가리킵니다.
 func tradeFromFailedSettlement(failure *model.FailedSettlement) *model.Trade {
 	tradedAt := failure.OccurredAt
 	if failure.TradedAt != nil && !failure.TradedAt.IsZero() {
@@ -258,6 +260,11 @@ func tradeFromFailedSettlement(failure *model.FailedSettlement) *model.Trade {
 		TradedAt:       tradedAt,
 		BuyOrderID:     failure.BuyOrderID,
 		SellOrderID:    failure.SellOrderID,
+		FeeRate:        failure.FeeRate,
+		BuyerFee:       failure.BuyerFee,
+		BuyerFeeAsset:  model.KRWAssetSymbol,
+		SellerFee:      failure.SellerFee,
+		SellerFeeAsset: model.KRWAssetSymbol,
 	}
 }
 

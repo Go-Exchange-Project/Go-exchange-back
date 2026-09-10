@@ -102,6 +102,12 @@ func (s *LedgerService) Record(tx *gorm.DB, in JournalInput) (*model.JournalEntr
 		return nil, false, err
 	}
 	if !created {
+		// 같은 키인데 내용이 다르면 둘 중 하나는 잘못된 요청이다. 그것을
+		// 성공으로 돌려주면 호출자는 자기가 요청한 것이 기록됐다고 믿고 상태를
+		// 바꾼다 — 실제로는 다른 사건이 기록돼 있는데.
+		if err := s.assertSameJournal(tx, entry, in); err != nil {
+			return nil, false, err
+		}
 		return entry, false, nil
 	}
 
@@ -189,6 +195,119 @@ func (s *LedgerService) Record(tx *gorm.DB, in JournalInput) (*model.JournalEntr
 	}
 
 	return entry, true, nil
+}
+
+// postingTuple은 전기를 계정 정체성으로 비교하기 위한 값이다. account_id는
+// 쓰지 않는다 — 같은 계정이라도 DB마다 id가 다르고, 비교하려는 것은 "어느
+// 계정에 얼마"이지 "몇 번 행"이 아니다.
+type postingTuple struct {
+	accountType model.AccountType
+	ownerUserID uint // 시스템 계정은 0
+	asset       string
+	amount      string
+}
+
+func sortPostingTuples(tuples []postingTuple) {
+	sort.Slice(tuples, func(i, j int) bool {
+		a, b := tuples[i], tuples[j]
+		if a.accountType != b.accountType {
+			return a.accountType < b.accountType
+		}
+		if a.ownerUserID != b.ownerUserID {
+			return a.ownerUserID < b.ownerUserID
+		}
+		if a.asset != b.asset {
+			return a.asset < b.asset
+		}
+		return a.amount < b.amount
+	})
+}
+
+// assertSameJournal은 같은 멱등성 키로 온 요청이 정말 같은 사건인지 확인한다.
+//
+// 중복 경로이므로 **계정을 새로 만들지 않고 잔액을 잠그지도 않는다.** 이미
+// 처리된 요청은 현재 잔액과 무관하게 성공해야 하기 때문이다 — 그것이 이
+// 순서를 택한 이유다.
+func (s *LedgerService) assertSameJournal(tx *gorm.DB, existing *model.JournalEntry, in JournalInput) error {
+	if existing.EventType != in.EventType ||
+		existing.ReferenceType != in.ReferenceType ||
+		existing.ReferenceID != in.ReferenceID ||
+		!equalUintPtr(existing.ReversesJournalID, in.ReversesJournalID) {
+		return NewConflictErrorf(
+			"idempotency key %q was used for a different event", in.IdempotencyKey)
+	}
+
+	storedPostings, err := s.Journals.WithTx(tx).FindPostingsByJournalID(existing.ID)
+	if err != nil {
+		return err
+	}
+	if len(storedPostings) != len(in.Postings) {
+		return NewConflictErrorf(
+			"idempotency key %q was used with a different number of postings", in.IdempotencyKey)
+	}
+
+	accountIDs := make([]uint, 0, len(storedPostings))
+	for _, posting := range storedPostings {
+		accountIDs = append(accountIDs, posting.AccountID)
+	}
+	var accounts []model.Account
+	if err := tx.Where("id IN ?", accountIDs).Find(&accounts).Error; err != nil {
+		return err
+	}
+	accountByID := make(map[uint]model.Account, len(accounts))
+	for _, account := range accounts {
+		accountByID[account.ID] = account
+	}
+
+	stored := make([]postingTuple, 0, len(storedPostings))
+	for _, posting := range storedPostings {
+		account, ok := accountByID[posting.AccountID]
+		if !ok {
+			return fmt.Errorf("account %d referenced by posting %d is missing", posting.AccountID, posting.ID)
+		}
+		tuple := postingTuple{
+			accountType: account.AccountType,
+			asset:       posting.Asset,
+			// 문자열로 비교한다. decimal은 비교 가능한 타입이 아니고,
+			// String()은 같은 수를 항상 같은 문자열로 만든다.
+			amount: posting.Amount.String(),
+		}
+		if account.OwnerUserID != nil {
+			tuple.ownerUserID = *account.OwnerUserID
+		}
+		stored = append(stored, tuple)
+	}
+
+	incoming := make([]postingTuple, 0, len(in.Postings))
+	for _, posting := range in.Postings {
+		tuple := postingTuple{
+			accountType: posting.AccountType,
+			asset:       posting.Asset,
+			amount:      posting.Amount.String(),
+		}
+		if posting.OwnerUserID != nil {
+			tuple.ownerUserID = *posting.OwnerUserID
+		}
+		incoming = append(incoming, tuple)
+	}
+
+	// 전기의 저장 순서는 계약이 아니므로 정렬해서 비교한다.
+	sortPostingTuples(stored)
+	sortPostingTuples(incoming)
+	for i := range stored {
+		if stored[i] != incoming[i] {
+			return NewConflictErrorf(
+				"idempotency key %q was used with different postings", in.IdempotencyKey)
+		}
+	}
+	return nil
+}
+
+func equalUintPtr(a, b *uint) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // Reverse는 원본 전기의 부호를 뒤집어 새 분개로 적는다. 원본은 그대로 남는다 —

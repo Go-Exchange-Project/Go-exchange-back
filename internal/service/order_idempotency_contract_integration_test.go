@@ -29,7 +29,7 @@ func TestIntegrationCreateOrderReplayHonorsStoredFingerprintVersion(t *testing.T
 		fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true},
 	}
 	orderService := NewOrderService(
-		repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+		repository.NewOrderRepository(db), engine)
 
 	result, err := orderService.CreateOrder(idemOrderInput(userID, "future-version-key", "1"))
 	require.Error(t, err)
@@ -57,7 +57,7 @@ func TestIntegrationCreateOrderReplaysWhileIntakeSaturated(t *testing.T) {
 		fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true},
 	}
 	orderService := NewOrderService(
-		repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+		repository.NewOrderRepository(db), engine)
 
 	first, err := orderService.CreateOrder(idemOrderInput(userID, "gated-key", "1"))
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestIntegrationCreateOrderWithoutEngineIsUnavailable(t *testing.T) {
 	seedIdemBuyerWallet(t, db, userID, 10000)
 
 	orderService := NewOrderService(
-		repository.NewOrderRepository(db), repository.NewWalletRepository(db), nil)
+		repository.NewOrderRepository(db), nil)
 
 	result, err := orderService.CreateOrder(idemOrderInput(userID, "no-engine-key", "1"))
 	require.Error(t, err)
@@ -112,10 +112,8 @@ func TestIntegrationCreateOrderWithoutEngineIsUnavailable(t *testing.T) {
 	assert.EqualValues(t, 0, countOrders(t, db, userID), "처리될 경로가 없는 주문이 생성됐다")
 	assert.EqualValues(t, 0, countIdemKeys(t, db, userID), "키가 소비됐다 — 재시도가 막힌다")
 
-	var wallet model.Wallet
-	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
-		First(&wallet).Error)
-	assert.True(t, wallet.LockedBalance.IsZero(), "자금이 묶였다: locked=%s", wallet.LockedBalance)
+	_, locked := ledgerBalances(t, db, userID, model.KRWAssetSymbol)
+	assert.True(t, locked.IsZero(), "자금이 묶였다: locked=%s", locked)
 }
 
 // 시장 정책은 시간이 지나 바뀐다. 이미 커밋된 요청의 재시도는 그 변경과 무관하게 저장된
@@ -131,7 +129,7 @@ func TestIntegrationCreateOrderReplaysAfterMarketPolicyTightens(t *testing.T) {
 		fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true},
 	}
 	orderService := NewOrderService(
-		repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+		repository.NewOrderRepository(db), engine)
 	orderService.MarketRules = idemMarketRules(t, "ACTIVE")
 
 	first, err := orderService.CreateOrder(idemOrderInput(userID, "policy-key", "1"))

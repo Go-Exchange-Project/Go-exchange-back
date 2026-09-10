@@ -17,7 +17,7 @@ import (
 )
 
 func newIdemOrderService(db *gorm.DB, engine *countingAcceptanceEngine) *OrderService {
-	return NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+	return NewOrderService(repository.NewOrderRepository(db), engine)
 }
 
 func rejectingIdemEngine() *countingAcceptanceEngine {
@@ -35,10 +35,8 @@ func idemRecordOf(t *testing.T, db *gorm.DB, userID uint) model.OrderIdempotency
 
 func lockedKRWOf(t *testing.T, db *gorm.DB, userID uint) decimal.Decimal {
 	t.Helper()
-	var wallet model.Wallet
-	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
-		First(&wallet).Error)
-	return wallet.LockedBalance
+	_, locked := ledgerBalances(t, db, userID, model.KRWAssetSymbol)
+	return locked
 }
 
 // idemOrderInput의 매수 지정가 1건이 잡는 hold: 100(price) * 1(amount) * 1.0005(수수료).

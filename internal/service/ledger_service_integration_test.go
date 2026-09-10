@@ -162,6 +162,27 @@ func TestLedgerRecordIsIdempotent(t *testing.T) {
 		require.True(t, userAvailableBalance(t, db, userID, "KRW").IsZero(), "재시도가 잔액을 다시 늘렸다")
 	})
 
+	// 같은 키로 다른 내용을 보내는 것은 둘 중 하나가 잘못된 요청이라는 뜻이다.
+	// 이것을 성공으로 돌려주면 호출자는 자기가 요청한 금액이 기록됐다고 믿고
+	// 상태를 바꾼다 — 실제로는 다른 금액이 기록돼 있는데.
+	t.Run("같은 키에 다른 금액은 거부된다", func(t *testing.T) {
+		before := userAvailableBalance(t, db, userID, "KRW")
+
+		err := db.Transaction(func(tx *gorm.DB) error {
+			_, _, recordErr := ledger.Record(tx,
+				fundInput(userID, "KRW", amount.Add(decimal.NewFromInt(1)), key))
+			return recordErr
+		})
+		require.Error(t, err, "같은 키에 다른 금액이 통과했다")
+
+		var journalCount int64
+		require.NoError(t, db.Model(&model.JournalEntry{}).
+			Where("idempotency_key = ?", key).Count(&journalCount).Error)
+		require.Equal(t, int64(1), journalCount, "분개가 더 생겼다")
+		require.Equal(t, int64(2), countPostings(t, db, firstID), "전기가 더 생겼다")
+		require.True(t, userAvailableBalance(t, db, userID, "KRW").Equal(before), "잔액이 변했다")
+	})
+
 	// 검산 4종을 여기에 붙이는 이유: 이 시점의 DB에는 지급·출금 분개가 실제로
 	// 들어 있어 검사가 의미 있는 데이터를 본다. 별도 테스트 함수를 만들면 같은
 	// 사실을 두 번 보게 되고, 전 사건을 덮는 T4까지 검산 쿼리가 한 번도 실행되지

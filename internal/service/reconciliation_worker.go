@@ -9,7 +9,6 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
-	"github.com/shopspring/decimal"
 )
 
 const (
@@ -20,15 +19,20 @@ const (
 )
 
 type reconciliationRepository interface {
-	CheckLedgerWalletPage(afterWalletID uint, limit int) ([]repository.LedgerWalletRow, error)
-	CheckAssetConservation() ([]repository.AssetConservationRow, error)
+	CheckUnbalancedJournals(afterJournalID uint, limit int) ([]repository.UnbalancedJournalRow, error)
+	CheckBalanceCacheDrift(afterAccountID uint, limit int) ([]repository.BalanceDriftRow, error)
+	CheckAssetTotals() ([]repository.AssetTotalRow, error)
+	CheckNegativeAccounts(afterAccountID uint, limit int) ([]repository.NegativeAccountRow, error)
 	CheckStaleMarketOrders(staleAfter time.Duration) ([]repository.StaleMarketOrderRow, error)
 	CreateViolations(violations []model.ReconciliationViolation) error
 }
 
-// ReconciliationWorker는 원장-지갑 정합성, 자산별 총량 보존, 오래된 시장가 주문 잔존을
-// 주기적으로 검사하고 위반을 내구 기록 + 메트릭으로 보고합니다. 자동 교정은 하지 않습니다 —
-// 탐지/보고만 합니다.
+// ReconciliationWorker는 원장 검산 4종과 오래된 시장가 주문 잔존을 주기적으로 검사하고
+// 위반을 내구 기록 + 메트릭으로 보고합니다. 자동 교정은 하지 않습니다 — 탐지/보고만 합니다.
+//
+// 검산은 원장만 본다. 지갑 표를 보던 시절에는 "사라진 수수료"를 따로 더해서 맞추는
+// 보정항이 필요했지만, 수수료가 FEE_INCOME 계정으로 들어가면서 그 보정이 사라졌다 —
+// 이제 전기의 합은 보정 없이 0이어야 한다.
 type ReconciliationWorker struct {
 	Repository reconciliationRepository
 	Interval   time.Duration
@@ -51,36 +55,86 @@ func (w *ReconciliationWorker) Run(ctx context.Context) {
 }
 
 func (w *ReconciliationWorker) RunOnce() {
-	w.runLedgerWalletCheck()
-	w.runAssetConservationCheck()
+	w.runUnbalancedJournalCheck()
+	w.runBalanceCacheDriftCheck()
+	w.runAssetTotalsCheck()
+	w.runNegativeAccountCheck()
 	w.runStaleMarketOrderCheck()
 	metrics.ReconciliationLastRunTimestamp.Set(float64(time.Now().UTC().Unix()))
 }
 
-func (w *ReconciliationWorker) runLedgerWalletCheck() {
+// runUnbalancedJournalCheck는 검사 1이다. 자산별 합이 0이 아닌 분개가 하나라도
+// 나오면 어딘가에서 돈이 생기거나 사라진 것이다.
+//
+// CheckUnbalancedJournals의 LIMIT은 분개 수에 걸리므로, 한 페이지의 행 수는
+// pageSize보다 많을 수도(분개 하나가 자산 여러 종을 가지면) 적을 수도 있다.
+// 종료 판정은 행 수가 아니라 그 페이지에 담긴 서로 다른 분개 수로 해야 한다 —
+// 행 수로 판정하면 조기 종료로 뒷 페이지를 놓치거나, 같은 페이지를 무한 반복한다.
+func (w *ReconciliationWorker) runUnbalancedJournalCheck() {
 	var violations []model.ReconciliationViolation
-	var lastWalletID uint
+	var afterJournalID uint
 
 	for {
-		rows, err := w.Repository.CheckLedgerWalletPage(lastWalletID, reconciliationPageSize)
+		rows, err := w.Repository.CheckUnbalancedJournals(afterJournalID, reconciliationPageSize)
 		if err != nil {
-			w.logf("reconciliation: ledger_wallet check failed: %v", err)
-			metrics.ReconciliationCheckErrorsTotal.WithLabelValues("ledger_wallet").Inc()
+			w.logf("reconciliation: unbalanced_journal check failed: %v", err)
+			metrics.ReconciliationCheckErrorsTotal.WithLabelValues("unbalanced_journal").Inc()
+			return
+		}
+		if len(rows) == 0 {
+			break
+		}
+		journalCount := 0
+		var lastJournalID uint
+		for i, row := range rows {
+			if i == 0 || row.JournalID != lastJournalID {
+				journalCount++
+				lastJournalID = row.JournalID
+			}
+			violations = append(violations, model.ReconciliationViolation{
+				CheckName:  "unbalanced_journal",
+				SubjectKey: fmt.Sprintf("journal:%d", row.JournalID),
+				Detail: truncateReconciliationDetail(fmt.Sprintf(
+					"journal_id=%d asset=%s sum=%s", row.JournalID, row.Asset, row.Sum.String())),
+				DetectedAt: time.Now().UTC(),
+			})
+			afterJournalID = row.JournalID
+		}
+		if journalCount < reconciliationPageSize {
+			break
+		}
+	}
+
+	w.persist(violations)
+	metrics.ReconciliationViolations.WithLabelValues("unbalanced_journal").Set(float64(len(violations)))
+}
+
+// runBalanceCacheDriftCheck는 검사 2다. 잔액 캐시는 전기의 합과 항상 같아야 한다 —
+// 어긋나면 캐시를 갱신하지 않은 경로가 있다는 뜻이다.
+func (w *ReconciliationWorker) runBalanceCacheDriftCheck() {
+	var violations []model.ReconciliationViolation
+	var afterAccountID uint
+
+	for {
+		rows, err := w.Repository.CheckBalanceCacheDrift(afterAccountID, reconciliationPageSize)
+		if err != nil {
+			w.logf("reconciliation: balance_cache_drift check failed: %v", err)
+			metrics.ReconciliationCheckErrorsTotal.WithLabelValues("balance_cache_drift").Inc()
 			return
 		}
 		if len(rows) == 0 {
 			break
 		}
 		for _, row := range rows {
-			if checkName, violated := classifyLedgerWalletRow(row); violated {
-				violations = append(violations, model.ReconciliationViolation{
-					CheckName:  checkName,
-					SubjectKey: fmt.Sprintf("wallet:%d", row.WalletID),
-					Detail:     ledgerWalletViolationDetail(row),
-					DetectedAt: time.Now().UTC(),
-				})
-			}
-			lastWalletID = row.WalletID
+			violations = append(violations, model.ReconciliationViolation{
+				CheckName:  "balance_cache_drift",
+				SubjectKey: fmt.Sprintf("account:%d", row.AccountID),
+				Detail: truncateReconciliationDetail(fmt.Sprintf(
+					"account_id=%d cached=%s computed=%s",
+					row.AccountID, row.Cached.String(), row.Computed.String())),
+				DetectedAt: time.Now().UTC(),
+			})
+			afterAccountID = row.AccountID
 		}
 		if len(rows) < reconciliationPageSize {
 			break
@@ -88,41 +142,72 @@ func (w *ReconciliationWorker) runLedgerWalletCheck() {
 	}
 
 	w.persist(violations)
-	ledgerWalletCount := 0
-	legacyMismatchCount := 0
-	for _, v := range violations {
-		if v.CheckName == "legacy_mismatch" {
-			legacyMismatchCount++
-		} else {
-			ledgerWalletCount++
-		}
-	}
-	metrics.ReconciliationViolations.WithLabelValues("ledger_wallet").Set(float64(ledgerWalletCount))
-	metrics.ReconciliationViolations.WithLabelValues("legacy_mismatch").Set(float64(legacyMismatchCount))
+	metrics.ReconciliationViolations.WithLabelValues("balance_cache_drift").Set(float64(len(violations)))
 }
 
-func (w *ReconciliationWorker) runAssetConservationCheck() {
-	rows, err := w.Repository.CheckAssetConservation()
+// runAssetTotalsCheck는 검사 3이다. 자산 하나의 전기를 전부 더하면 0이어야 한다.
+// 지갑 시절의 수수료 보정항은 없다 — 수수료도 FEE_INCOME 계정에 남아 있다.
+func (w *ReconciliationWorker) runAssetTotalsCheck() {
+	rows, err := w.Repository.CheckAssetTotals()
 	if err != nil {
-		w.logf("reconciliation: asset_conservation check failed: %v", err)
-		metrics.ReconciliationCheckErrorsTotal.WithLabelValues("asset_conservation").Inc()
+		w.logf("reconciliation: asset_totals check failed: %v", err)
+		metrics.ReconciliationCheckErrorsTotal.WithLabelValues("asset_totals").Inc()
 		return
 	}
 
-	var violations []model.ReconciliationViolation
+	violations := make([]model.ReconciliationViolation, 0, len(rows))
 	for _, row := range rows {
-		if classifyAssetConservationRow(row) {
+		violations = append(violations, model.ReconciliationViolation{
+			CheckName:  "asset_totals",
+			SubjectKey: fmt.Sprintf("asset:%s", row.Asset),
+			Detail: truncateReconciliationDetail(fmt.Sprintf(
+				"asset=%s sum=%s", row.Asset, row.Sum.String())),
+			DetectedAt: time.Now().UTC(),
+		})
+	}
+
+	w.persist(violations)
+	metrics.ReconciliationViolations.WithLabelValues("asset_totals").Set(float64(len(violations)))
+}
+
+// runNegativeAccountCheck는 검사 4다. allows_negative가 false인 계정이 음수면
+// 없는 돈을 쓴 것이다.
+func (w *ReconciliationWorker) runNegativeAccountCheck() {
+	var violations []model.ReconciliationViolation
+	var afterAccountID uint
+
+	for {
+		rows, err := w.Repository.CheckNegativeAccounts(afterAccountID, reconciliationPageSize)
+		if err != nil {
+			w.logf("reconciliation: negative_account check failed: %v", err)
+			metrics.ReconciliationCheckErrorsTotal.WithLabelValues("negative_account").Inc()
+			return
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			owner := "system"
+			if row.OwnerUserID != nil {
+				owner = fmt.Sprintf("%d", *row.OwnerUserID)
+			}
 			violations = append(violations, model.ReconciliationViolation{
-				CheckName:  "asset_conservation",
-				SubjectKey: fmt.Sprintf("coin:%s", row.CoinSymbol),
-				Detail:     assetConservationViolationDetail(row),
+				CheckName:  "negative_account",
+				SubjectKey: fmt.Sprintf("account:%d", row.AccountID),
+				Detail: truncateReconciliationDetail(fmt.Sprintf(
+					"account_id=%d account_type=%s owner=%s asset=%s balance=%s",
+					row.AccountID, row.AccountType, owner, row.Asset, row.Balance.String())),
 				DetectedAt: time.Now().UTC(),
 			})
+			afterAccountID = row.AccountID
+		}
+		if len(rows) < reconciliationPageSize {
+			break
 		}
 	}
 
 	w.persist(violations)
-	metrics.ReconciliationViolations.WithLabelValues("asset_conservation").Set(float64(len(violations)))
+	metrics.ReconciliationViolations.WithLabelValues("negative_account").Set(float64(len(violations)))
 }
 
 func (w *ReconciliationWorker) runStaleMarketOrderCheck() {
@@ -154,52 +239,6 @@ func (w *ReconciliationWorker) persist(violations []model.ReconciliationViolatio
 	if err := w.Repository.CreateViolations(violations); err != nil {
 		w.logf("reconciliation: persist violations failed: %v", err)
 	}
-}
-
-// classifyLedgerWalletRow는 위반이 레거시 데이터로 완전히 설명되는지(legacy_mismatch) 아니면
-// 진짜 버그인지(ledger_wallet) 판정합니다. locked_delta는 레거시 구체화의 영향을 받지 않으므로
-// (ledger.go의 ledgerEntryFromWalletUpdate가 available만 폴백 기준으로 계산) locked gap이
-// 0이 아니면 항상 ledger_wallet입니다. 원장 항목이 하나도 없는 지갑(implied가 NULL)은
-// 레거시 패턴과 구분할 근거가 없으므로 0으로 취급해 안전하게 ledger_wallet으로 분류합니다.
-func classifyLedgerWalletRow(row repository.LedgerWalletRow) (checkName string, violated bool) {
-	availableGap := row.AvailableBalance.Sub(row.LedgerAvailableSum)
-	lockedGap := row.LockedBalance.Sub(row.LedgerLockedSum)
-	if availableGap.IsZero() && lockedGap.IsZero() {
-		return "", false
-	}
-
-	implied := decimal.Zero
-	if row.ImpliedInitialAvailable.Valid {
-		implied = row.ImpliedInitialAvailable.Decimal
-	}
-	if availableGap.Equal(implied) && lockedGap.IsZero() {
-		return "legacy_mismatch", true
-	}
-	return "ledger_wallet", true
-}
-
-func classifyAssetConservationRow(row repository.AssetConservationRow) bool {
-	return !row.WalletTotal.Add(row.FeeTotal).Equal(row.FundedTotal)
-}
-
-func ledgerWalletViolationDetail(row repository.LedgerWalletRow) string {
-	implied := "null"
-	if row.ImpliedInitialAvailable.Valid {
-		implied = row.ImpliedInitialAvailable.Decimal.String()
-	}
-	return truncateReconciliationDetail(fmt.Sprintf(
-		"wallet_id=%d user_id=%d coin_symbol=%s available_balance=%s locked_balance=%s ledger_available_sum=%s ledger_locked_sum=%s implied_initial_available=%s",
-		row.WalletID, row.UserID, row.CoinSymbol,
-		row.AvailableBalance.String(), row.LockedBalance.String(),
-		row.LedgerAvailableSum.String(), row.LedgerLockedSum.String(), implied,
-	))
-}
-
-func assetConservationViolationDetail(row repository.AssetConservationRow) string {
-	return truncateReconciliationDetail(fmt.Sprintf(
-		"coin_symbol=%s wallet_total=%s fee_total=%s funded_total=%s",
-		row.CoinSymbol, row.WalletTotal.String(), row.FeeTotal.String(), row.FundedTotal.String(),
-	))
 }
 
 func staleMarketOrderViolationDetail(row repository.StaleMarketOrderRow) string {

@@ -318,15 +318,21 @@ func orderResponse(order model.Order) OrderResponse {
 	}
 }
 
-func walletResponse(wallet model.Wallet) WalletResponse {
-	total := wallet.AvailableBalance.Add(wallet.LockedBalance)
+// walletResponse의 JSON 필드 6개는 원장 전환 전후로 같다. 프런트가 정확히
+// 이 여섯 개를 소비하므로(src/lib/api.ts의 Wallet), 잔액을 어디서 읽는지만
+// 바뀌고 응답 모양은 그대로다.
+//
+// ID는 USER_AVAILABLE 계정 ID다. 자산마다 계정이 둘이라 어느 쪽을 쓸지 정하지
+// 않으면 응답의 id가 실행마다 달라진다.
+func walletResponse(balance repository.UserAssetBalance) WalletResponse {
+	total := balance.Available.Add(balance.Locked)
 	return WalletResponse{
-		ID:               wallet.ID,
-		CoinSymbol:       wallet.CoinSymbol,
-		AvailableBalance: wallet.AvailableBalance.String(),
-		LockedBalance:    wallet.LockedBalance.String(),
+		ID:               balance.AvailableAccountID,
+		CoinSymbol:       balance.Asset,
+		AvailableBalance: balance.Available.String(),
+		LockedBalance:    balance.Locked.String(),
 		TotalBalance:     total.String(),
-		AvgBuyPrice:      wallet.AvgBuyPrice.String(),
+		AvgBuyPrice:      balance.AvgBuyPrice.String(),
 	}
 }
 

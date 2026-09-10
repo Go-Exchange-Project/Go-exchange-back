@@ -14,20 +14,17 @@ import (
 	"gorm.io/gorm"
 )
 
-func newHoldTestRepos(db *gorm.DB) (*repository.OrderRepository, *repository.WalletRepository, *repository.LedgerRepository) {
-	return repository.NewOrderRepository(db), repository.NewWalletRepository(db), repository.NewLedgerRepository(db)
+func newHoldTestRepos(db *gorm.DB) *repository.OrderRepository {
+	return repository.NewOrderRepository(db)
 }
 
+// seedHoldWallets는 매수자에게 KRW 1000, 매도자에게 코인 10을 원장으로 지급한다.
+// 이름은 그대로 두었다 — 호출자가 기대하는 초기 잔고가 같기 때문이다.
 func seedHoldWallets(t *testing.T, db *gorm.DB, buyerID uint, sellerID uint) {
 	t.Helper()
 
-	wallets := []model.Wallet{
-		{UserID: buyerID, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.NewFromInt(1000), AvailableBalance: decimal.NewFromInt(1000), LockedBalance: decimal.Zero},
-		{UserID: buyerID, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: sellerID, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(10), AvailableBalance: decimal.NewFromInt(10), LockedBalance: decimal.Zero},
-		{UserID: sellerID, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-	}
-	require.NoError(t, db.Create(&wallets).Error)
+	seedLedgerFunds(t, db, buyerID, model.KRWAssetSymbol, decimal.NewFromInt(1000))
+	seedLedgerFunds(t, db, sellerID, "BTC", decimal.NewFromInt(10))
 }
 
 func holdEquivalenceOrders(buyerID uint, sellerID uint) []*model.Order {
@@ -45,7 +42,8 @@ func holdEquivalenceOrders(buyerID uint, sellerID uint) []*model.Order {
 // (fold, batchBuyer가 buy를 2번) 포함.
 func TestIntegrationHoldBatchMatchesSequentialSingleHold(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
+	ledger := NewLedgerService(db)
 
 	batchBuyer := serviceTestUserID(700)
 	batchSeller := serviceTestUserID(701)
@@ -59,7 +57,7 @@ func TestIntegrationHoldBatchMatchesSequentialSingleHold(t *testing.T) {
 	batchOrders := holdEquivalenceOrders(batchBuyer, batchSeller)
 	seqOrders := holdEquivalenceOrders(seqBuyer, seqSeller)
 
-	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo}
+	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, Ledger: ledger}
 	results, err := coordinator.HoldBatch(holdRequestsFor(batchOrders))
 	require.NoError(t, err)
 	require.Len(t, results, 3)
@@ -69,11 +67,11 @@ func TestIntegrationHoldBatchMatchesSequentialSingleHold(t *testing.T) {
 	}
 
 	for _, o := range seqOrders {
-		require.NoError(t, persistAndHold(db, orderRepo, walletRepo, ledgerRepo, o))
+		require.NoError(t, persistAndHold(db, orderRepo, ledger, o))
 	}
 
-	assertWalletsMatch(t, walletRepo, batchBuyer, seqBuyer)
-	assertWalletsMatch(t, walletRepo, batchSeller, seqSeller)
+	assertWalletsMatch(t, db, batchBuyer, seqBuyer)
+	assertWalletsMatch(t, db, batchSeller, seqSeller)
 	assertLedgerSequencesMatch(t, db, batchBuyer, seqBuyer)
 	assertLedgerSequencesMatch(t, db, batchSeller, seqSeller)
 
@@ -83,17 +81,16 @@ func TestIntegrationHoldBatchMatchesSequentialSingleHold(t *testing.T) {
 	}
 
 	// ReferenceID는 배치 INSERT로 채워진 실제 order.ID를 가리켜야 한다(fold-후-INSERT 순서 계약).
-	holdEntries := requireLedgerEntries(t, db, batchBuyer, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, batchOrders[0].ID)
-	require.Len(t, holdEntries, 1)
-	holdEntries2 := requireLedgerEntries(t, db, batchBuyer, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, batchOrders[2].ID)
-	require.Len(t, holdEntries2, 1)
+	requireJournalByKey(t, db, orderHoldKey(batchOrders[0].ID))
+	requireJournalByKey(t, db, orderHoldKey(batchOrders[2].ID))
 }
 
 // 개별 격리: 배치에 잔고 충분 2건 + 부족 1건 → 충분분은 홀드·주문 PENDING, 부족분은
 // holdResult.Err=ConflictError·주문 행 0. 통과분 지갑/원장만 반영.
 func TestIntegrationHoldBatchIsolatesInsufficientFunds(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
+	ledger := NewLedgerService(db)
 
 	okBuyer := serviceTestUserID(704)
 	okSeller := serviceTestUserID(705)
@@ -101,10 +98,7 @@ func TestIntegrationHoldBatchIsolatesInsufficientFunds(t *testing.T) {
 	defer cleanupServiceUsers(t, db, okBuyer, okSeller, poorBuyer)
 
 	seedHoldWallets(t, db, okBuyer, okSeller)
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: poorBuyer, CoinSymbol: model.KRWAssetSymbol,
-		KRW: decimal.NewFromInt(10), AvailableBalance: decimal.NewFromInt(10), LockedBalance: decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, poorBuyer, model.KRWAssetSymbol, decimal.NewFromInt(10))
 
 	price := decimal.NewFromInt(100)
 	orders := []*model.Order{
@@ -114,7 +108,7 @@ func TestIntegrationHoldBatchIsolatesInsufficientFunds(t *testing.T) {
 		{UserID: poorBuyer, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit, Price: price, Amount: decimal.NewFromInt(5), Status: model.OrderStatusPending},
 	}
 
-	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo}
+	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, Ledger: ledger}
 	results, err := coordinator.HoldBatch(holdRequestsFor(orders))
 	require.NoError(t, err, "부분 실패는 배치 자체를 실패시키지 않는다")
 	require.Len(t, results, 3)
@@ -141,36 +135,25 @@ func TestIntegrationHoldBatchIsolatesInsufficientFunds(t *testing.T) {
 	require.NoError(t, db.First(&persistedOK, results[0].Order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, persistedOK.Status)
 
-	poorWallet, err := walletRepo.FindKRWWalletByUserID(poorBuyer)
-	require.NoError(t, err)
-	assert.True(t, poorWallet.AvailableBalance.Equal(decimal.NewFromInt(10)), "잔고부족 유저 지갑은 무변화여야 한다")
-	assert.True(t, poorWallet.LockedBalance.Equal(decimal.Zero))
-	assertLedgerCount(t, db, poorBuyer, 0)
+	assertLedgerBalances(t, db, poorBuyer, model.KRWAssetSymbol, decimal.NewFromInt(10), decimal.Zero)
 
-	okBuyerWallet, err := walletRepo.FindKRWWalletByUserID(okBuyer)
-	require.NoError(t, err)
-	assert.True(t, okBuyerWallet.LockedBalance.Equal(quoteAmountWithTradingFee(price.Mul(decimal.NewFromInt(2)))))
-	assertLedgerCount(t, db, okBuyer, 1)
+	_, okBuyerLocked := ledgerBalances(t, db, okBuyer, model.KRWAssetSymbol)
+	assert.True(t, okBuyerLocked.Equal(quoteAmountWithTradingFee(price.Mul(decimal.NewFromInt(2)))))
 }
 
 // 같은 유저 fold: 잔고 100인 유저가 한 배치에 60+50 두 매수 → 첫째 통과(잔고 차감),
 // 둘째 부족(ConflictError). overspend 방지 = 단건 순차와 동일.
 func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
+	ledger := NewLedgerService(db)
 
 	batchUser := serviceTestUserID(707)
 	seqUser := serviceTestUserID(708)
 	defer cleanupServiceUsers(t, db, batchUser, seqUser)
 
-	seedFoldWallet := func(userID uint) {
-		require.NoError(t, db.Create(&model.Wallet{
-			UserID: userID, CoinSymbol: model.KRWAssetSymbol,
-			KRW: decimal.NewFromInt(100), AvailableBalance: decimal.NewFromInt(100), LockedBalance: decimal.Zero,
-		}).Error)
-	}
-	seedFoldWallet(batchUser)
-	seedFoldWallet(seqUser)
+	seedLedgerFunds(t, db, batchUser, model.KRWAssetSymbol, decimal.NewFromInt(100))
+	seedLedgerFunds(t, db, seqUser, model.KRWAssetSymbol, decimal.NewFromInt(100))
 
 	mkOrders := func(userID uint) []*model.Order {
 		price := decimal.NewFromInt(1)
@@ -181,7 +164,7 @@ func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T) {
 	}
 
 	batchOrders := mkOrders(batchUser)
-	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo}
+	coordinator := &HoldCoordinator{DB: db, OrderRepo: orderRepo, Ledger: ledger}
 	results, err := coordinator.HoldBatch(holdRequestsFor(batchOrders))
 	require.NoError(t, err)
 	require.Len(t, results, 2)
@@ -197,14 +180,14 @@ func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T) {
 
 	// 단건 순차 기준선: 첫 주문은 persistAndHold로 통과, 둘째는 각자 트랜잭션에서 실패.
 	seqOrders := mkOrders(seqUser)
-	require.NoError(t, persistAndHold(db, orderRepo, walletRepo, ledgerRepo, seqOrders[0]))
-	seqErr := persistAndHold(db, orderRepo, walletRepo, ledgerRepo, seqOrders[1])
+	require.NoError(t, persistAndHold(db, orderRepo, ledger, seqOrders[0]))
+	seqErr := persistAndHold(db, orderRepo, ledger, seqOrders[1])
 	require.Error(t, seqErr)
 	seqKind, seqOK := DomainErrorKind(seqErr)
 	require.True(t, seqOK)
 	assert.Equal(t, ErrorKindConflict, seqKind)
 
-	assertWalletsMatch(t, walletRepo, batchUser, seqUser)
+	assertWalletsMatch(t, db, batchUser, seqUser)
 
 	var batchOrderCount, seqOrderCount int64
 	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", batchUser).Count(&batchOrderCount).Error)
@@ -219,14 +202,14 @@ func TestIntegrationHoldBatchFoldsSameUserBalance(t *testing.T) {
 // 주문(ID 채워짐)이 돌아온다.
 func TestIntegrationHoldCoordinatorSubmitHolds(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
 
 	buyerID := serviceTestUserID(709)
 	sellerID := serviceTestUserID(710)
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 	seedHoldWallets(t, db, buyerID, sellerID)
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 0)
+	coordinator := NewHoldCoordinator(db, orderRepo, NewLedgerService(db), repository.NewOrderIdempotencyRepository(db), 0)
 	go coordinator.Run()
 	defer coordinator.Shutdown()
 
@@ -275,7 +258,7 @@ func TestHoldCoordinatorSubmitReturnsUnavailableWhenInputFull(t *testing.T) {
 // 증가로 확인한다). 요청마다 정확히 하나의 배치이므로 카운터는 제출 수만큼 증가한다.
 func TestIntegrationHoldCoordinatorFallsBackOnBatchError(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
 
 	buyerID := serviceTestUserID(711)
 	// cleanup 없음 — DB 커넥션을 아래에서 닫으므로 아무 것도 실제로 persist되지
@@ -284,7 +267,7 @@ func TestIntegrationHoldCoordinatorFallsBackOnBatchError(t *testing.T) {
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 2)
+	coordinator := NewHoldCoordinator(db, orderRepo, NewLedgerService(db), repository.NewOrderIdempotencyRepository(db), 2)
 	require.NoError(t, sqlDB.Close(), "DB 커넥션을 닫아 배치·폴백 모두 실패하게 만든다")
 
 	before := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
@@ -314,20 +297,14 @@ func TestIntegrationHoldCoordinatorFallsBackOnBatchError(t *testing.T) {
 // 호출해도, Run은 잔여분을 전부 처리(persist+hold)한 뒤에 반환해야 한다 — 유실 0.
 func TestIntegrationHoldCoordinatorShutdownDrains(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
 
 	buyerID := serviceTestUserID(712)
 	defer cleanupServiceUsers(t, db, buyerID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: buyerID, CoinSymbol: model.KRWAssetSymbol,
-		KRW: decimal.NewFromInt(1_000_000), AvailableBalance: decimal.NewFromInt(1_000_000), LockedBalance: decimal.Zero,
-	}).Error)
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: buyerID, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, buyerID, model.KRWAssetSymbol, decimal.NewFromInt(1_000_000))
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 4)
+	coordinator := NewHoldCoordinator(db, orderRepo, NewLedgerService(db), repository.NewOrderIdempotencyRepository(db), 4)
 
 	const n = 20
 	reqs := make([]holdRequest, n)

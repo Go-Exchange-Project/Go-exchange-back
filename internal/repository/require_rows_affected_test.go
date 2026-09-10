@@ -4,25 +4,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
-
-func TestWalletScopeUsesUserIDAndCoinSymbol(t *testing.T) {
-	query, args := walletByUserAndCoinScope(1, "BTC")
-
-	assert.Equal(t, "user_id = ? AND coin_symbol = ?", query)
-	assert.Equal(t, []interface{}{uint(1), "BTC"}, args)
-}
-
-func TestKRWAssetSymbolIsExplicit(t *testing.T) {
-	query, args := walletByUserAndCoinScope(2, model.KRWAssetSymbol)
-
-	assert.Equal(t, "user_id = ? AND coin_symbol = ?", query)
-	assert.Equal(t, []interface{}{uint(2), model.KRWAssetSymbol}, args)
-}
 
 func TestRequireRowsAffectedReturnsDBError(t *testing.T) {
 	err := errors.New("db failed")

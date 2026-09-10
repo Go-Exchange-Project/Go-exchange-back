@@ -12,9 +12,9 @@ import (
 )
 
 func newIdemHoldCoordinator(db *gorm.DB) *HoldCoordinator {
-	orderRepo, walletRepo, ledgerRepo := newHoldTestRepos(db)
+	orderRepo := newHoldTestRepos(db)
 	return &HoldCoordinator{
-		DB: db, OrderRepo: orderRepo, WalletRepo: walletRepo, LedgerRepo: ledgerRepo,
+		DB: db, OrderRepo: orderRepo, Ledger: NewLedgerService(db),
 		IdemRepo: repository.NewOrderIdempotencyRepository(db),
 	}
 }
@@ -85,11 +85,9 @@ func TestIntegrationHoldBatchSameKeyCreatesOneOrder(t *testing.T) {
 	assert.EqualValues(t, 1, countIdemKeys(t, db, buyer))
 
 	// hold도 한 번만 잡혀야 한다. 100*1*1.0005 = 100.05
-	var wallet model.Wallet
-	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", buyer, model.KRWAssetSymbol).
-		First(&wallet).Error)
-	assert.True(t, wallet.LockedBalance.Equal(decimal.RequireFromString("100.05")),
-		"locked=%s — hold가 두 번 잡혔다", wallet.LockedBalance)
+	_, locked := ledgerBalances(t, db, buyer, model.KRWAssetSymbol)
+	assert.True(t, locked.Equal(decimal.RequireFromString("100.05")),
+		"locked=%s — hold가 두 번 잡혔다", locked)
 }
 
 // 같은 키·다른 지문은 하나만 진행하고 나머지는 409다.

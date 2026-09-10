@@ -46,16 +46,30 @@ type NegativeAccountRow struct {
 
 // CheckUnbalancedJournals는 검사 1이다. 한 줄이라도 나오면 심각한 오류다 —
 // 돈이 생겼거나 사라졌다는 뜻이다.
+//
+// LIMIT은 분개(journal) 수에 건다. 행에 직접 걸면, 한 분개가 자산 여러 종의
+// 불균형 행을 가질 때 페이지 경계에서 일부 자산 행만 잘려 유실된다 — 분개
+// 자체는 탐지돼도 어느 자산이 얼마나 어긋났는지가 사라진다. ORDER BY에 asset을
+// 넣어 같은 분개 안의 행 순서도 결정적으로 고정한다.
 func (r *LedgerReconciliationRepository) CheckUnbalancedJournals(afterJournalID uint, limit int) ([]UnbalancedJournalRow, error) {
 	var rows []UnbalancedJournalRow
 	err := r.DB.Raw(`
-		SELECT journal_id, asset, SUM(amount) AS sum
-		FROM postings
-		WHERE journal_id > ?
-		GROUP BY journal_id, asset
-		HAVING SUM(amount) <> 0
-		ORDER BY journal_id
-		LIMIT ?`, afterJournalID, limit).Scan(&rows).Error
+		WITH bad AS (
+			SELECT journal_id
+			FROM postings
+			WHERE journal_id > ?
+			GROUP BY journal_id, asset
+			HAVING SUM(amount) <> 0
+		),
+		page AS (
+			SELECT DISTINCT journal_id FROM bad ORDER BY journal_id LIMIT ?
+		)
+		SELECT p.journal_id, p.asset, SUM(p.amount) AS sum
+		FROM postings p
+		JOIN page ON page.journal_id = p.journal_id
+		GROUP BY p.journal_id, p.asset
+		HAVING SUM(p.amount) <> 0
+		ORDER BY p.journal_id, p.asset`, afterJournalID, limit).Scan(&rows).Error
 	return rows, err
 }
 

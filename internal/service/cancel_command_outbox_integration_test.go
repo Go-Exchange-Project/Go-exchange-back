@@ -85,15 +85,57 @@ type cancelPipelineHarness struct {
 	workerDone   chan struct{}
 }
 
-func newCancelPipelineHarness(t *testing.T, db *gorm.DB) *cancelPipelineHarness {
+// symbolScopedCancelCommandStore exposes only this harness's own PENDING commands to its
+// worker. internal/service and internal/repository run as separate test binaries that Go
+// executes in parallel against the same shared test DB, and internal/repository's own
+// cancel_command_repository_integration_test.go writes raw PENDING cancel_commands rows
+// (CoinSymbol "BTC") straight to that DB. Without this filter, CancelCommandWorker.FindPending
+// polls status=PENDING across the whole table and can pick up one of those rows, try to
+// cancel a nonexistent order, and call RecordAttempt on it — corrupting the unrelated test's
+// attempt_count assertions.
+type symbolScopedCancelCommandStore struct {
+	inner  *repository.CancelCommandRepository
+	symbol string
+}
+
+func (s *symbolScopedCancelCommandStore) FindPending(excluded []uint64, limit int) ([]model.CancelCommand, error) {
+	query := s.inner.DB.Where("status = ? AND coin_symbol = ?", model.CancelCommandStatusPending, s.symbol)
+	if len(excluded) > 0 {
+		query = query.Where("id NOT IN ?", excluded)
+	}
+	var commands []model.CancelCommand
+	err := query.Order("id ASC").Limit(limit).Find(&commands).Error
+	return commands, err
+}
+
+func (s *symbolScopedCancelCommandStore) FindStatuses(ids []uint64) ([]model.CancelCommand, error) {
+	return s.inner.FindStatuses(ids)
+}
+
+func (s *symbolScopedCancelCommandStore) MarkNoop(id uint64) (*model.CancelCommand, error) {
+	return s.inner.MarkNoop(id)
+}
+
+func (s *symbolScopedCancelCommandStore) RecordAttempt(id uint64, message string) error {
+	return s.inner.RecordAttempt(id, message)
+}
+
+func (s *symbolScopedCancelCommandStore) CountPending() (int64, error) {
+	var count int64
+	err := s.inner.DB.Model(&model.CancelCommand{}).
+		Where("status = ? AND coin_symbol = ?", model.CancelCommandStatusPending, s.symbol).
+		Count(&count).Error
+	return count, err
+}
+
+func newCancelPipelineHarness(t *testing.T, db *gorm.DB, symbol string) *cancelPipelineHarness {
 	t.Helper()
 
 	engine := matching.NewMatchingEngine()
 	engine.Start()
 
 	orderRepo := repository.NewOrderRepository(db)
-	walletRepo := repository.NewWalletRepository(db)
-	orderService := NewOrderService(orderRepo, walletRepo, engine)
+	orderService := NewOrderService(orderRepo, engine)
 	commandRepo := repository.NewCancelCommandRepository(db)
 	orderService.CancelCommandRepository = commandRepo
 
@@ -112,7 +154,8 @@ func newCancelPipelineHarness(t *testing.T, db *gorm.DB) *cancelPipelineHarness 
 		close(writerDone)
 	}()
 
-	worker := NewCancelCommandWorker(commandRepo, orderRepo, engine)
+	scopedStore := &symbolScopedCancelCommandStore{inner: commandRepo, symbol: symbol}
+	worker := NewCancelCommandWorker(scopedStore, orderRepo, engine)
 	worker.PollInterval = 10 * time.Millisecond
 	orderService.CancelCommandWake = worker.Wake
 
@@ -121,7 +164,7 @@ func newCancelPipelineHarness(t *testing.T, db *gorm.DB) *cancelPipelineHarness 
 		db:           db,
 		engine:       engine,
 		orderService: orderService,
-		settlement:   NewSettlementService(db, orderRepo, walletRepo),
+		settlement:   NewSettlementService(db, orderRepo),
 		outboxRepo:   outboxRepo,
 		commandRepo:  commandRepo,
 		worker:       worker,
@@ -207,9 +250,9 @@ func (h *cancelPipelineHarness) orderStatus(orderID uint) model.OrderStatus {
 func (h *cancelPipelineHarness) releaseEntryCount(userID uint, orderID uint) int64 {
 	h.t.Helper()
 	var count int64
-	require.NoError(h.t, h.db.Model(&model.LedgerEntry{}).
-		Where("user_id = ? AND entry_type = ? AND reference_type = ? AND reference_id = ?",
-			userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, orderID).
+	require.NoError(h.t, h.db.Model(&model.JournalEntry{}).
+		Where("reference_type = ? AND reference_id = ? AND event_type = ?",
+			model.JournalReferenceOrder, orderID, model.JournalEventOrderRelease).
 		Count(&count).Error)
 	return count
 }
@@ -270,7 +313,7 @@ func TestIntegrationCancelCommandCrashBeforeOutboxIsRecovered(t *testing.T) {
 	cleanupHarnessOutbox(t, db, symbol)
 
 	// 1차 런타임: worker를 시작하지 않은 채 취소만 접수하고 "죽는다".
-	first := newCancelPipelineHarness(t, db)
+	first := newCancelPipelineHarness(t, db, symbol)
 	result, err := first.orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 	require.NoError(t, err)
 	defer cleanupServiceCancelCommands(t, db, result.CommandID)
@@ -278,8 +321,10 @@ func TestIntegrationCancelCommandCrashBeforeOutboxIsRecovered(t *testing.T) {
 	require.Equal(t, model.CancelCommandStatusPending, first.commandStatus(result.CommandID))
 	first.stop()
 
-	// 2차 런타임: bootstrap이 주문을 다시 올리고 worker가 command를 재실행한다.
-	second := newCancelPipelineHarness(t, db)
+	// 2차 런타임: bootstrap이 주문을 다시 올리고 worker가 command를 재실행한다. 같은
+	// command를 재개하는 것이므로 심볼도 first와 같아야 한다 — 새 심볼을 쓰면 그
+	// command가 이 harness의 worker에게 아예 보이지 않는다.
+	second := newCancelPipelineHarness(t, db, symbol)
 	second.submitToEngine(order, decimal.NewFromInt(5))
 	second.startWorker()
 
@@ -316,7 +361,7 @@ func TestIntegrationCancelCommandCrashAfterOutboxIsFinishedByReplay(t *testing.T
 	})
 	cleanupHarnessOutbox(t, db, symbol)
 
-	harness := newCancelPipelineHarness(t, db)
+	harness := newCancelPipelineHarness(t, db, symbol)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
 	harness.startWorker()
 
@@ -372,14 +417,14 @@ func TestIntegrationCancelCommandRestartDoesNotResurrectOrder(t *testing.T) {
 	})
 	cleanupHarnessOutbox(t, db, symbol)
 
-	first := newCancelPipelineHarness(t, db)
+	first := newCancelPipelineHarness(t, db, symbol)
 	result, err := first.orderService.CancelOrder(CancelOrderInput{UserID: makerID, OrderID: order.ID})
 	require.NoError(t, err)
 	defer cleanupServiceCancelCommands(t, db, result.CommandID)
 	first.stop()
 
 	// 재기동: bootstrap이 그 주문을 오더북에 다시 올린다.
-	second := newCancelPipelineHarness(t, db)
+	second := newCancelPipelineHarness(t, db, symbol)
 	second.submitToEngine(order, decimal.NewFromInt(5))
 
 	// 부팅 장벽 — drain이 끝나야만 트래픽을 받는다.
@@ -465,7 +510,7 @@ func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T)
 	})
 	cleanupHarnessOutbox(t, db, symbol)
 
-	harness := newCancelPipelineHarness(t, db)
+	harness := newCancelPipelineHarness(t, db, symbol)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
 	harness.startWorker()
 
@@ -529,7 +574,7 @@ func TestIntegrationCancelCommandRepeatBeforeSettlementReleasesOnce(t *testing.T
 	})
 	cleanupHarnessOutbox(t, db, symbol)
 
-	harness := newCancelPipelineHarness(t, db)
+	harness := newCancelPipelineHarness(t, db, symbol)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
 	harness.startWorker()
 
@@ -571,7 +616,7 @@ func TestIntegrationCancelCommandOnFilledOrderBecomesNoop(t *testing.T) {
 	})
 	cleanupHarnessOutbox(t, db, symbol)
 
-	harness := newCancelPipelineHarness(t, db)
+	harness := newCancelPipelineHarness(t, db, symbol)
 	result, err := harness.orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 	require.NoError(t, err)
 	defer cleanupServiceCancelCommands(t, db, result.CommandID)
@@ -614,7 +659,7 @@ func TestIntegrationCancelCommandStaysPendingWhenEngineMissesOpenOrder(t *testin
 	cleanupHarnessOutbox(t, db, symbol)
 
 	// 주문을 엔진에 올리지 않는다 — 엔진 관점에서는 "없음"이다.
-	harness := newCancelPipelineHarness(t, db)
+	harness := newCancelPipelineHarness(t, db, symbol)
 	result, err := harness.orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
 	require.NoError(t, err)
 	defer cleanupServiceCancelCommands(t, db, result.CommandID)
@@ -653,7 +698,7 @@ func TestIntegrationCancelCommandDoesNotRedispatchWhileOutboxIsBlocked(t *testin
 	})
 	cleanupHarnessOutbox(t, db, symbol)
 
-	harness := newCancelPipelineHarness(t, db)
+	harness := newCancelPipelineHarness(t, db, symbol)
 	harness.submitToEngine(order, decimal.NewFromInt(5))
 
 	release, entered := harness.outboxRepo.block()
