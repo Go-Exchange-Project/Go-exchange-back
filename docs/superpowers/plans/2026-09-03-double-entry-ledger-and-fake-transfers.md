@@ -904,7 +904,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   - `docs/refactor/README.md`에 이번 전환을 반영한다.
   - `.github/workflows/backend-ci.yml`이 새 통합 테스트를 돌리는지 확인한다. DSN이 없으면 조용히 SKIP되므로, **CI에서 SKIP이 아니라 실제로 도는지 로그로 확인한다.**
 
-- [ ] **Step 6: 커밋**
+- [x] **Step 6: 커밋**
 
   `commit-message` 스킬을 거친다.
 
