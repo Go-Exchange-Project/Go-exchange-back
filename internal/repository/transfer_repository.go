@@ -126,6 +126,71 @@ func (r *TransferRepository) InsertEventIfAbsent(event *model.TransferStatusEven
 	return result.RowsAffected == 1, nil
 }
 
+// ConfirmTerminal은 설계 §4.5의 단일 UPDATE다. status·resolution_journal_id·
+// review 2열·next_check_at을 한 번에 바꾸고 WHERE status = 'PROCESSING'을 건다 —
+// 그것이 확정을 "한 번만" 성공하게 만든다. journalID가 nil이면(입금 실패처럼
+// 분개가 없는 경우) resolution_journal_id는 NULL로 남는다.
+func (r *TransferRepository) ConfirmTerminal(id uint, status model.TransferStatus, journalID *uint) error {
+	return requireRowsAffected(r.DB.Model(&model.TransferRequest{}).
+		Where("id = ? AND status = ?", id, model.TransferStatusProcessing).
+		Updates(map[string]interface{}{
+			"status":                status,
+			"resolution_journal_id": journalID,
+			"review_required_at":    nil,
+			"review_reason":         nil,
+			"next_check_at":         nil,
+			"updated_at":            time.Now().UTC(),
+		}), "transfer confirm update")
+}
+
+// SetReviewRequired은 돈과 상태를 그대로 둔 채 운영자 확인 표시만 켠다.
+// TERMINAL_BEFORE_DISPATCH·CONFLICTING_TERMINAL_OUTCOME이 이것을 쓴다 — 둘 다
+// 확정도 취소도 하지 않고 사람을 부르는 경우다.
+//
+// review_required_at은 비어 있을 때만 쓴다(COALESCE) — 최초 발생 시각을
+// 보존해야 운영자가 "가장 오래 멈춘 요청부터" 정렬할 수 있다. 이미 켜져
+// 있는데 다시 부르면 시각은 그대로 두고 사유만 최신으로 갱신한다.
+func (r *TransferRepository) SetReviewRequired(id uint, reason string, at time.Time) error {
+	return requireRowsAffected(r.DB.Model(&model.TransferRequest{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"review_required_at": gorm.Expr("COALESCE(review_required_at, ?)", at),
+			"review_reason":      reason,
+			"updated_at":         time.Now().UTC(),
+		}), "transfer review flag update")
+}
+
+// UpdatePollSchedule은 RecordObservation·HandleStatusCheckFailure의 PROCESSING
+// 분기가 쓴다. 조회 일정 3열을 갱신하고, reviewReason이 있으면 확인 표시도
+// 함께 켠다. 확인 표시를 지우는 쪽은 여기 없다 — 그것은 ConfirmTerminal만
+// 하는 일이다(§4.5).
+//
+// review_required_at은 SetReviewRequired와 같은 이유로 COALESCE로 최초
+// 발생 시각만 보존한다 — 그러지 않으면 임계를 넘긴 뒤 조회할 때마다 시각이
+// 갱신되어, 5시간 전에 걸린 출금도 매 조회마다 방금 걸린 것처럼 보인다.
+func (r *TransferRepository) UpdatePollSchedule(id uint, checkedAt time.Time, nextCheckAt time.Time, attempts int, reviewReason *string) error {
+	updates := map[string]interface{}{
+		"last_checked_at": checkedAt,
+		"next_check_at":   nextCheckAt,
+		"check_attempts":  attempts,
+		"updated_at":      time.Now().UTC(),
+	}
+	if reviewReason != nil {
+		updates["review_required_at"] = gorm.Expr("COALESCE(review_required_at, ?)", checkedAt)
+		updates["review_reason"] = *reviewReason
+	}
+	return requireRowsAffected(r.DB.Model(&model.TransferRequest{}).
+		Where("id = ? AND status = ?", id, model.TransferStatusProcessing).
+		Updates(updates), "transfer poll schedule update")
+}
+
+// ListByUser는 GET /transfers가 쓴다. 최신 순으로 돌려준다.
+func (r *TransferRepository) ListByUser(userID uint, limit int) ([]model.TransferRequest, error) {
+	var requests []model.TransferRequest
+	err := r.DB.Where("user_id = ?", userID).Order("id DESC").Limit(limit).Find(&requests).Error
+	return requests, err
+}
+
 // DueForCheck는 상태 조회 대상을 고른다. RECEIVED(제출 재시도 대상)와
 // PROCESSING(상태 조회 대상)을 함께 돌려준다 — worker가 둘을 모두 처리한다.
 func (r *TransferRepository) DueForCheck(now time.Time, limit int) ([]model.TransferRequest, error) {

@@ -77,8 +77,26 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      # -run Integration을 지우고 ./internal/handler를 목록에 더했다. 이름
+      # 필터가 있으면 "Integration"이 이름에 없는 테스트(원장 Task 6의
+      # T4~T10, 교착상태 회귀 2종, TestOrderAndSettlementPreserveAssets 등)가
+      # SKIP이 아니라 필터에 걸려 조용히 실행되지 않는다 — 로그에 흔적조차
+      # 없어 SKIP보다 나쁘다. handler 패키지 전체는 원래 이 목록에 없었다.
+      #
+      # -p 1은 유지한다: 세 패키지가 같은 스키마의 공유 test DB를 쓴다(CP2).
+      #
+      # -skip 두 개는 원장 전환과 무관한 기존 결함이다(CP2에서 분리 결정).
+      # 008_order_idempotency_keys.sql을 일부러 잘못된 동명 제약/인덱스로
+      # 바꾼 뒤 cleanup에서 되돌리는데, 그 cleanup이 goose에게 버전 8을
+      # 재적용시키는 방식이라, 버전 9·10이 이미 적용된 지금은 goose가
+      # "current version보다 낮은 버전이 없다"는 가드에 걸려 항상 실패한다.
+      # 이 실패는 goose_db_version을 오염시켜 뒤 테스트(TestTradesBuyOrderIDIndexIntegration
+      # 등)까지 연쇄로 깨뜨리므로, 그 두 테스트만 명시적으로 제외한다.
       - name: Run Postgres integration tests
-        run: go test -run Integration -v -p 1 ./internal/dbmigration ./internal/repository ./internal/service
+        run: >-
+          go test -v -p 1
+          -skip '^(TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint|TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex)$'
+          ./internal/dbmigration ./internal/repository ./internal/service ./internal/handler
 
   docker-build:
     name: Docker build

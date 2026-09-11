@@ -362,6 +362,47 @@ N=8이 DB4 구성의 포화 프로파일에서 1초 계약을 깬 전례가 있�
 - **남은 것**: 키 보존 정책(414,447건에 133 MB), 비용 귀속 통제 실험,
   부하에서 미관측인 `PENDING`·`REJECTED`·`UNKNOWN` 경로.
 
+## 5차 리팩토링 — 단식부기 지갑 → 복식부기 원장 전환 (2026-09-03 착수)
+
+**성능 축이 아니다.** 잔액을 직접 저장하는 `wallets`/`ledger_entries` 모델을 복식부기 원장
+(`accounts`/`account_balances`/`journal_entries`/`postings`)으로 바꿔, 잔액이 전기(posting)의
+합으로만 정의되게 했다. 계획서·설계는 각각
+[2026-09-03 계획](../superpowers/plans/2026-09-03-double-entry-ledger-and-fake-transfers.md),
+[2026-09-02 설계](../superpowers/specs/2026-09-02-double-entry-ledger-and-fake-transfers-design.md)에
+있다 — 이 문서에 별도 완료 문서를 새로 만들지 않고 그 두 문서로 링크만 남긴다.
+
+| 구간 | 내용 | 상태 |
+|---|---|---|
+| Task 1~2 | 원장 표 6종 신설, `LedgerService.Record`(분개 기록 유일 창구)·검산 리포지토리 추가 | ✅ 완료 (CP1) |
+| Task 3~5 | 개발용 지급·주문 잠금·해제·정산·평균매수가를 전부 원장 경유로 전환, `wallets`/`ledger_entries` 완전 삭제(migration 010), 검산을 원장 전용 4종(분개별 합 0 · 캐시-전기 일치 · 자산 전체 합 0 · 사용자 계정 음수 금지)으로 교체 | ✅ 완료 (CP2) |
+| Task 6 | 가짜 입출금 접수(`TransferService.RequestDeposit`/`RequestWithdrawal`)·확정 경로(`ResolveTransfer`)·미확정 관측(`RecordObservation`)·조회 worker(`TransferStatusPoller`)·역분개(`LedgerService.Reverse`) | ✅ 완료 |
+| Task 7 | 프런트 `/assets` 페이지(입금/출금/처리 내역), E2E 경로 1개, 백엔드·프런트 전체 검증 | ✅ 완료 (CP3) |
+
+**이번 작업에 GCP·처리량 측정은 없다.** 위 표의 다른 항목들과 비교할 성능 데이터를 만들지
+않았다 — 이 전환의 증거는 통합 테스트(설계 §11의 T1~T10, CP1~CP3 검토)와 `-race` 결과다.
+
+| 검증 | 결과 |
+|---|---|
+| `go build ./...` · `go vet ./...` | PASS |
+| `go test -p 1 ./... -count=1`(Postgres 통합 포함) | 전부 PASS |
+| `go test -race -p 1 ./... -count=1`(Linux 컨테이너) | 전부 PASS — T6 동시성 장벽(`pg_blocking_pids`) 포함 |
+| 프런트 `npm test && npm run lint && npm run build`, `npm run test:e2e` | 전부 PASS |
+
+**전환 과정에서 발견한, 이 전환과 무관한 기존 결함 2건**(고치지 않고 분리):
+- `internal/dbmigration`의 `TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint`·
+  `TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex` — migration 008을 일부러 훼손한 뒤
+  cleanup에서 되돌리는데, 그 cleanup이 버전 8을 삭제 후 재적용하는 방식이라 상위 버전(9·10)이
+  이미 있는 지금은 goose의 "현재 버전보다 낮은 버전이 없다" 가드에 항상 걸린다. CI에서
+  `-skip`으로 명시 제외했다(아래 CI 변경 참고).
+- 프런트 E2E `uniqueCoinSymbol` 헬퍼가 만드는 심볼이 항상 16자를 넘어 `accounts.asset
+  varchar(16)`(migration 009) 제약을 위반했다 — 원장 전환 이전의 더 넓은 컬럼 기준으로 짜인 채
+  방치돼 있었다. 접미사 예산을 고정해 16자 안에 들어오도록 고쳤다(프런트 저장소, 테스트 헬퍼만).
+
+**CI 변경**: `backend-ci.yml`의 통합 테스트 job이 `-run Integration` 이름 필터를 쓰고 있어,
+이름에 "Integration"이 없는 Task 6의 T4~T10·교착상태 회귀·`TestOrderAndSettlementPreserveAssets`
+등이 SKIP이 아니라 **조용히 실행되지 않았다.** 필터를 지우고 `./internal/handler`를 목록에
+더했다. `-p 1`은 유지, 위 008 결함 2건만 `-skip`으로 명시 제외했다.
+
 ## 백로그 (순서 미정, 조건 충족 시 승격)
 
 | 항목 | 내용 | 승격 조건 |

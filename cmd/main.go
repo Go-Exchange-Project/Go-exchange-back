@@ -145,6 +145,16 @@ func main() {
 	orderBookHandler := handler.NewOrderBookHandler(me)
 	orderHandler := handler.NewOrderHandler(orderService)
 
+	// 가짜 입출금. FakeTransferProcessor는 실제 은행·체인이 아니다 — 이 프로젝트
+	// 전체가 "가짜 입출금 체험" 기능이므로 dev-tools 여부와 무관하게 항상 켜져
+	// 있다(개발용 지급 DEV_MINT와는 다른 용도, §5.1).
+	transferService := service.NewTransferService(config.DB, service.NewFakeTransferProcessor())
+	transferHandler := handler.NewTransferHandler(transferService)
+	transferStatusPoller := &service.TransferStatusPoller{
+		Transfers: repository.NewTransferRepository(config.DB),
+		Service:   transferService,
+	}
+
 	// 심볼을 태깅해 발행한다 — hub가 해당 심볼 구독자(또는 legacy full-feed
 	// 클라이언트)에게만 전달한다(B-1b).
 	broadcast := func(coinSymbol string, msg []byte) {
@@ -272,6 +282,10 @@ func main() {
 	}
 	go reconciliationWorker.Run(backgroundCtx)
 
+	// 가짜 입출금 조회 worker. 자산을 잠그지 않고 외부 상태를 조회만 하므로
+	// 매칭 엔진 종료 체인의 drain 대상이 아니다 — backgroundCtx 취소로 정리된다.
+	go transferStatusPoller.Run(backgroundCtx)
+
 	startOrderIdempotencyMonitor(backgroundCtx, config.DB)
 
 	go func() {
@@ -381,11 +395,17 @@ func main() {
 	authenticated.DELETE("/orders/:id", orderHandler.CancelOrder)
 	authenticated.GET("/wallets", orderHandler.ListWallets)
 	authenticated.GET("/trades", orderHandler.ListTrades)
+	authenticated.POST("/transfers/deposits", transferHandler.RequestDeposit)
+	authenticated.POST("/transfers/withdrawals", transferHandler.RequestWithdrawal)
+	authenticated.GET("/transfers", transferHandler.ListTransfers)
 	if config.DevToolsEnabledFromEnv() {
 		devHandler := handler.NewDevHandler(service.NewDevWalletService(config.DB))
 		dev := authenticated.Group("/dev")
 		dev.Use(middleware.DevToolsRequired(config.DevToolsTokenFromEnv()))
 		dev.POST("/wallets/fund", devHandler.FundWallet)
+		// 가짜 은행·가짜 체인이 우리에게 알림을 보내는 것을 흉내 낸다 — 실제
+		// 외부가 호출하는 라우트가 아니므로 dev-tools 뒤에 둔다.
+		dev.POST("/transfers/callback", transferHandler.ReceiveCallback)
 	}
 
 	// graceful shutdown 체인: HTTP 차단 → hold coordinator 정지 → cancel worker 정지

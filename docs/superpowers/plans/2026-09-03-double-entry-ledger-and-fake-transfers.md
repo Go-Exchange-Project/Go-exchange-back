@@ -733,7 +733,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   func (p *TransferStatusPoller) RunOnce()
   ```
 
-- [ ] **Step 1: T4~T8·T10 테스트를 먼저 쓴다**
+- [x] **Step 1: T4~T8·T10 테스트를 먼저 쓴다**
 
   `internal/service/transfer_integration_test.go`:
 
@@ -746,7 +746,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   | `TestReversalNetsToZeroPerAccount` | 역분개 후 원본+역분개 합이 계정별 0 | **T8** |
   | `TestUnknownKeepsLockThenSuccessCompletes` | ① `UNKNOWN` → 분개 0·잠금 유지·`review_required_at` 설정 ② 이어서 `SUCCESS` → 완료 분개 **정확히 1회**·`COMPLETED`·`next_check_at IS NULL`·확인 표시 해제 | **T10** |
 
-- [ ] **Step 2: T6의 결정적 동시성 장벽을 만든다**
+- [x] **Step 2: T6의 결정적 동시성 장벽을 만든다**
 
   설계 §11.1을 그대로 구현한다. **`sleep`이나 실행 순서에 의존하지 않는다.**
 
@@ -771,14 +771,14 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   `pg_blocking_pids`를 쓸 수 없는 환경이면 **건너뛰지 말고 실패시킨다.** 장벽 없이 통과하는 것보다 못 도는 것이 낫다.
 
-- [ ] **Step 3: 실패 확인**
+- [x] **Step 3: 실패 확인**
 
   ```bash
   go test ./internal/service/ -run 'TestAllEventsPassReconciliation|TestWithdrawalHoldBlocksReuseOfSameFunds|TestConcurrentTerminalObservations|TestFailureCallbackRefundsLockedFunds|TestReversalNetsToZeroPerAccount|TestUnknownKeepsLockThenSuccessCompletes' -v
   ```
   Expected: 컴파일 실패.
 
-- [ ] **Step 4: 접수 경로와 제출 생명주기 구현**
+- [x] **Step 4: 접수 경로와 제출 생명주기 구현**
 
   **접수는 항상 `InsertOrGetByUserRequestKey`로 시작한다.** 키를 선점하지 않고 잠금부터 하면 같은 요청이 두 번 잠근다.
 
@@ -803,7 +803,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   - **외부 제출은 접수 트랜잭션 밖이다.** `Submit("transfer:{id}", req)`가 `external_ref`를 돌려주면 `SetDispatched(id, ref)`로 `RECEIVED → PROCESSING`을 만든다. 제출 후 응답 전에 죽으면 요청은 `RECEIVED`로 남고, worker가 같은 dispatch key로 재제출한다 — 같은 `external_ref`가 돌아오므로 외부 송금은 하나다.
   - **worker는 두 가지를 한다:** `RECEIVED` 요청의 제출 재시도, `PROCESSING` 요청의 상태 조회. **시간 경과만으로 돈을 반환하는 규칙을 추가하지 않는다.**
 
-- [ ] **Step 5: `ResolveTransfer`와 `RecordObservation` 구현**
+- [x] **Step 5: `ResolveTransfer`와 `RecordObservation` 구현**
 
   설계 §8.8·§8.9의 절차를 그대로 따른다. **함수를 나눈 것이 핵심이다** — `ResolveTransfer`는 `PENDING`·`UNKNOWN`을 받으면 프로그래밍 오류로 거부하고, `RecordObservation`에는 분개를 만드는 코드가 없다.
 
@@ -822,20 +822,20 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   확정 UPDATE는 네 열을 한 번에 바꾸고 `WHERE id = ? AND status = 'PROCESSING'`을 건다. 그것이 "한 번만"을 만든다.
 
-- [ ] **Step 6: 가짜 처리기와 조회 worker 구현**
+- [x] **Step 6: 가짜 처리기와 조회 worker 구현**
 
   - `FakeTransferProcessor`: `Submit`은 요청을 `PROCESSING`으로 올리고, `GetTransferStatus`는 테스트가 심어 둔 결과를 돌려준다. **테스트에서는 시계를 흉내 내지 않고 콜백을 직접 호출한다.** 알림과 조회를 같은 시점에 내보낼 수 있어야 한다 — 그래야 §8.8의 행 잠금이 실제로 검증된다.
   - `payload`는 허용 목록(외부 거래 식별자 / 상태 코드·사유 / 금액·자산 / 외부 타임스탬프)만 저장한다. 목록 밖 필드는 버리고 **이름과 개수만** 로그에 남긴다. 값은 남기지 않는다.
   - `TransferStatusPoller`: `status='PROCESSING' AND next_check_at <= now()`를 골라 조회하고 결과에 따라 `ResolveTransfer` 또는 `RecordObservation`을 부른다. 간격은 10초 시작 → 2배씩 → 상한 1시간, 확인 표시 임계는 미확정 30분(설계 §8.6).
   - 배선: [cmd/main.go:268](../../../cmd/main.go) `go reconciliationWorker.Run(backgroundCtx)` 바로 아래에 `go transferStatusPoller.Run(backgroundCtx)`를 둔다. 종료는 252행 `defer cancelBackground()`가 처리한다. **매칭 엔진 종료 체인(386-442행)에 넣지 않는다** — 자산을 잠그지 않고 조회만 하므로 drain 대상이 아니다.
 
-- [ ] **Step 7: 역분개와 HTTP 라우트**
+- [x] **Step 7: 역분개와 HTTP 라우트**
 
   `LedgerService.Reverse`는 원본 전기의 부호를 뒤집어 새 분개(`event_type='REVERSAL'`, `reverses_journal_id=원본`, 키 `reversal:{원본 id}`)를 만든다. `UNIQUE (reverses_journal_id)`가 두 번 되돌리는 것을 막는다.
 
   라우트는 [cmd/main.go:377](../../../cmd/main.go) `authenticated.GET("/wallets", …)` 옆에 붙인다: `POST /transfers/deposits`, `POST /transfers/withdrawals`, `GET /transfers`. 가짜 외부 콜백 수신은 dev 그룹(380-383행)에 둔다 — 운영 라우트가 아니다.
 
-- [ ] **Step 8: 통과 확인**
+- [x] **Step 8: 통과 확인**
 
   ```bash
   go test ./internal/service/ -run 'TestAllEventsPassReconciliation|TestWithdrawalHoldBlocksReuseOfSameFunds|TestConcurrentTerminalObservations|TestFailureCallbackRefundsLockedFunds|TestReversalNetsToZeroPerAccount|TestUnknownKeepsLockThenSuccessCompletes' -v
@@ -851,7 +851,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 - Modify: `Go-exchange-front/src/App.tsx` (라우트), `Go-exchange-front/src/lib/api.ts`, `Go-exchange-front/src/pages/Index.tsx`, `Go-exchange-front/tests/e2e/exchange.spec.ts`
 - Modify: `docs/ENGINEERING-SUMMARY.md`, `docs/refactor/README.md`, `.github/workflows/backend-ci.yml`
 
-- [ ] **Step 1: `/assets` 페이지 신설**
+- [x] **Step 1: `/assets` 페이지 신설**
 
   `api.ts`에 `requestDeposit`·`requestWithdrawal`·`fetchTransfers`를 추가한다(`Wallet` 인터페이스는 건드리지 않는다 — 필드가 그대로다). `App.tsx`에 `/assets` 라우트를 추가하고 `pages/Assets.tsx`를 만든다.
 
@@ -870,7 +870,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   운영자용 정보(마지막·다음 조회 시각, `review_reason`)는 사용자 화면에 넣지 않는다.
 
-- [ ] **Step 2: E2E 경로 하나 추가**
+- [x] **Step 2: E2E 경로 하나 추가**
 
   [tests/e2e/exchange.spec.ts](../../../../Go-exchange-front/tests/e2e/exchange.spec.ts)에 **한 경로만** 추가한다:
 
@@ -878,7 +878,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
 
   **사용자가 입금 과정을 체험하는 경로는 가짜 입금이고, 테스트 준비용 자산은 개발용 지급이다**(설계 §5.1 용도 분리). 기존 테스트의 `fundWallet` 호출은 그대로 둔다.
 
-- [ ] **Step 3: 백엔드 전체 검증 — 각각 1회**
+- [x] **Step 3: 백엔드 전체 검증 — 각각 1회**
 
   ```bash
   go build ./... && go vet ./... && go test ./... -count=1
@@ -888,7 +888,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   ```
   Expected: 전부 PASS. 실패하면 원인을 고치고 실패한 명령만 다시 돌린다.
 
-- [ ] **Step 4: 프런트 전체 검증 — 각각 1회**
+- [x] **Step 4: 프런트 전체 검증 — 각각 1회**
 
   ```bash
   npm test && npm run lint && npm run build
@@ -898,7 +898,7 @@ id, coin_symbol, available_balance, locked_balance, total_balance, avg_buy_price
   ```
   Expected: 전부 PASS.
 
-- [ ] **Step 5: 문서와 CI**
+- [x] **Step 5: 문서와 CI**
 
   - `docs/ENGINEERING-SUMMARY.md`에 원장 축을 추가하고 상태를 기록한다. **측정하지 않은 것을 측정했다고 쓰지 않는다** — 이번 작업에 GCP 측정은 없다.
   - `docs/refactor/README.md`에 이번 전환을 반영한다.
