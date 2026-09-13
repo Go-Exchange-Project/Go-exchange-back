@@ -384,24 +384,169 @@ N=8이 DB4 구성의 포화 프로파일에서 1초 계약을 깬 전례가 있�
 | 검증 | 결과 |
 |---|---|
 | `go build ./...` · `go vet ./...` | PASS |
-| `go test -p 1 ./... -count=1`(Postgres 통합 포함) | 전부 PASS |
-| `go test -race -p 1 ./... -count=1`(Linux 컨테이너) | 전부 PASS — T6 동시성 장벽(`pg_blocking_pids`) 포함 |
-| 프런트 `npm test && npm run lint && npm run build`, `npm run test:e2e` | 전부 PASS |
+| `go test -p 1 ./... -count=1`(Postgres 통합 포함, `-skip` 없음) | 전부 PASS |
+| `go test -p 1 -shuffle=on ./internal/service/ -count=1`(순서 의존 확인) | 전부 PASS |
+| `go test -race -p 1 ./... -count=1`(Linux 컨테이너, `-skip` 없음) | 전부 PASS — `TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce` 포함(아래 "cancel command race 수정" 참고) |
+| 프런트 `npm test -- --run && npm run lint && npm run build` | 전부 PASS |
+| 프런트 `npm run test:e2e` | 전부 PASS(21건 — OrderForm 응답 유실 회귀 1건 추가) |
 
-**전환 과정에서 발견한, 이 전환과 무관한 기존 결함 2건**(고치지 않고 분리):
-- `internal/dbmigration`의 `TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint`·
-  `TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex` — migration 008을 일부러 훼손한 뒤
-  cleanup에서 되돌리는데, 그 cleanup이 버전 8을 삭제 후 재적용하는 방식이라 상위 버전(9·10)이
-  이미 있는 지금은 goose의 "현재 버전보다 낮은 버전이 없다" 가드에 항상 걸린다. CI에서
-  `-skip`으로 명시 제외했다(아래 CI 변경 참고).
-- 프런트 E2E `uniqueCoinSymbol` 헬퍼가 만드는 심볼이 항상 16자를 넘어 `accounts.asset
-  varchar(16)`(migration 009) 제약을 위반했다 — 원장 전환 이전의 더 넓은 컬럼 기준으로 짜인 채
-  방치돼 있었다. 접미사 예산을 고정해 16자 안에 들어오도록 고쳤다(프런트 저장소, 테스트 헬퍼만).
+**이번 CP3 재작업이 만든 문제를 이번 CP3 재작업이 고쳤다(무관한 기존 결함이 아니었다)**:
+처음 CP3 보고에서 `TestDueForCheckSchedulesAroundPermanentlyFailingLowIDRequests`
+FAIL의 원인을 `TestLedgerSchemaIntegration`(원장 Task 1, 커밋 c2cdd0b) 탓으로 돌리며 "이
+전환과 무관한 기존 결함"이라 적었는데 틀렸다 — 그 스타베이션 회귀 테스트 자체가 이번 CP3
+재작업(item 2)에서 새로 추가한 것이고, `TestLedgerSchemaIntegration`도 원장 전환(Task 1)
+작업물이다. 둘 다 이 전환의 범위 안이라 아래처럼 고쳤다:
+- `TestDueForCheckSchedulesAroundPermanentlyFailingLowIDRequests`·
+  `TestSetDispatchedFirstCheckDueAtPollBaseIntervalBoundary`(`internal/service/transfer_integration_test.go`)를
+  `testdb.OpenIsolatedSchemaDB`(신규, `internal/testdb/isolated_schema.go`)로 전용 임시
+  스키마에서 돌게 했다. item 3에서 쓴 것과 같은 기법이다 — 고유 스키마 생성,
+  `t.Cleanup`(DROP SCHEMA)은 생성 전 등록, `search_path`로 그 스키마에 연결, 같은
+  AutoMigrate 목록 + `dbmigration.Up`(전체 — `transfer_requests` 제약이 009에 있어
+  `UpTo(8)`이 아니라 전체를 올려야 한다). 공유 스키마의 실행 순서·다른 테스트의 잔여 행과
+  완전히 무관해져, 파일 안 위치를 바꾸거나 `-shuffle=on`으로 순서를 섞어도 결과가 같다.
+- `internal/dbmigration/ledger_schema_integration_test.go`의 `TestLedgerSchemaIntegration`이
+  검증용으로 심은 `transfer_requests`(및 그에 딸린 `transfer_status_events`) 행을 이제
+  정리한다 — 넣은 id를 모아 뒀다가 `t.Cleanup`(첫 INSERT 전에 등록)에서 지운다.
+  `hold_journal_id`가 가리키는 분개는 자산별 합이 0이라 그대로 둬도 검산을 오염시키지 않는다.
+- `internal/service/service_integration_test.go`의 `cleanupServiceUsers`도 해당 사용자의
+  `transfer_status_events`→`transfer_requests`를 정리하도록 넓혔다(이벤트가 요청을 참조하므로
+  그 순서로 지운다). T5(`TestWithdrawalHoldBlocksReuseOfSameFunds`)가 확정하지 않고 남기던
+  PROCESSING 출금 요청도 이제 정리된다.
+
+**cancel command race 수정(`TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce`)**:
+원장 전환 이전부터 있던, 이 전환과 무관한 결함이었다(아래 근거). 프로덕션 cancel 코드는
+건드리지 않고 테스트만 고쳤다:
+
+- **원인**: 이 테스트는 같은 주문에 대해 `OrderService.CancelOrder`를 100개 goroutine으로
+  동시에 부른다. 각 호출은 트랜잭션(연결 하나를 그 트랜잭션이 끝날 때까지 점유)을 열고
+  `SELECT ... FOR UPDATE`로 직렬화된다. `openServiceIntegrationDB`가 여는 연결 풀은
+  `SetMaxOpenConns`를 부르지 않아 무제한이고, 같은 하네스가 10ms 주기로 도는 취소
+  worker와 5ms 주기로 flush하는 outbox writer까지 같은 풀을 함께 쓴다 — 순간 연결 수요가
+  공유 테스트 DB의 `max_connections=100`을 넘을 수 있다. 테스트 자신이
+  `if err == nil { ids[i] = result.CommandID }`로 `CancelOrder`의 에러를 완전히 버려(else
+  분기가 없었다) 어느 goroutine이 실패해도 `ids[i]`가 Go 零값 0으로 남고 "goroutine N가
+  다른 command를 받았다"는 엉뚱한 메시지로만 드러났다 — 실제로는 007의 `UNIQUE(order_id)`
+  때문에 다른 command가 생기는 것은 애초에 불가능하다.
+  `go test -race -p 1 ./internal/service/ -run '^TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce$' -count=3 -v -timeout=30m`으로
+  3/3 FAIL을 재현했다 — 실패한 세 id는 모두 `expected: 0x1 / actual: 0x0`(goroutine 4,
+  98, 80)로 정확히 0이었다. 로그에는 "53300"·"too many clients" 문자열이 없었다 — 연결
+  획득(BeginTx) 단계에서 실패하면 SQL을 시도하기도 전이라 gorm 쿼리 로거가 그 실패를 볼
+  수 없고, 테스트도 에러를 버리므로 원문이 남지 않는다. 같은 3회 모두 "hold가 두 번
+  해제됐다"(해제 1회)·`commandCount==1` 단언은 **통과**했다 — 잘못 보고된 것은 테스트의
+  부기(ids 배열)이지 실제 정산이 아니다. **돈 안전성에는 영향이 없었다.**
+- **가설 검증**: 별도 컨테이너(`postgres:16-alpine -c max_connections=300`,
+  `go-exchange-back_default` 네트워크)에서 같은 명령을 `-count=10`으로 돌리자 **10/10
+  PASS**했다 — 연결 거절 가설 확정.
+- **원장 전환 이전 기준선**: 원장 Task 1 이전 커밋 d0cb736을 `git worktree`로 체크아웃해
+  공유 DB(`max_connections=100`)에서 같은 명령을 `-count=10`으로 돌리자 **5/10 PASS**했다
+  (재작업 트리·c9c0418은 각각 2/10) — 원장 코드가 없는 시점에도 재현되므로 원장 전환·이번
+  CP3 재작업과 무관한 기존 결함으로 확인했다.
+- **수정**(`internal/service/cancel_command_outbox_integration_test.go`): `db.DB()`의
+  `sqlDB.SetMaxOpenConns(20)`을 걸어 이 테스트(하니스 전체가 같은 db를 쓴다)의 연결
+  수요가 `max_connections=100`을 넘지 않게 했다. `concurrency=100`·`max_connections`은
+  그대로다 — 이 테스트의 풀만 좁혔다. 100개 goroutine의 `CancelOrder` 에러를
+  `errs := make([]error, concurrency)`로 전부 모아, id를 비교하기 전에
+  `require.NoError(t, errs[i], "goroutine %d CancelOrder", i)`로 먼저 확인한다 — 인프라
+  오류가 "다른 command를 받았다"는 엉뚱한 메시지로 바뀌지 않는다.
+- **검증**: `go test -race -p 1 ./internal/service/ -run '^TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce$' -count=10 -timeout=30m` →
+  **10/10 PASS**. 이어서 새 스키마에서 무제외 `go test -race -p 1 ./... -count=1 -timeout=30m` →
+  전 패키지 PASS(위 표).
+
+호스트 실행과 Docker 실행은 겹치지 않았다(항상 한쪽이 끝난 뒤 공유 스키마를 초기화하고
+다른 쪽을 실행했다).
+
+**poller 인덱스 추가(migration 011)**: 009의 `transfer_requests_next_check_at_idx`는
+`PROCESSING`만 포함하고 키도 `next_check_at` 하나뿐이라, `DueForCheck`의 실제 조건
+(`status IN ('RECEIVED','PROCESSING')`)과 정렬(`next_check_at ASC NULLS FIRST, id ASC`)을
+받치지 못한다 — 완료된 입출금 이력이 쌓이면 5초마다 도는 poller가 큰 표를 스캔·정렬한다.
+`migrations/011_transfer_poll_due_index.sql`을 006과 같은 관용구(NO TRANSACTION +
+CREATE INDEX CONCURRENTLY IF NOT EXISTS + 같은 Up 안의 카탈로그 검증 + 검증 후 옛 인덱스
+DROP)로 추가했다. 009는 고치지 않았다. `DueForCheck`의 조건·정렬·LIMIT도 그대로다.
+
+- 정적 테스트 `TestTransferPollDueIndexMigrationIsConcurrentAndValidated`, 카탈로그
+  테스트 `TestTransferPollDueIndexIntegration`(`internal/dbmigration/`)을 006/008의
+  관용구로 추가했다 — 후자는 `pg_get_indexdef` 문자열을 정확 일치로 보지 않고
+  `pg_index`(indoption의 ASC+NULLS FIRST 비트, 키 열 순서, predicate)로 구조를 본다.
+- **실행계획 확인**(단언 테스트가 아니라 절차): `testdb.OpenIsolatedSchemaDB`에 종결
+  50,000건 + 진행 중(RECEIVED·due PROCESSING·미래 PROCESSING) 수백 건을 넣고
+  `ANALYZE` 한 뒤, `db.ToSQL`로 `DueForCheck`가 실제로 만드는 SQL을 그대로 뽑아
+  `EXPLAIN (ANALYZE, BUFFERS)`를 두 번(기본, `SET LOCAL enable_seqscan = off`) 돌렸다.
+  둘 다 다음과 같이 `Index Scan using transfer_requests_due_poll_idx`였고 Sort 노드가
+  없었다 — 읽은 버퍼도 4건뿐이라 50,000건짜리 종결 이력을 스캔하지 않는다:
+  ```
+  Limit  (cost=0.28..95.43 rows=64 width=316) (actual time=0.014..0.026 rows=64 loops=1)
+    Buffers: shared hit=4
+    ->  Index Scan using transfer_requests_due_poll_idx on transfer_requests
+          (cost=0.28..853.72 rows=574 width=316) (actual time=0.013..0.022 rows=64 loops=1)
+          Filter: ((next_check_at IS NULL) OR (next_check_at <= '...'::timestamp with time zone))
+          Buffers: shared hit=4
+  Planning Time: 0.685 ms
+  Execution Time: 0.054 ms
+  ```
+  `enable_seqscan = off`에서도 같은 계획이 나와, 이 인덱스가 통계와 무관하게 이 조회에
+  적용 가능함을 확인했다.
+- **PG16·PG18 predicate 확인**: 011의 카탈로그 검증이 `pg_get_expr(indpred, indrelid)`를
+  정확 비교하므로(008과 같은 방식), 볼륨 없는 일회용 `postgres:18-alpine` 컨테이너에서
+  `internal/dbmigration` 패키지 전체(AutoMigrate + 001~011 적용, `TestTransferPollDueIndexIntegration`
+  포함)를 돌렸다 — PostgreSQL 16.15·18.6 모두 `ok`였고, 두 버전에서 직접 조회한
+  `pg_get_expr` 출력도 문자 그대로 같았다:
+  `((status)::text = ANY ((ARRAY['RECEIVED'::character varying, 'PROCESSING'::character varying])::text[]))`.
+  011의 Up 검증 블록 위에 008과 같은 형식으로 확인 주석을 남겼다.
+- **Down 재시도 안전성**: Down이 옛 인덱스(`transfer_requests_next_check_at_idx`)를
+  재생성하고 곧장 새 인덱스를 지우면, CONCURRENTLY 중단으로 옛 인덱스가
+  indisvalid=false 잔해로 남았을 때 `IF NOT EXISTS`가 그걸 "이미 있음"으로
+  보고 넘어가 유효한 조회 인덱스가 하나도 남지 않는다 — Up에서 막은 것과 같은
+  실패 유형이다. Down도 Up과 대칭으로 옛 인덱스를 검증한 뒤에만 새 인덱스를
+  지우도록 고쳤다. 옛 predicate(`status = 'PROCESSING'`)의 `pg_get_expr`
+  출력도 PG16(16.15)·PG18(18.6)에서 직접 조회해 문자 그대로 같음을 확인했다:
+  `((status)::text = 'PROCESSING'::text)`. 격리 스키마 테스트로 정상 경로
+  (DownTo(10)→UpTo(11) 왕복)와, 008과 같은 "같은 이름의 잘못된 옛 인덱스" 기법으로
+  검증 실패 시 새 인덱스가 보존됨(DROP에 도달하지 않음)을 확인했다.
+
+**OrderForm 멱등키 폐기 규칙 정정**: `OrderForm.tsx`가 모든 `ApiError`(5xx 포함)에서
+키를 버리는 문제(지난 CP3 보고의 발견 사항)와, 202 PENDING을 성공으로 보고 키를 버려
+재제출 시 새 키로 두 번째 주문이 생기던 버그를 함께 고쳤다.
+
+| 응답 | 키 |
+|---|---|
+| network error(응답 없음) | 유지 |
+| 5xx이고 orderFailureDetail이 null(일반 502·503·504) | 유지 |
+| 503 + REJECTED | 폐기 |
+| 503 + UNKNOWN, 또는 오류 data의 PENDING | 유지 |
+| 200 ACCEPTED | 폐기 |
+| 202 PENDING(성공 응답) | 유지 — 기존 코드는 여기서 버렸다(고쳤다) |
+| 확정적 4xx(400·401·403·409·422 등) | 폐기 |
+| 408·429 | 유지 |
+
+`shouldRetainIdempotencyKeyAfterError` 헬퍼로 구현했고, vitest로 표의 분기마다 테스트를
+추가했다. `newIdempotencyKey`(randomUUID 대체 포함)를 `src/lib/idempotencyKey.ts`로
+옮겨 OrderForm·TransferForm이 공유한다. E2E `retrying an order after a lost response
+does not double-submit`을 TransferForm의 출금 유실 테스트와 같은 방식으로 추가했다 —
+이 파일의 테스트는 BTC 오더북을 공유하므로(1387행 주석), 남긴 주문은 반드시 취소한다.
+
+**TransferForm 키 생성 fallback·근거 정정**: `crypto.randomUUID()`를 `setIsSubmitting(true)`
+뒤 `try` 밖에서 직접 불렀다 — randomUUID가 없는 환경(http로 IP 접속 등)에서 예외가 나면
+`isSubmitting`이 풀리지 않는다. 공용 `newIdempotencyKey`(내부에 대체 로직 포함)로 바꾸고
+호출도 `try` 안으로 옮겼다. 주석도 정정했다 — "외부 Submit 실패가 5xx로 응답된다"는 사실이
+아니다(`dispatchAndReload`는 Dispatch 오류를 버리고 RECEIVED로 정상 응답한다). 실제
+근거는 요청·잠금 커밋 뒤의 마지막 재조회 실패, 그리고 프록시·게이트웨이의 모호한 5xx다.
+5xx에서 키를 유지하는 정책 자체는 그대로 두었다. `TransferForm.test.tsx`의 5xx 테스트
+메시지("submit failed")도 같은 잘못된 근거였던 것을 중립적인 문구("upstream error")로
+바꿨다.
 
 **CI 변경**: `backend-ci.yml`의 통합 테스트 job이 `-run Integration` 이름 필터를 쓰고 있어,
 이름에 "Integration"이 없는 Task 6의 T4~T10·교착상태 회귀·`TestOrderAndSettlementPreserveAssets`
 등이 SKIP이 아니라 **조용히 실행되지 않았다.** 필터를 지우고 `./internal/handler`를 목록에
-더했다. `-p 1`은 유지, 위 008 결함 2건만 `-skip`으로 명시 제외했다.
+더했다. `-p 1`은 유지한다. `TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint`·
+`TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex`는 각자 임시 스키마에서 전체
+마이그레이션을 적용해 검증하도록 바꿔 공유 `goose_db_version`을 더 이상 건드리지 않으므로,
+이전에 있던 `-skip` 제외를 없앴다.
+
+**uniqueCoinSymbol**: 프런트 E2E `uniqueCoinSymbol` 헬퍼가 만드는 심볼이 항상 16자를 넘어
+`accounts.asset varchar(16)`(migration 009) 제약을 위반했다 — 이 전환과 무관한 결함이 아니라,
+migration 009의 `varchar(16)` 도입이 노출시킨 회귀다. 원장 전환 이전의 더 넓은 컬럼 기준으로
+짜인 헬퍼가 그대로 남아 있었다. 접미사 예산을 고정해 16자 안에 들어오도록 고쳤다(프런트
+저장소, 테스트 헬퍼만, 지난 CP3 보고에서 이미 반영).
 
 ## 백로그 (순서 미정, 조건 충족 시 승격)
 

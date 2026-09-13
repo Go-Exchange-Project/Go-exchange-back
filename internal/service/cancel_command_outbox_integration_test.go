@@ -492,8 +492,22 @@ func snapshotHasLevel(levels []matching.PriceLevelData, price decimal.Decimal) b
 
 // 검증 4: 동시 100회 취소에도 hold 해제는 한 번뿐이다. 판정 기준은 상태가 아니라
 // ORDER_RELEASE 원장 건수다 — ProcessOrderCancellation은 no-op일 때도 성공한다.
+// SetMaxOpenConns(20)의 이유: 이 테스트는 같은 주문에 CancelOrder 100개를 동시에
+// 부른다. 각 호출은 트랜잭션을 커밋할 때까지 연결 하나를 점유하고, 하니스의
+// worker(10ms 주기 폴링)·outbox writer(5ms 주기 flush)도 같은 db를 쓴다.
+// openServiceIntegrationDB가 SetMaxOpenConns를 부르지 않아 풀이 무제한이면,
+// 이 순간 연결 수요가 공유 테스트 DB의 max_connections(로컬·CI 기본 100)를 넘어
+// 일부 CancelOrder의 BeginTx가 연결 획득에서 그대로 실패한다 — SQL을 시도하기도
+// 전이라 gorm 쿼리 로거도 그 실패를 보지 못하고, 예전에는 테스트가 그 에러를
+// 버려(errs 수집 없이 ids만 채움) "goroutine N가 다른 command를 받았다"는 엉뚱한
+// 메시지로만 드러났다. 20은 max_connections=100보다 충분히 낮아 이 테스트 자신의
+// 동시 요청만으로 한도를 넘지 않는다. concurrency(100)와 max_connections은 계약이니
+// 낮추거나 올리지 않는다 — 이 테스트의 풀만 좁힌다.
 func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T) {
 	db := openServiceIntegrationDB(t)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(20)
 	userID := serviceTestUserID(43)
 	defer cleanupServiceUsers(t, db, userID)
 
@@ -516,6 +530,7 @@ func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T)
 
 	const concurrency = 100
 	ids := make([]uint64, concurrency)
+	errs := make([]error, concurrency)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := 0; i < concurrency; i++ {
@@ -524,6 +539,7 @@ func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T)
 			defer wg.Done()
 			<-start
 			result, err := harness.orderService.CancelOrder(CancelOrderInput{UserID: userID, OrderID: order.ID})
+			errs[i] = err
 			if err == nil {
 				ids[i] = result.CommandID
 			}
@@ -531,6 +547,12 @@ func TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce(t *testing.T)
 	}
 	close(start)
 	wg.Wait()
+
+	// 인프라 오류(예: 연결 획득 실패)를 먼저 확인한다 — 그러지 않으면 "goroutine
+	// N가 다른 command를 받았다"는 엉뚱한 메시지 뒤에 실제 원인이 숨는다.
+	for i, err := range errs {
+		require.NoError(t, err, "goroutine %d CancelOrder", i)
+	}
 
 	require.NotZero(t, ids[0])
 	defer cleanupServiceCancelCommands(t, db, ids[0])

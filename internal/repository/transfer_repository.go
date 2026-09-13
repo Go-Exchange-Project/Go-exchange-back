@@ -95,14 +95,34 @@ func (r *TransferRepository) SetHoldJournal(id uint, journalID uint) error {
 
 // SetDispatched는 외부 제출이 끝난 요청을 RECEIVED에서 PROCESSING으로 옮긴다.
 // WHERE에 status를 넣어 이미 확정된 요청을 되돌리지 못하게 한다.
-func (r *TransferRepository) SetDispatched(id uint, externalRef string) error {
+//
+// nextCheckAt은 첫 조회 시각이다(호출자가 pollBaseInterval로 계산해 넘긴다 —
+// 이 패키지는 service 패키지의 상수를 참조할 수 없다). check_attempts를 0으로
+// 초기화해, 제출 재시도 횟수가 조회 백오프로 그대로 이어지지 않게 한다.
+func (r *TransferRepository) SetDispatched(id uint, externalRef string, nextCheckAt time.Time) error {
 	return requireRowsAffected(r.DB.Model(&model.TransferRequest{}).
 		Where("id = ? AND status = ?", id, model.TransferStatusReceived).
 		Updates(map[string]interface{}{
-			"status":       model.TransferStatusProcessing,
-			"external_ref": externalRef,
-			"updated_at":   time.Now().UTC(),
+			"status":         model.TransferStatusProcessing,
+			"external_ref":   externalRef,
+			"next_check_at":  nextCheckAt,
+			"check_attempts": 0,
+			"updated_at":     time.Now().UTC(),
 		}), "transfer dispatch update")
+}
+
+// AdvanceDispatchSchedule은 RECEIVED 요청의 제출(dispatch) 재시도를 뒤로
+// 미룬다. UpdatePollSchedule과 다른 메서드로 두는 이유: 그것은 status =
+// 'PROCESSING'만 갱신하고 last_checked_at(외부 상태를 조회한 시각)도 함께
+// 쓴다 — 제출 시도는 조회가 아니므로 그 열을 건드리지 않는다.
+func (r *TransferRepository) AdvanceDispatchSchedule(id uint, nextCheckAt time.Time, attempts int) error {
+	return requireRowsAffected(r.DB.Model(&model.TransferRequest{}).
+		Where("id = ? AND status = ?", id, model.TransferStatusReceived).
+		Updates(map[string]interface{}{
+			"next_check_at":  nextCheckAt,
+			"check_attempts": attempts,
+			"updated_at":     time.Now().UTC(),
+		}), "transfer dispatch schedule update")
 }
 
 // InsertEventIfAbsent는 외부에서 알게 된 사실을 기록한다. created가 false면
@@ -130,7 +150,10 @@ func (r *TransferRepository) InsertEventIfAbsent(event *model.TransferStatusEven
 // review 2열·next_check_at을 한 번에 바꾸고 WHERE status = 'PROCESSING'을 건다 —
 // 그것이 확정을 "한 번만" 성공하게 만든다. journalID가 nil이면(입금 실패처럼
 // 분개가 없는 경우) resolution_journal_id는 NULL로 남는다.
-func (r *TransferRepository) ConfirmTerminal(id uint, status model.TransferStatus, journalID *uint) error {
+//
+// failureReason은 FAILURE 확정에서만 의미 있는 값이 온다 — SUCCESS 확정은
+// 호출자가 항상 빈 문자열을 넘긴다.
+func (r *TransferRepository) ConfirmTerminal(id uint, status model.TransferStatus, journalID *uint, failureReason string) error {
 	return requireRowsAffected(r.DB.Model(&model.TransferRequest{}).
 		Where("id = ? AND status = ?", id, model.TransferStatusProcessing).
 		Updates(map[string]interface{}{
@@ -139,6 +162,7 @@ func (r *TransferRepository) ConfirmTerminal(id uint, status model.TransferStatu
 			"review_required_at":    nil,
 			"review_reason":         nil,
 			"next_check_at":         nil,
+			"failure_reason":        failureReason,
 			"updated_at":            time.Now().UTC(),
 		}), "transfer confirm update")
 }
@@ -193,6 +217,13 @@ func (r *TransferRepository) ListByUser(userID uint, limit int) ([]model.Transfe
 
 // DueForCheck는 상태 조회 대상을 고른다. RECEIVED(제출 재시도 대상)와
 // PROCESSING(상태 조회 대상)을 함께 돌려준다 — worker가 둘을 모두 처리한다.
+//
+// RECEIVED도 PROCESSING과 똑같이 next_check_at으로 게이트한다. 그러지 않으면
+// 영구 제출 실패 요청들이 매 틱 배치를 채우고 매번 재제출되며, 뒤의
+// RECEIVED·PROCESSING이 굶는다. 정렬은 next_check_at을 우선하고(NULL은 아직
+// 한 번도 시도되지 않았다는 뜻이라 가장 먼저), id를 다음으로 한다 — 오래
+// 기다린 것부터 처리해야 특정 행이 영구히 뒤로 밀리지 않는다. id만으로
+// 정렬하면 낮은 id의 영구 실패 행이 항상 배치 앞자리를 차지한다.
 func (r *TransferRepository) DueForCheck(now time.Time, limit int) ([]model.TransferRequest, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("limit must be greater than zero")
@@ -200,9 +231,9 @@ func (r *TransferRepository) DueForCheck(now time.Time, limit int) ([]model.Tran
 
 	var requests []model.TransferRequest
 	err := r.DB.
-		Where("status = ? OR (status = ? AND (next_check_at IS NULL OR next_check_at <= ?))",
+		Where("status IN (?, ?) AND (next_check_at IS NULL OR next_check_at <= ?)",
 			model.TransferStatusReceived, model.TransferStatusProcessing, now).
-		Order("id ASC").
+		Order("next_check_at ASC NULLS FIRST, id ASC").
 		Limit(limit).
 		Find(&requests).Error
 	return requests, err

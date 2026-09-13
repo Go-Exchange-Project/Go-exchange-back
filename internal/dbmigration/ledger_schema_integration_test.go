@@ -21,17 +21,46 @@ import (
 func TestLedgerSchemaIntegration(t *testing.T) {
 	db := testdb.OpenIntegrationDB(t)
 
+	// 이 테스트는 검증을 위해 transfer_requests·transfer_status_events에 실제
+	// 행을 심는다. 넣은 id는 여기 모아 뒀다가 끝에서 지운다 — 안 지우면
+	// 공유 테스트 DB에 계속 쌓이고, next_check_at이 NULL인 RECEIVED 행은
+	// DueForCheck 전역 스캔에서 항상 즉시 due로 취급돼 그 스캔을 검증하는
+	// 다른 테스트를 오염시킨다. cleanup은 첫 INSERT 전에 등록한다 — 그 뒤
+	// 어디서 실패해도 여기까지 심은 행은 지워진다.
+	//
+	// hold_journal_id가 가리키는 분개(journal_entries)는 지우지 않는다 —
+	// 자산별 합이 0인 분개라 검산을 오염시키지 않는다.
+	var insertedTransferRequestIDs []uint
+	t.Cleanup(func() {
+		if len(insertedTransferRequestIDs) == 0 {
+			return
+		}
+		require.NoError(t, db.Exec(
+			`DELETE FROM transfer_status_events WHERE transfer_request_id IN (?)`,
+			insertedTransferRequestIDs).Error)
+		require.NoError(t, db.Exec(
+			`DELETE FROM transfer_requests WHERE id IN (?)`,
+			insertedTransferRequestIDs).Error)
+	})
+	trackTransferRequest := func(id uint) {
+		if id != 0 {
+			insertedTransferRequestIDs = append(insertedTransferRequestIDs, id)
+		}
+	}
+
 	t.Run("허용값 밖 transfer status는 거부된다", func(t *testing.T) {
-		err := insertTransferRequest(db, transferRow{
+		id, err := insertTransferRequest(db, transferRow{
 			status:    "PROCESSNG", // 오타. 이런 값이 들어가면 어느 분기에도 걸리지 않는다
 			direction: "DEPOSIT",
 			key:       uniqueKey("status"),
 		})
+		trackTransferRequest(id)
 		require.Error(t, err, "허용값 밖 status가 통과했다")
 	})
 
 	t.Run("허용값 밖 event outcome은 거부된다", func(t *testing.T) {
 		requestID := mustInsertDeposit(t, db, uniqueKey("outcome-parent"))
+		trackTransferRequest(requestID)
 
 		err := db.Exec(`
 			INSERT INTO transfer_status_events (transfer_request_id, source, event_key, outcome, received_at)
@@ -43,17 +72,19 @@ func TestLedgerSchemaIntegration(t *testing.T) {
 	t.Run("입금은 hold_journal_id를 가질 수 없다", func(t *testing.T) {
 		journalID := mustInsertJournal(t, db, uniqueKey("deposit-hold"))
 
-		err := insertTransferRequest(db, transferRow{
+		id, err := insertTransferRequest(db, transferRow{
 			status:    "RECEIVED",
 			direction: "DEPOSIT",
 			key:       uniqueKey("deposit-hold"),
 			holdID:    &journalID,
 		})
+		trackTransferRequest(id)
 		require.Error(t, err, "입금에 잠금 분개가 붙었다")
 	})
 
 	t.Run("같은 event_key 두 번째 INSERT는 0행이다", func(t *testing.T) {
 		requestID := mustInsertDeposit(t, db, uniqueKey("dup-parent"))
+		trackTransferRequest(requestID)
 		eventKey := uniqueKey("dup-event")
 
 		insert := func() int64 {
@@ -86,8 +117,8 @@ func TestLedgerSchemaIntegration(t *testing.T) {
 	// 통과·실패해야 "출금을 만들 수 있으면서 잠금 없는 출금은 못 만든다"가 성립한다.
 	t.Run("출금 잠금은 커밋 시점에만 검사된다", func(t *testing.T) {
 		t.Run("트랜잭션 안에서 나중에 채우면 통과한다", func(t *testing.T) {
+			var requestID uint
 			err := db.Transaction(func(tx *gorm.DB) error {
-				var requestID uint
 				if err := tx.Raw(`
 					INSERT INTO transfer_requests
 						(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
@@ -103,6 +134,7 @@ func TestLedgerSchemaIntegration(t *testing.T) {
 				return tx.Exec(`UPDATE transfer_requests SET hold_journal_id = ? WHERE id = ?`,
 					journalID, requestID).Error
 			})
+			trackTransferRequest(requestID)
 			require.NoError(t, err, "출금 요청을 만들 수 없다 — 즉시 CHECK가 남아 있다")
 		})
 
@@ -161,32 +193,40 @@ func TestLedgerSchemaIntegration(t *testing.T) {
 		})
 
 		t.Run("둘 다 있으면 통과한다", func(t *testing.T) {
-			err := db.Exec(`
+			var requestID uint
+			err := db.Raw(`
 				INSERT INTO transfer_requests
 					(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
 					 status, client_request_key, check_attempts, review_required_at,
 					 review_reason, failure_reason, created_at, updated_at)
 				VALUES (1, 'DEPOSIT', 'BANK', 'KRW', 1000, 0, 'KRW', 'RECEIVED', ?, 0,
-					 now(), 'EXTERNAL_UNKNOWN', '', now(), now())`, uniqueKey("review-both")).Error
+					 now(), 'EXTERNAL_UNKNOWN', '', now(), now())
+				RETURNING id`, uniqueKey("review-both")).Scan(&requestID).Error
+			trackTransferRequest(requestID)
 			require.NoError(t, err, "정상 조합이 막혔다")
 		})
 	})
 
 	t.Run("external_ref는 접수 중에만 비어 있을 수 있다", func(t *testing.T) {
 		t.Run("RECEIVED는 NULL이 여러 건이어도 된다", func(t *testing.T) {
-			require.NoError(t, insertTransferRequest(db, transferRow{
+			id1, err1 := insertTransferRequest(db, transferRow{
 				status: "RECEIVED", direction: "DEPOSIT", key: uniqueKey("null-ref-1"),
-			}))
+			})
+			trackTransferRequest(id1)
+			require.NoError(t, err1)
 			// 부분 유니크 인덱스가 아니면 두 번째 NULL에서 막힌다.
-			require.NoError(t, insertTransferRequest(db, transferRow{
+			id2, err2 := insertTransferRequest(db, transferRow{
 				status: "RECEIVED", direction: "DEPOSIT", key: uniqueKey("null-ref-2"),
-			}))
+			})
+			trackTransferRequest(id2)
+			require.NoError(t, err2)
 		})
 
 		t.Run("PROCESSING은 external_ref가 있어야 한다", func(t *testing.T) {
-			err := insertTransferRequest(db, transferRow{
+			id, err := insertTransferRequest(db, transferRow{
 				status: "PROCESSING", direction: "DEPOSIT", key: uniqueKey("no-ref"),
 			})
+			trackTransferRequest(id)
 			require.Error(t, err, "외부 거래번호 없이 제출 상태가 됐다")
 		})
 	})
@@ -199,14 +239,17 @@ type transferRow struct {
 	holdID    *uint
 }
 
-func insertTransferRequest(db *gorm.DB, row transferRow) error {
-	return db.Exec(`
+func insertTransferRequest(db *gorm.DB, row transferRow) (uint, error) {
+	var id uint
+	err := db.Raw(`
 		INSERT INTO transfer_requests
 			(user_id, direction, rail, asset, amount, fee_amount, fee_asset,
 			 status, client_request_key, hold_journal_id, check_attempts,
 			 review_reason, failure_reason, created_at, updated_at)
-		VALUES (1, ?, 'BANK', 'KRW', 1000, 0, 'KRW', ?, ?, ?, 0, NULL, '', now(), now())`,
-		row.direction, row.status, row.key, row.holdID).Error
+		VALUES (1, ?, 'BANK', 'KRW', 1000, 0, 'KRW', ?, ?, ?, 0, NULL, '', now(), now())
+		RETURNING id`,
+		row.direction, row.status, row.key, row.holdID).Scan(&id).Error
+	return id, err
 }
 
 func mustInsertDeposit(t *testing.T, db *gorm.DB, key string) uint {

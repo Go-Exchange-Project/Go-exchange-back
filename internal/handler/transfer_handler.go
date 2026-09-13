@@ -141,31 +141,36 @@ func (h *TransferHandler) ReceiveCallback(c *gin.Context) {
 // Delayed는 그중 review_required_at의 존재 여부만 불리언으로 알려준다 —
 // PROCESSING 상태에서 "처리 지연" 문구를 보여줄지 판단하는 데만 쓰고, 시각이나
 // 사유는 노출하지 않는다.
+//
+// FailureReason은 review_reason과 다르다 — 실패 확정 시 결정된, 사용자에게
+// 보여줘도 되는 사유다(§8.7과 달리 운영자 전용 정보가 아니다).
 type TransferResponse struct {
-	ID          uint      `json:"id"`
-	Direction   string    `json:"direction"`
-	Rail        string    `json:"rail"`
-	Asset       string    `json:"asset"`
-	Amount      string    `json:"amount"`
-	FeeAmount   string    `json:"fee_amount"`
-	Status      string    `json:"status"`
-	ExternalRef *string   `json:"external_ref"`
-	Delayed     bool      `json:"delayed"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            uint      `json:"id"`
+	Direction     string    `json:"direction"`
+	Rail          string    `json:"rail"`
+	Asset         string    `json:"asset"`
+	Amount        string    `json:"amount"`
+	FeeAmount     string    `json:"fee_amount"`
+	Status        string    `json:"status"`
+	ExternalRef   *string   `json:"external_ref"`
+	Delayed       bool      `json:"delayed"`
+	FailureReason string    `json:"failure_reason"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func transferResponse(request model.TransferRequest) TransferResponse {
 	return TransferResponse{
-		ID:          request.ID,
-		Direction:   string(request.Direction),
-		Rail:        string(request.Rail),
-		Asset:       request.Asset,
-		Amount:      request.Amount.String(),
-		FeeAmount:   request.FeeAmount.String(),
-		Status:      string(request.Status),
-		ExternalRef: request.ExternalRef,
-		Delayed:     request.Status == model.TransferStatusProcessing && request.ReviewRequiredAt != nil,
-		CreatedAt:   request.CreatedAt,
+		ID:            request.ID,
+		Direction:     string(request.Direction),
+		Rail:          string(request.Rail),
+		Asset:         request.Asset,
+		Amount:        request.Amount.String(),
+		FeeAmount:     request.FeeAmount.String(),
+		Status:        string(request.Status),
+		ExternalRef:   request.ExternalRef,
+		Delayed:       request.Status == model.TransferStatusProcessing && request.ReviewRequiredAt != nil,
+		FailureReason: request.FailureReason,
+		CreatedAt:     request.CreatedAt,
 	}
 }
 

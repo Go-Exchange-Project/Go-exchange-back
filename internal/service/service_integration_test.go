@@ -71,6 +71,23 @@ func cleanupServiceUsers(t *testing.T, db *gorm.DB, userIDs ...uint) {
 	}
 
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Order{}).Error)
+
+	// transfer 테스트도 이 헬퍼로 정리한다. 이벤트가 요청을 참조하므로
+	// transfer_status_events를 먼저 지운다 — 순서를 바꾸면 FK 위반이다.
+	// hold_journal_id가 가리키는 분개(journal_entries)는 남겨 둔다 — 자산별
+	// 합이 0인 분개라 검산(CheckUnbalancedJournals 등)을 오염시키지 않는다.
+	var transferRequests []model.TransferRequest
+	require.NoError(t, db.Where("user_id IN ?", userIDs).Find(&transferRequests).Error)
+	transferRequestIDs := make([]uint, 0, len(transferRequests))
+	for _, transferRequest := range transferRequests {
+		transferRequestIDs = append(transferRequestIDs, transferRequest.ID)
+	}
+	if len(transferRequestIDs) > 0 {
+		require.NoError(t, db.Where("transfer_request_id IN ?", transferRequestIDs).
+			Delete(&model.TransferStatusEvent{}).Error)
+	}
+	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.TransferRequest{}).Error)
+
 	require.NoError(t, db.Where("id IN ?", userIDs).Delete(&model.User{}).Error)
 }
 

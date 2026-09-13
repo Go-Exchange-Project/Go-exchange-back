@@ -7,6 +7,7 @@ import (
 
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/repository"
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -345,6 +346,7 @@ func TestFailureCallbackRefundsLockedFunds(t *testing.T) {
 		TransferRequestID: request.ID, Source: model.TransferEventSourceCallback,
 		EventKey: fmt.Sprintf("callback:%s:t7-evt-%d", request.Rail, request.ID),
 		Outcome:  model.TransferOutcomeFailure,
+		Payload:  map[string]any{"reason": "ACCOUNT_FROZEN"},
 	}))
 
 	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(200000), decimal.Zero)
@@ -353,6 +355,75 @@ func TestFailureCallbackRefundsLockedFunds(t *testing.T) {
 	require.NoError(t, db.First(&final, request.ID).Error)
 	assert.Equal(t, model.TransferStatusFailed, final.Status)
 	require.NotNil(t, final.ResolutionJournalID, "출금 실패는 돈을 푼 분개가 있어야 한다")
+	// item 4: 콜백 경로의 FAILURE 확정도 payload["reason"]을 failure_reason에
+	// 저장해야 한다.
+	assert.Equal(t, "ACCOUNT_FROZEN", final.FailureReason)
+}
+
+// TestPollFailureRecordsFailureReason은 item 4다. 조회(poll) 경로로 들어온
+// FAILURE도 콜백 경로와 똑같이 payload["reason"]을 failure_reason에 저장해야
+// 한다 — 콜백만 저장하면 조회로 실패를 알게 되는 경우 사유가 빈 채로 남는다.
+func TestPollFailureRecordsFailureReason(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(1080)
+	defer cleanupServiceUsers(t, db, userID)
+
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(100000))
+
+	processor := NewFakeTransferProcessor()
+	transferSvc := NewTransferService(db, processor)
+
+	request, err := transferSvc.RequestWithdrawal(WithdrawalInput{
+		UserID: userID, Rail: model.TransferRailBank, Asset: model.KRWAssetSymbol,
+		Amount: "100000", ClientRequestKey: fmt.Sprintf("t-failreason-poll-%d", userID),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, request.ExternalRef)
+
+	require.NoError(t, transferSvc.ResolveTransfer(ResolveInput{
+		TransferRequestID: request.ID, Source: model.TransferEventSourcePoll,
+		EventKey: fmt.Sprintf("poll:%d:1", request.ID),
+		Outcome:  model.TransferOutcomeFailure,
+		Payload:  map[string]any{"reason": "INSUFFICIENT_EXTERNAL_BALANCE"},
+	}))
+
+	var final model.TransferRequest
+	require.NoError(t, db.First(&final, request.ID).Error)
+	assert.Equal(t, model.TransferStatusFailed, final.Status)
+	assert.Equal(t, "INSUFFICIENT_EXTERNAL_BALANCE", final.FailureReason)
+}
+
+// TestSuccessConfirmationNeverWritesFailureReason은 item 4다. SUCCESS 확정은
+// payload에 "reason" 키가 섞여 있어도 failure_reason을 절대 쓰지 않아야 한다 —
+// 성공한 이전이 실패 사유를 갖는 것은 말이 안 된다.
+func TestSuccessConfirmationNeverWritesFailureReason(t *testing.T) {
+	db := openServiceIntegrationDB(t)
+	userID := serviceTestUserID(1081)
+	defer cleanupServiceUsers(t, db, userID)
+
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(100000))
+
+	processor := NewFakeTransferProcessor()
+	transferSvc := NewTransferService(db, processor)
+
+	request, err := transferSvc.RequestWithdrawal(WithdrawalInput{
+		UserID: userID, Rail: model.TransferRailBank, Asset: model.KRWAssetSymbol,
+		Amount: "100000", ClientRequestKey: fmt.Sprintf("t-failreason-success-%d", userID),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, request.ExternalRef)
+
+	require.NoError(t, transferSvc.ResolveTransfer(ResolveInput{
+		TransferRequestID: request.ID, Source: model.TransferEventSourcePoll,
+		EventKey: fmt.Sprintf("poll:%d:1", request.ID),
+		Outcome:  model.TransferOutcomeSuccess,
+		Payload:  map[string]any{"reason": "should-never-be-stored"},
+	}))
+
+	var final model.TransferRequest
+	require.NoError(t, db.First(&final, request.ID).Error)
+	assert.Equal(t, model.TransferStatusCompleted, final.Status)
+	assert.Empty(t, final.FailureReason)
 }
 
 // TestReversalNetsToZeroPerAccount는 T8이다. LedgerService.Reverse는 Task 1·2에서
@@ -555,4 +626,175 @@ func TestStatusCheckFailureAdvancesScheduleThenFlagsReview(t *testing.T) {
 	assert.True(t, afterSecond.ReviewRequiredAt.Equal(*afterThird.ReviewRequiredAt),
 		"review_required_at이 최초 표시 시각에서 밀렸다: %s -> %s",
 		afterSecond.ReviewRequiredAt, afterThird.ReviewRequiredAt)
+}
+
+// failingSubmitTransferProcessor는 Submit이 항상 실패하는 처리기다 — 외부 제출이
+// 영구적으로 거절되는 상황(예: 계좌 정지)을 재현한다. GetTransferStatus는 이
+// 테스트가 쓰지 않으므로 FakeTransferProcessor에 그대로 위임한다.
+type failingSubmitTransferProcessor struct {
+	*FakeTransferProcessor
+}
+
+func (p *failingSubmitTransferProcessor) Submit(string, model.TransferRequest) (string, error) {
+	return "", fmt.Errorf("external submit permanently failing")
+}
+
+// TestDueForCheckSchedulesAroundPermanentlyFailingLowIDRequests는 item 2의
+// 스타베이션 회귀다. next_check_at으로 RECEIVED를 게이트하기 전에는 DueForCheck가
+// "status = RECEIVED OR (...)"·"ORDER BY id"였다 — id가 낮은 영구 제출 실패
+// 요청들이 매 틱 배치를 가득 채워 뒤의 다른 요청이 굶었다.
+//
+// 이 테스트는 실제 DueForCheck SQL·LIMIT·정렬을 그대로 쓴다(poller.RunOnce를
+// 두 번 부른다). 결과를 사후에 걸러내는 데코레이터를 쓰면 LIMIT을 남의 행이
+// 먼저 차지해도 테스트가 조용히 다른 것을 검증하게 된다.
+//
+// testdb.OpenIsolatedSchemaDB로 전용 임시 스키마를 쓴다 — 공유 스키마에는 이
+// 테스트가 만들지 않은, 정리되지 않는 transfer_requests 행이 있을 수 있고
+// (예: TestLedgerSchemaIntegration의 제약 검증 픽스처), next_check_at이 NULL인
+// 행은 DueForCheck에서 항상 즉시 due로 취급돼 이 테스트의 배치를 나눠 가진다.
+// 격리된 스키마에서는 그런 행이 존재할 수 없으므로, 아래 전제 단언(픽스처
+// 생성 전 due 0건)은 항상 참이어야 한다 — 실패하면 격리 자체가 깨졌다는
+// 뜻이다. 이 테스트를 파일의 어디에 두든(다른 테스트보다 앞이든 뒤든, 심지어
+// -shuffle=on으로 실행 순서가 섞여도) 결과가 같아야 한다 — 격리된 스키마는
+// 다른 테스트의 실행 순서·타이밍과 무관하기 때문이다.
+func TestDueForCheckSchedulesAroundPermanentlyFailingLowIDRequests(t *testing.T) {
+	db := testdb.OpenIsolatedSchemaDB(t)
+	repo := repository.NewTransferRepository(db)
+
+	createdAt := time.Now()
+	dueAt := createdAt.Add(pollBaseInterval)
+	precheck, err := repo.DueForCheck(dueAt, 1_000_000)
+	require.NoError(t, err)
+	require.Empty(t, precheck,
+		"사전 조건 위반: 격리된 스키마인데 픽스처를 만들기도 전에"+
+			" DueForCheck(now+pollBaseInterval, 큰 값)가 %d건을 돌려줬다 — 격리 자체가"+
+			" 깨졌다는 뜻이다.", len(precheck))
+
+	userID := serviceTestUserID(1070)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
+
+	processor := &failingSubmitTransferProcessor{FakeTransferProcessor: NewFakeTransferProcessor()}
+	transferSvc := NewTransferService(db, processor)
+	now := createdAt
+	transferSvc.Now = func() time.Time { return now }
+
+	const failingCount = 3
+	failingIDs := make([]uint, 0, failingCount)
+	for i := 0; i < failingCount; i++ {
+		request, reqErr := transferSvc.RequestWithdrawal(WithdrawalInput{
+			UserID: userID, Rail: model.TransferRailBank, Asset: model.KRWAssetSymbol,
+			Amount: "100", ClientRequestKey: fmt.Sprintf("t-starve-low-%d-%d", userID, i),
+		})
+		require.NoError(t, reqErr)
+		require.Equal(t, model.TransferStatusReceived, request.Status)
+		require.EqualValues(t, 1, request.CheckAttempts)
+		failingIDs = append(failingIDs, request.ID)
+	}
+
+	higherIDRequest, err := transferSvc.RequestWithdrawal(WithdrawalInput{
+		UserID: userID, Rail: model.TransferRailBank, Asset: model.KRWAssetSymbol,
+		Amount: "100", ClientRequestKey: fmt.Sprintf("t-starve-high-%d", userID),
+	})
+	require.NoError(t, err)
+	require.Equal(t, model.TransferStatusReceived, higherIDRequest.Status)
+	for _, failingID := range failingIDs {
+		require.Less(t, failingID, higherIDRequest.ID, "픽스처 순서상 실패 요청들의 id가 더 낮아야 한다")
+	}
+
+	poller := &TransferStatusPoller{Transfers: repo, Service: transferSvc, Batch: failingCount}
+
+	// 접수 시점의 첫 제출 시도도 실패해 이미 next_check_at = now+10s(백오프 1회차)로
+	// 예약돼 있다. 그 시각으로 시계를 옮기면 N+1건이 모두 동시에 due가 된다 — id
+	// 말고는 이들을 가를 기준이 없다.
+	now = now.Add(pollBaseInterval)
+
+	// 1차 RunOnce: batch가 failingCount와 같으므로, id가 더 낮은 실패 요청
+	// 3건만 배치를 채우고 id가 더 높은 요청은 밀려난다(스타베이션 재현).
+	poller.RunOnce()
+
+	for _, failingID := range failingIDs {
+		var reloaded model.TransferRequest
+		require.NoError(t, db.First(&reloaded, failingID).Error)
+		assert.EqualValues(t, 2, reloaded.CheckAttempts, "1차 RunOnce에서 재시도됐어야 한다")
+		require.NotNil(t, reloaded.NextCheckAt)
+		assert.True(t, reloaded.NextCheckAt.After(now),
+			"실패 요청의 next_check_at이 전진하지 않았다 — 다음 틱에도 배치를 채운다")
+	}
+
+	var afterFirstRun model.TransferRequest
+	require.NoError(t, db.First(&afterFirstRun, higherIDRequest.ID).Error)
+	assert.EqualValues(t, 1, afterFirstRun.CheckAttempts,
+		"1차 RunOnce가 id 낮은 실패 요청들에 밀려 처리되지 않았어야 한다(스타베이션)")
+	require.NotNil(t, afterFirstRun.NextCheckAt)
+	assert.True(t, !afterFirstRun.NextCheckAt.After(now),
+		"id 높은 요청이 여전히 due 상태여야 다음 틱에서 처리될 수 있다")
+
+	// 2차 RunOnce: 시계는 그대로다(now를 옮기지 않는다). 실패 요청 3건은 방금
+	// next_check_at이 미래로 밀려 더 이상 due가 아니고, id 높은 요청만 여전히
+	// due다 — 배치에 자리가 남으므로 이번에는 처리된다.
+	poller.RunOnce()
+
+	for _, failingID := range failingIDs {
+		var reloaded model.TransferRequest
+		require.NoError(t, db.First(&reloaded, failingID).Error)
+		assert.EqualValues(t, 2, reloaded.CheckAttempts,
+			"2차 RunOnce에서 재제출되지 않았어야 한다 — next_check_at이 아직 미래다")
+	}
+
+	var afterSecondRun model.TransferRequest
+	require.NoError(t, db.First(&afterSecondRun, higherIDRequest.ID).Error)
+	assert.EqualValues(t, 2, afterSecondRun.CheckAttempts,
+		"id 높은 요청이 2차 RunOnce에서 처리됐어야 한다")
+}
+
+// TestSetDispatchedFirstCheckDueAtPollBaseIntervalBoundary는 item 2의 "첫 조회
+// 10초 경계" 테스트다. SetDispatched가 next_check_at을 제출 시각+pollBaseInterval로
+// 설정한 뒤, 그 경계 바로 앞에서는 아직 조회 대상이 아니고 경계에 도달해야
+// 비로소 조회 대상이 되는지 DueForCheck로 직접 확인한다. 위 스타베이션
+// 테스트와 같은 이유로 격리된 스키마를 쓴다.
+func TestSetDispatchedFirstCheckDueAtPollBaseIntervalBoundary(t *testing.T) {
+	db := testdb.OpenIsolatedSchemaDB(t)
+	userID := serviceTestUserID(1071)
+
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(100000))
+
+	processor := NewFakeTransferProcessor()
+	transferSvc := NewTransferService(db, processor)
+
+	dispatchAt := time.Now()
+	transferSvc.Now = func() time.Time { return dispatchAt }
+
+	request, err := transferSvc.RequestWithdrawal(WithdrawalInput{
+		UserID: userID, Rail: model.TransferRailBank, Asset: model.KRWAssetSymbol,
+		Amount: "100000", ClientRequestKey: fmt.Sprintf("t-boundary-%d", userID),
+	})
+	require.NoError(t, err)
+	require.Equal(t, model.TransferStatusProcessing, request.Status)
+	require.NotNil(t, request.NextCheckAt)
+	// timestamptz 컬럼은 마이크로초까지만 저장하므로, Go의 나노초 정밀도
+	// time.Now()와 DB에서 다시 읽은 값은 정확히 같지 않을 수 있다 — 1ms
+	// 허용 오차로 비교한다.
+	assert.WithinDuration(t, dispatchAt.Add(pollBaseInterval), *request.NextCheckAt, time.Millisecond,
+		"SetDispatched의 next_check_at이 제출 시각+pollBaseInterval이 아니다")
+
+	repo := repository.NewTransferRepository(db)
+
+	beforeBoundary, err := repo.DueForCheck(dispatchAt.Add(pollBaseInterval-time.Millisecond), 1_000_000)
+	require.NoError(t, err)
+	assert.False(t, containsTransferRequestID(beforeBoundary, request.ID),
+		"경계-1ms인데 이미 조회 대상이다")
+
+	atBoundary, err := repo.DueForCheck(dispatchAt.Add(pollBaseInterval), 1_000_000)
+	require.NoError(t, err)
+	assert.True(t, containsTransferRequestID(atBoundary, request.ID),
+		"경계 시각인데 아직 조회 대상이 아니다")
+}
+
+func containsTransferRequestID(requests []model.TransferRequest, id uint) bool {
+	for _, request := range requests {
+		if request.ID == id {
+			return true
+		}
+	}
+	return false
 }

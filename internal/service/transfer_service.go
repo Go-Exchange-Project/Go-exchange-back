@@ -171,6 +171,12 @@ func (s *TransferService) RequestWithdrawal(in WithdrawalInput) (*model.Transfer
 
 // Dispatch는 RECEIVED 요청을 외부로 제출한다. RECEIVED가 아니면 아무 일도 하지
 // 않는다 — 이미 제출됐거나 확정된 요청을 다시 제출하면 안 된다.
+//
+// 성공하면 next_check_at을 제출 시각 + pollBaseInterval로 설정하고
+// check_attempts를 0으로 초기화한다 — 조회 백오프가 제출 실패 횟수를 이어받지
+// 않게 한다. 실패하면 HandleDispatchFailure가 제출 재시도 일정을 뒤로 미룬다
+// — 그러지 않으면 poller가 매 틱마다 같은 요청을 재제출해 뒤의 다른 요청들이
+// 굶는다.
 func (s *TransferService) Dispatch(request model.TransferRequest) error {
 	if request.Status != model.TransferStatusReceived {
 		return nil
@@ -178,9 +184,35 @@ func (s *TransferService) Dispatch(request model.TransferRequest) error {
 	dispatchKey := fmt.Sprintf("transfer:%d", request.ID)
 	externalRef, err := s.Processor.Submit(dispatchKey, request)
 	if err != nil {
+		if scheduleErr := s.HandleDispatchFailure(request.ID); scheduleErr != nil {
+			return scheduleErr
+		}
 		return err
 	}
-	return s.Transfers.SetDispatched(request.ID, externalRef)
+	nextCheckAt := s.now().Add(pollBaseInterval)
+	return s.Transfers.SetDispatched(request.ID, externalRef, nextCheckAt)
+}
+
+// HandleDispatchFailure는 Submit(외부 제출) 시도가 실패했을 때 쓴다.
+// RecordObservation·HandleStatusCheckFailure와 같은 잠금 규율을 따른다: 잠근
+// 뒤 다시 읽은 상태가 RECEIVED가 아니면 그사이 다른 경로로 진행됐다는 뜻이므로
+// 아무것도 하지 않는다. 분개는 만들지 않는다 — 제출 실패가 돈을 움직이면
+// 안 된다.
+func (s *TransferService) HandleDispatchFailure(transferRequestID uint) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		transfers := s.Transfers.WithTx(tx)
+		request, err := transfers.LockByID(transferRequestID)
+		if err != nil {
+			return err
+		}
+		if request.Status != model.TransferStatusReceived {
+			return nil
+		}
+		now := s.now()
+		attempts := request.CheckAttempts + 1
+		nextCheckAt := now.Add(backoffInterval(attempts))
+		return transfers.AdvanceDispatchSchedule(request.ID, nextCheckAt, attempts)
+	})
 }
 
 // dispatchAndReload는 접수 직후(또는 재시도) 외부 제출을 시도한다. 실패해도
@@ -248,7 +280,7 @@ func (s *TransferService) ResolveTransfer(in ResolveInput) error {
 			return transfers.SetReviewRequired(request.ID, model.ReviewReasonTerminalBeforeDispatch, s.now())
 
 		case request.Status == model.TransferStatusProcessing:
-			return s.confirmTerminal(tx, transfers, request, in.Outcome)
+			return s.confirmTerminal(tx, transfers, request, in.Outcome, in.Payload)
 
 		case request.Status.IsTerminal() && matchesTerminalOutcome(request.Status, in.Outcome):
 			return nil // 같은 결과의 재관측. 사건만 남기고 확인 표시는 건드리지 않는다.
@@ -333,17 +365,34 @@ func matchesTerminalOutcome(status model.TransferStatus, outcome model.TransferO
 }
 
 // confirmTerminal은 분개를 만들고 §4.5의 단일 UPDATE로 확정한다.
-func (s *TransferService) confirmTerminal(tx *gorm.DB, transfers *repository.TransferRepository, request *model.TransferRequest, outcome model.TransferOutcome) error {
+//
+// failure_reason은 FAILURE에서만 채운다 — SUCCESS 확정에는 실패 사유가 있을 수
+// 없으므로 항상 빈 문자열을 넘긴다.
+func (s *TransferService) confirmTerminal(tx *gorm.DB, transfers *repository.TransferRepository, request *model.TransferRequest, outcome model.TransferOutcome, payload map[string]any) error {
 	journalID, err := s.recordConfirmationJournal(tx, request, outcome)
 	if err != nil {
 		return err
 	}
 
 	status := model.TransferStatusFailed
+	failureReason := ""
 	if outcome == model.TransferOutcomeSuccess {
 		status = model.TransferStatusCompleted
+	} else {
+		failureReason = failureReasonFromPayload(payload)
 	}
-	return transfers.ConfirmTerminal(request.ID, status, journalID)
+	return transfers.ConfirmTerminal(request.ID, status, journalID, failureReason)
+}
+
+// failureReasonFromPayload는 콜백·조회가 보낸 payload["reason"]에서 실패 사유를
+// 고른다. 문자열이 아니거나 없으면 빈 값이다 — 외부가 보낸 임의 값을 그대로
+// 신뢰하지 않고, 저장할 형태(문자열)가 아니면 버린다.
+func failureReasonFromPayload(payload map[string]any) string {
+	reason, ok := payload["reason"].(string)
+	if !ok {
+		return ""
+	}
+	return reason
 }
 
 // recordConfirmationJournal은 방향×결과 조합별로 §5.2~5.4의 전기를 만든다.
