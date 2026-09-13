@@ -110,14 +110,16 @@ Authorization: Bearer <token>
 X-GoExchange-Dev-Token: <local-dev-tools-token>
 Content-Type: application/json
 
-{"coin_symbol":"KRW","amount":"1000000"}
+{"coin_symbol":"KRW","amount":"1000000","request_key":"<재시도 식별 키, 1~128자>"}
 ```
 
-이 API는 호출자의 지갑만 생성하거나 증가시킵니다.
+같은 키로 다시 보내면 한 번만 지급됩니다.
+
+이 API는 호출자의 계정 잔액만 늘립니다.
 관리자 백오피스나 실제 입출금 기능 없이 로컬 E2E 주문 테스트를 하기 위한 개발용 경로입니다.
 기본값은 비활성화이며, 활성화하더라도 별도 dev token이 필요합니다.
 
-개발용 지갑 충전은 `DEV_FUND` ledger entry도 함께 기록합니다.
+개발용 지갑 충전은 DEV_MINT → USER_AVAILABLE 분개로 기록됩니다.
 따라서 로컬 테스트 중 발생한 잔고 변경도 추적할 수 있습니다.
 
 ## 시장 정책 설정
@@ -149,28 +151,14 @@ Content-Type: application/json
 `HALTED` 마켓은 `GET /markets/rules`에서 `trading_enabled=false`로 내려가며, 신규 매수/매도 주문은 conflict error로 거부됩니다.
 기존 주문 취소는 계속 허용해 사용자가 locked balance를 해제할 수 있습니다.
 
-## 지갑 원장
+## 원장
 
-`ledger_entries`는 지갑 잔고 변경과 같은 DB transaction 안에서 기록됩니다.
-현재 구조는 지갑 이벤트 원장입니다.
-
-각 row가 기록하는 값:
-
-- `user_id`, `coin_symbol`
-- `entry_type`: `DEV_FUND`, `ORDER_HOLD`, `ORDER_RELEASE`, `TRADE_SETTLEMENT`
-- `available_delta`, `locked_delta`
-- `available_balance_after`, `locked_balance_after`
-- `reference_type`, `reference_id`, 선택적인 `reference_key`
-
-현재 write point:
-
-- `POST /dev/wallets/fund`: available balance를 증가시키고 `DEV_FUND` 기록
-- `POST /orders`: available에서 locked로 이동시키고 `ORDER_HOLD` 기록
-- `DELETE /orders/:id`: 남은 locked를 available로 되돌리고 `ORDER_RELEASE` 기록
-- settlement 성공: buyer KRW, buyer coin, seller coin, seller KRW에 대해 총 4개의 `TRADE_SETTLEMENT` 기록
-
-중복 settlement는 기존 idempotent trade를 발견하면 지갑 변경 전에 반환되므로 ledger row를 추가로 쓰지 않습니다.
-실패한 settlement도 transaction rollback 때문에 ledger row를 남기지 않습니다.
+`wallets`/`ledger_entries`(지갑 이벤트 원장)는 migration 010에서 삭제됐습니다.
+잔고는 이제 복식부기 원장(`accounts`·`account_balances`·`journal_entries`·`postings`)의
+전기(posting) 합으로만 정의됩니다. 표를 여기 다시 옮기지 않습니다 — 자세한 계정
+종류·사건별 기록 예시는
+[2026-09-02 설계](docs/superpowers/specs/2026-09-02-double-entry-ledger-and-fake-transfers-design.md),
+전환 경과는 [docs/refactor/README.md](docs/refactor/README.md)를 참고하세요.
 
 ## 매칭 체결 이벤트 식별자
 
