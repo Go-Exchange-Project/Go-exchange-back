@@ -133,6 +133,40 @@ terminal은 **내구 기록으로 인계**해 온라인 복구가 가능하게 �
 > 두 측정 모두 **이전 번호와 성능을 비교하지 않는다.** 계약이 바뀌면 같은 이름의 지표가
 > 같은 것을 세지 않는다(35번의 취소 SLI 200 → 200|202가 그 예다). 새 기준선으로만 남긴다.
 
+### C(정확성 부채) — 단식부기 지갑 → 복식부기 원장 전환
+
+성능 축이 아니다. 잔액을 직접 저장하는 지갑(`wallets`/`ledger_entries`) 모델을 복식부기 원장
+(`accounts`/`account_balances`/`journal_entries`/`postings`)으로 바꿔, 잔액이 전기(posting)의
+합으로만 정의되게 했다. 계획·설계는
+[2026-09-03 계획](superpowers/plans/2026-09-03-double-entry-ledger-and-fake-transfers.md) ·
+[2026-09-02 설계](superpowers/specs/2026-09-02-double-entry-ledger-and-fake-transfers-design.md),
+현황판은 [리팩토링 로그 5차](refactor/README.md#5차-리팩토링--단식부기-지갑--복식부기-원장-전환-2026-09-03-착수)에 있다.
+
+- Task 1~5: 원장 표 신설, 기존 입출금·주문 잠금·정산·평균매수가 경로를 전부 원장 경유로
+  전환, `wallets`/`ledger_entries` 완전 삭제. 검산을 원장 전용 4종으로 교체.
+- Task 6~7: 가짜 입출금 확정(`ResolveTransfer`)·미확정 관측(`RecordObservation`)·조회
+  worker·역분개, 프런트 `/assets` 페이지.
+- **이번 작업에 GCP·처리량 측정은 없다.** 이 전환의 증거는 통합 테스트(CP1~CP3 검토)와
+  `-race` 결과다 — `go test -p 1 ./... -count=1`, `go test -p 1 -shuffle=on ./internal/service/ -count=1`,
+  `go test -race -p 1 ./... -count=1`(Linux 컨테이너, migration 011 포함) 모두 전부 PASS,
+  T6 동시성 장벽(`pg_blocking_pids`) 포함. `TestIntegrationCancelCommandConcurrentRequestsReleaseHoldOnce`는
+  동시성 100과 `max_connections=100`의 충돌로 인한 연결 거절 때문에 이 컨테이너에서
+  불안정했다(원장 전환 이전 커밋 d0cb736에서도 재현 — 이 전환과 무관한 기존 결함). 이
+  테스트의 연결 풀만 `SetMaxOpenConns(20)`으로 좁히고 삼키던 에러를 전부 수집해 먼저
+  확인하도록 고쳐 `-count=10` 10/10 PASS를 확인했다 — 프로덕션 cancel 코드는 그대로다.
+  자세한 근거·수정 내용은
+  [리팩토링 로그 5차](refactor/README.md#5차-리팩토링--단식부기-지갑--복식부기-원장-전환-2026-09-03-착수)
+  참고.
+- **poller 인덱스(migration 011)**: 009의 `transfer_requests_next_check_at_idx`가
+  `DueForCheck`의 실제 조건(RECEIVED 포함)·정렬을 받치지 못해 교체했다. `EXPLAIN
+  (ANALYZE, BUFFERS)`로 `Index Scan using transfer_requests_due_poll_idx`·Sort 없음을
+  확인했다 — 자세한 내용은 위 리팩토링 로그 참고.
+- **OrderForm·TransferForm 멱등키**: OrderForm이 202 PENDING(성공 응답)을 키 폐기
+  대상으로 잘못 다루던 버그를 고쳤고(재시도 시 새 키로 중복 주문 생성 위험), 5xx·4xx·
+  408·429 분기별 규칙을 표로 정리했다. TransferForm은 `crypto.randomUUID` 호출을
+  `try` 밖에서 하던 결함(대체 로직 없는 환경에서 `isSubmitting`이 안 풀림)을 고쳤다.
+  키 생성기는 `src/lib/idempotencyKey.ts`로 공유한다.
+
 ---
 
 ## 3. 현재 구성에서 검증된 계약 충족 결과

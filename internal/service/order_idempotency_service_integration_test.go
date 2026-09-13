@@ -29,12 +29,7 @@ func (e *countingAcceptanceEngine) TrySubmitOrder(order *matching.Order, within 
 
 func seedIdemBuyerWallet(t *testing.T, db *gorm.DB, userID uint, krw int64) {
 	t.Helper()
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: userID, CoinSymbol: model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(krw),
-		AvailableBalance: decimal.NewFromInt(krw),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(krw))
 }
 
 func idemOrderInput(userID uint, key, amount string) CreateOrderInput {
@@ -47,8 +42,9 @@ func idemOrderInput(userID uint, key, amount string) CreateOrderInput {
 func countHoldEntries(t *testing.T, db *gorm.DB, orderID uint) int64 {
 	t.Helper()
 	var count int64
-	require.NoError(t, db.Model(&model.LedgerEntry{}).
-		Where("reference_id = ? AND entry_type = ?", orderID, model.LedgerEntryTypeOrderHold).
+	require.NoError(t, db.Model(&model.JournalEntry{}).
+		Where("reference_id = ? AND reference_type = ? AND event_type = ?",
+			orderID, model.JournalReferenceOrder, model.JournalEventOrderHold).
 		Count(&count).Error)
 	return count
 }
@@ -62,7 +58,7 @@ func TestIntegrationCreateOrderRetryWithSameKeyReplays(t *testing.T) {
 	seedIdemBuyerWallet(t, db, userID, 10000)
 
 	engine := &countingAcceptanceEngine{fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true}}
-	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+	orderService := NewOrderService(repository.NewOrderRepository(db), engine)
 
 	first, err := orderService.CreateOrder(idemOrderInput(userID, "retry-key", "1"))
 	require.NoError(t, err)
@@ -91,7 +87,7 @@ func TestIntegrationCreateOrderSameKeyDifferentRequestConflicts(t *testing.T) {
 	seedIdemBuyerWallet(t, db, userID, 10000)
 
 	engine := &countingAcceptanceEngine{fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true}}
-	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), engine)
+	orderService := NewOrderService(repository.NewOrderRepository(db), engine)
 
 	first, err := orderService.CreateOrder(idemOrderInput(userID, "conflict-key", "1"))
 	require.NoError(t, err)
@@ -118,16 +114,13 @@ func TestIntegrationCreateOrderFailedValidationDoesNotConsumeKey(t *testing.T) {
 	seedIdemBuyerWallet(t, db, userID, 10)
 
 	engine := &countingAcceptanceEngine{fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true}}
-	walletRepo := repository.NewWalletRepository(db)
-	orderService := NewOrderService(repository.NewOrderRepository(db), walletRepo, engine)
+	orderService := NewOrderService(repository.NewOrderRepository(db), engine)
 
 	_, err := orderService.CreateOrder(idemOrderInput(userID, "reusable-key", "1"))
 	require.Error(t, err, "잔고가 없는데 주문이 생성됐다")
 	assert.EqualValues(t, 0, countIdemKeys(t, db, userID), "실패한 요청이 키를 소비했다")
 
-	require.NoError(t, db.Model(&model.Wallet{}).
-		Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
-		Updates(map[string]any{"krw": 10000, "available_balance": 10000}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(9990))
 
 	result, err := orderService.CreateOrder(idemOrderInput(userID, "reusable-key", "1"))
 	require.NoError(t, err, "같은 키가 소비돼 재시도가 막혔다")
@@ -145,18 +138,16 @@ func TestIntegrationCreateOrderSameBatchDuplicateIsNotUnavailable(t *testing.T) 
 	seedIdemBuyerWallet(t, db, userID, 10000)
 
 	orderRepo := repository.NewOrderRepository(db)
-	walletRepo := repository.NewWalletRepository(db)
-	ledgerRepo := repository.NewLedgerRepository(db)
 
 	// 두 요청이 같은 배치에 들어가도록 배치 크기 2, flush 간격을 넉넉히 준다.
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo,
+	coordinator := NewHoldCoordinator(db, orderRepo, NewLedgerService(db),
 		repository.NewOrderIdempotencyRepository(db), 2)
 	coordinator.FlushInterval = 2 * time.Second
 	go coordinator.Run()
 	defer coordinator.Shutdown()
 
 	engine := &countingAcceptanceEngine{fakeAcceptanceEngine: fakeAcceptanceEngine{admissible: true, submitSucceeds: true}}
-	orderService := NewOrderService(orderRepo, walletRepo, engine)
+	orderService := NewOrderService(orderRepo, engine)
 	orderService.HoldCoordinator = coordinator
 
 	var wg sync.WaitGroup

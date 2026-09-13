@@ -42,26 +42,37 @@ func (acceptingEngine) RequestOrderBookSnapshot(string, int) (matching.OrderBook
 }
 
 func newCreateOrderHandler(db *gorm.DB) *OrderHandler {
-	return NewOrderHandler(service.NewOrderService(
-		repository.NewOrderRepository(db), repository.NewWalletRepository(db), acceptingEngine{}))
+	return NewOrderHandler(service.NewOrderService(repository.NewOrderRepository(db), acceptingEngine{}))
+}
+
+// ledgerLocked는 사용자 자산의 원장 locked 잔액을 읽는다. hold 해제가 실제로
+// 반영됐는지 보는 데 쓴다.
+func ledgerLocked(t *testing.T, db *gorm.DB, userID uint, asset string) decimal.Decimal {
+	t.Helper()
+
+	var locked decimal.Decimal
+	require.NoError(t, db.Raw(`
+		SELECT COALESCE(SUM(b.balance), 0)
+		FROM accounts a
+		JOIN account_balances b ON b.account_id = a.id
+		WHERE a.owner_user_id = ? AND a.asset = ? AND a.account_type = 'USER_LOCKED'`,
+		userID, asset).Scan(&locked).Error)
+	return locked
 }
 
 func seedFundedUser(t *testing.T, db *gorm.DB, userID uint) uint {
 	t.Helper()
 
 	require.NoError(t, db.Create(&model.User{ID: userID, Name: fmt.Sprintf("idem-%d", userID)}).Error)
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: userID, CoinSymbol: model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(100000),
-		AvailableBalance: decimal.NewFromInt(100000),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	_, err := service.NewDevWalletService(db).FundWallet(service.FundWalletInput{
+		UserID: userID, CoinSymbol: model.KRWAssetSymbol, Amount: "100000",
+		RequestKey: fmt.Sprintf("seed-fund-%d", userID),
+	})
+	require.NoError(t, err)
 
 	t.Cleanup(func() {
 		require.NoError(t, db.Where("user_id = ?", userID).Delete(&model.OrderIdempotencyKey{}).Error)
-		require.NoError(t, db.Where("user_id = ?", userID).Delete(&model.LedgerEntry{}).Error)
 		require.NoError(t, db.Where("user_id = ?", userID).Delete(&model.Order{}).Error)
-		require.NoError(t, db.Where("user_id = ?", userID).Delete(&model.Wallet{}).Error)
 		require.NoError(t, db.Delete(&model.User{}, userID).Error)
 	})
 	return userID
@@ -234,8 +245,7 @@ type rejectingEngine struct{ acceptingEngine }
 func (rejectingEngine) TrySubmitOrder(*matching.Order, time.Duration) bool { return false }
 
 func newRejectingOrderHandler(db *gorm.DB) *OrderHandler {
-	return NewOrderHandler(service.NewOrderService(
-		repository.NewOrderRepository(db), repository.NewWalletRepository(db), rejectingEngine{}))
+	return NewOrderHandler(service.NewOrderService(repository.NewOrderRepository(db), rejectingEngine{}))
 }
 
 // 최초 접수 실패도 order_id를 줘야 한다. 저장된 결과의 재요청만 order_id를 받고 최초
@@ -261,10 +271,8 @@ func TestIntegrationCreateOrderHandlerFirstRejectionReturnsOrderID(t *testing.T)
 	require.NoError(t, db.First(&order, orderID).Error)
 	assert.Equal(t, model.OrderStatusRejected, order.Status)
 
-	var wallet model.Wallet
-	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", userID, model.KRWAssetSymbol).
-		First(&wallet).Error)
-	assert.True(t, wallet.LockedBalance.IsZero(), "hold가 남았다: %s", wallet.LockedBalance)
+	locked := ledgerLocked(t, db, userID, model.KRWAssetSymbol)
+	assert.True(t, locked.IsZero(), "hold가 남았다: %s", locked)
 
 	var record model.OrderIdempotencyKey
 	require.NoError(t, db.Where("user_id = ?", userID).First(&record).Error)

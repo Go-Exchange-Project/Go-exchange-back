@@ -37,37 +37,6 @@ func seedBatchScenarioFixture(t *testing.T, db *gorm.DB, offsetBase uint) batchS
 		return quoteAmountWithTradingFee(price.Mul(amount))
 	}
 
-	wallets := []model.Wallet{
-		// 시나리오 1: A(매수)/B(매도) — 독립
-		{UserID: a, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRWFor(decimal.NewFromInt(2)), AvailableBalance: decimal.Zero, LockedBalance: lockedKRWFor(decimal.NewFromInt(2))},
-		{UserID: a, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: b, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(2), AvailableBalance: decimal.Zero, LockedBalance: decimal.NewFromInt(2)},
-		{UserID: b, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-
-		// 시나리오 1: C(매수)/D(매도) — 독립
-		{UserID: c, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRWFor(decimal.NewFromInt(3)), AvailableBalance: decimal.Zero, LockedBalance: lockedKRWFor(decimal.NewFromInt(3))},
-		{UserID: c, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: d, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(3), AvailableBalance: decimal.Zero, LockedBalance: decimal.NewFromInt(3)},
-		{UserID: d, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-
-		// 시나리오 2: E는 대형 테이커 매수 주문(수량 10)으로 trade 2건에 걸친다. F, G가 매도자.
-		{UserID: e, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRWFor(decimal.NewFromInt(10)), AvailableBalance: decimal.Zero, LockedBalance: lockedKRWFor(decimal.NewFromInt(10))},
-		{UserID: e, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: f, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(4), AvailableBalance: decimal.Zero, LockedBalance: decimal.NewFromInt(4)},
-		{UserID: f, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: g, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(6), AvailableBalance: decimal.Zero, LockedBalance: decimal.NewFromInt(6)},
-		{UserID: g, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-
-		// 시나리오 3: H는 trade5의 매수자이자 trade6의 매도자 — 지갑이 배치 내에서 공유·진화한다.
-		{UserID: h, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRWFor(decimal.NewFromInt(2)), AvailableBalance: decimal.Zero, LockedBalance: lockedKRWFor(decimal.NewFromInt(2))},
-		{UserID: h, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(1), AvailableBalance: decimal.Zero, LockedBalance: decimal.NewFromInt(1)},
-		{UserID: i, CoinSymbol: "BTC", Quantity: decimal.NewFromInt(2), AvailableBalance: decimal.Zero, LockedBalance: decimal.NewFromInt(2)},
-		{UserID: i, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: j, CoinSymbol: model.KRWAssetSymbol, KRW: lockedKRWFor(decimal.NewFromInt(1)), AvailableBalance: decimal.Zero, LockedBalance: lockedKRWFor(decimal.NewFromInt(1))},
-		{UserID: j, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-	}
-	require.NoError(t, db.Create(&wallets).Error)
-
 	mkOrder := func(userID uint, side model.OrderSide, amount decimal.Decimal) model.Order {
 		order := model.Order{
 			UserID:       userID,
@@ -94,6 +63,20 @@ func seedBatchScenarioFixture(t *testing.T, db *gorm.DB, offsetBase uint) batchS
 	sellI := mkOrder(i, model.OrderSideSell, decimal.NewFromInt(2))
 	buyJ := mkOrder(j, model.OrderSideBuy, decimal.NewFromInt(1))
 	sellH := mkOrder(h, model.OrderSideSell, decimal.NewFromInt(1))
+
+	// 잠긴 잔액은 주문마다 잠금 분개 하나로 만든다. 계정에 직접 써넣으면 전기 합과
+	// 잔액 캐시가 어긋난다.
+	seedLockedBalance(t, db, a, model.KRWAssetSymbol, lockedKRWFor(decimal.NewFromInt(2)), buyA.ID)
+	seedLockedBalance(t, db, b, "BTC", decimal.NewFromInt(2), sellB.ID)
+	seedLockedBalance(t, db, c, model.KRWAssetSymbol, lockedKRWFor(decimal.NewFromInt(3)), buyC.ID)
+	seedLockedBalance(t, db, d, "BTC", decimal.NewFromInt(3), sellD.ID)
+	seedLockedBalance(t, db, e, model.KRWAssetSymbol, lockedKRWFor(decimal.NewFromInt(10)), buyE.ID)
+	seedLockedBalance(t, db, f, "BTC", decimal.NewFromInt(4), sellF.ID)
+	seedLockedBalance(t, db, g, "BTC", decimal.NewFromInt(6), sellG.ID)
+	seedLockedBalance(t, db, h, model.KRWAssetSymbol, lockedKRWFor(decimal.NewFromInt(2)), buyH.ID)
+	seedLockedBalance(t, db, i, "BTC", decimal.NewFromInt(2), sellI.ID)
+	seedLockedBalance(t, db, j, model.KRWAssetSymbol, lockedKRWFor(decimal.NewFromInt(1)), buyJ.ID)
+	seedLockedBalance(t, db, h, "BTC", decimal.NewFromInt(1), sellH.ID)
 
 	return batchScenarioFixture{
 		userIDs: []uint{a, b, c, d, e, f, g, h, i, j},
@@ -132,23 +115,43 @@ func batchScenarioTrades(f batchScenarioFixture, runTag string) []*model.Trade {
 	}
 }
 
-func assertWalletsMatch(t *testing.T, walletRepo *repository.WalletRepository, leftUserID uint, rightUserID uint) {
+func assertWalletsMatch(t *testing.T, db *gorm.DB, leftUserID uint, rightUserID uint) {
 	t.Helper()
 
-	left, err := walletRepo.ListByUserID(leftUserID)
-	require.NoError(t, err)
-	right, err := walletRepo.ListByUserID(rightUserID)
-	require.NoError(t, err)
-	require.Equal(t, len(right), len(left), "wallet count mismatch user %d vs %d", leftUserID, rightUserID)
-	for idx := range left {
-		lw, rw := left[idx], right[idx]
-		assert.Equal(t, rw.CoinSymbol, lw.CoinSymbol)
-		assert.True(t, lw.AvailableBalance.Equal(rw.AvailableBalance), "AvailableBalance user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, lw.CoinSymbol, lw.AvailableBalance, rw.AvailableBalance)
-		assert.True(t, lw.LockedBalance.Equal(rw.LockedBalance), "LockedBalance user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, lw.CoinSymbol, lw.LockedBalance, rw.LockedBalance)
-		assert.True(t, lw.KRW.Equal(rw.KRW), "KRW user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, lw.CoinSymbol, lw.KRW, rw.KRW)
-		assert.True(t, lw.Quantity.Equal(rw.Quantity), "Quantity user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, lw.CoinSymbol, lw.Quantity, rw.Quantity)
-		assert.True(t, lw.AvgBuyPrice.Equal(rw.AvgBuyPrice), "AvgBuyPrice user %d/%d coin %s: %s vs %s", leftUserID, rightUserID, lw.CoinSymbol, lw.AvgBuyPrice, rw.AvgBuyPrice)
+	left := userAssetSnapshot(t, db, leftUserID)
+	right := userAssetSnapshot(t, db, rightUserID)
+	require.Equal(t, right, left, "자산 스냅샷이 user %d와 %d에서 다르다", leftUserID, rightUserID)
+}
+
+// userAssetSnapshot은 사용자의 자산별 (available, locked, 평단가)를 문자열로 굳힌다.
+// 사용자 ID·계정 ID가 다른 두 세계를 비교하려면 그 값들을 빼야 한다.
+func userAssetSnapshot(t *testing.T, db *gorm.DB, userID uint) map[string]string {
+	t.Helper()
+
+	var rows []struct {
+		Asset       string
+		Available   decimal.Decimal
+		Locked      decimal.Decimal
+		AvgBuyPrice decimal.Decimal
 	}
+	require.NoError(t, db.Raw(`
+		SELECT
+			a.asset AS asset,
+			COALESCE(SUM(b.balance) FILTER (WHERE a.account_type = 'USER_AVAILABLE'), 0) AS available,
+			COALESCE(SUM(b.balance) FILTER (WHERE a.account_type = 'USER_LOCKED'), 0)    AS locked,
+			COALESCE(MAX(s.avg_buy_price), 0)                                            AS avg_buy_price
+		FROM accounts a
+		JOIN account_balances b ON b.account_id = a.id
+		LEFT JOIN user_asset_stats s ON s.user_id = a.owner_user_id AND s.asset = a.asset
+		WHERE a.owner_user_id = ?
+		GROUP BY a.asset`, userID).Scan(&rows).Error)
+
+	snapshot := make(map[string]string, len(rows))
+	for _, row := range rows {
+		snapshot[row.Asset] = fmt.Sprintf("available=%s locked=%s avg=%s",
+			row.Available.String(), row.Locked.String(), row.AvgBuyPrice.String())
+	}
+	return snapshot
 }
 
 func assertOrdersMatch(t *testing.T, db *gorm.DB, leftOrderID uint, rightOrderID uint) {
@@ -162,21 +165,38 @@ func assertOrdersMatch(t *testing.T, db *gorm.DB, leftOrderID uint, rightOrderID
 	assert.Equal(t, ro.Status, lo.Status, "Status order %d vs %d", leftOrderID, rightOrderID)
 }
 
+// assertLedgerSequencesMatch는 두 사용자의 전기 흐름이 같은지 본다. 계정 ID·분개
+// ID는 세계마다 다르므로 (계정종류, 자산, 금액)만 남기고 분개 순서대로 비교한다.
 func assertLedgerSequencesMatch(t *testing.T, db *gorm.DB, leftUserID uint, rightUserID uint) {
 	t.Helper()
 
-	var left, right []model.LedgerEntry
-	require.NoError(t, db.Where("user_id = ?", leftUserID).Order("coin_symbol ASC").Order("id ASC").Find(&left).Error)
-	require.NoError(t, db.Where("user_id = ?", rightUserID).Order("coin_symbol ASC").Order("id ASC").Find(&right).Error)
-	require.Equal(t, len(right), len(left), "ledger entry count user %d vs %d", leftUserID, rightUserID)
-	for idx := range left {
-		le, re := left[idx], right[idx]
-		assert.Equal(t, re.CoinSymbol, le.CoinSymbol)
-		assert.True(t, le.AvailableDelta.Equal(re.AvailableDelta), "AvailableDelta idx=%d user %d vs %d", idx, leftUserID, rightUserID)
-		assert.True(t, le.LockedDelta.Equal(re.LockedDelta), "LockedDelta idx=%d user %d vs %d", idx, leftUserID, rightUserID)
-		assert.True(t, le.AvailableBalanceAfter.Equal(re.AvailableBalanceAfter), "AvailableBalanceAfter idx=%d user %d vs %d", idx, leftUserID, rightUserID)
-		assert.True(t, le.LockedBalanceAfter.Equal(re.LockedBalanceAfter), "LockedBalanceAfter idx=%d user %d vs %d", idx, leftUserID, rightUserID)
+	require.Equal(t,
+		userPostingSequence(t, db, rightUserID),
+		userPostingSequence(t, db, leftUserID),
+		"전기 흐름이 user %d와 %d에서 다르다", leftUserID, rightUserID)
+}
+
+func userPostingSequence(t *testing.T, db *gorm.DB, userID uint) []string {
+	t.Helper()
+
+	var rows []struct {
+		JournalID   uint
+		AccountType string
+		Asset       string
+		Amount      decimal.Decimal
 	}
+	require.NoError(t, db.Raw(`
+		SELECT p.journal_id, a.account_type, p.asset, p.amount
+		FROM postings p
+		JOIN accounts a ON a.id = p.account_id
+		WHERE a.owner_user_id = ?
+		ORDER BY p.journal_id ASC, a.account_type ASC, p.asset ASC, p.amount ASC`, userID).Scan(&rows).Error)
+
+	sequence := make([]string, 0, len(rows))
+	for _, row := range rows {
+		sequence = append(sequence, fmt.Sprintf("%s|%s|%s", row.AccountType, row.Asset, row.Amount.String()))
+	}
+	return sequence
 }
 
 func countTradesForOrders(t *testing.T, db *gorm.DB, orderIDs []uint) int64 {
@@ -192,8 +212,7 @@ func countTradesForOrders(t *testing.T, db *gorm.DB, orderIDs []uint) int64 {
 // 루프로 정산한 뒤 최종 상태를 필드 단위로 비교한다.
 func TestIntegrationSettleTradeBatchMatchesSequentialSingleSettlement(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	walletRepo := repository.NewWalletRepository(db)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), walletRepo)
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	batchFixture := seedBatchScenarioFixture(t, db, 500)
 	seqFixture := seedBatchScenarioFixture(t, db, 520)
@@ -221,7 +240,7 @@ func TestIntegrationSettleTradeBatchMatchesSequentialSingleSettlement(t *testing
 	}
 
 	for idx := range batchFixture.userIDs {
-		assertWalletsMatch(t, walletRepo, batchFixture.userIDs[idx], seqFixture.userIDs[idx])
+		assertWalletsMatch(t, db, batchFixture.userIDs[idx], seqFixture.userIDs[idx])
 		assertLedgerSequencesMatch(t, db, batchFixture.userIDs[idx], seqFixture.userIDs[idx])
 	}
 
@@ -235,33 +254,22 @@ func TestIntegrationSettleTradeBatchMatchesSequentialSingleSettlement(t *testing
 	assert.Equal(t, countTradesForOrders(t, db, seqOrderIDs), countTradesForOrders(t, db, batchOrderIDs))
 }
 
-func captureWallets(t *testing.T, walletRepo *repository.WalletRepository, userIDs []uint) map[uint][]model.Wallet {
+// captureWallets는 사용자별 자산 스냅샷을 찍는다. 롤백 검증에서 "아무것도 변하지
+// 않았다"를 보려면 전후를 같은 방식으로 굳혀 비교해야 한다.
+func captureWallets(t *testing.T, db *gorm.DB, userIDs []uint) map[uint]map[string]string {
 	t.Helper()
 
-	result := make(map[uint][]model.Wallet, len(userIDs))
+	result := make(map[uint]map[string]string, len(userIDs))
 	for _, id := range userIDs {
-		wallets, err := walletRepo.ListByUserID(id)
-		require.NoError(t, err)
-		result[id] = wallets
+		result[id] = userAssetSnapshot(t, db, id)
 	}
 	return result
 }
 
-func assertWalletSnapshotsEqual(t *testing.T, before map[uint][]model.Wallet, after map[uint][]model.Wallet) {
+func assertWalletSnapshotsEqual(t *testing.T, before map[uint]map[string]string, after map[uint]map[string]string) {
 	t.Helper()
 
-	for userID, beforeWallets := range before {
-		afterWallets := after[userID]
-		require.Equal(t, len(beforeWallets), len(afterWallets), "wallet count changed for user %d", userID)
-		for idx := range beforeWallets {
-			bw, aw := beforeWallets[idx], afterWallets[idx]
-			assert.True(t, bw.AvailableBalance.Equal(aw.AvailableBalance), "AvailableBalance changed for user %d coin %s", userID, bw.CoinSymbol)
-			assert.True(t, bw.LockedBalance.Equal(aw.LockedBalance), "LockedBalance changed for user %d coin %s", userID, bw.CoinSymbol)
-			assert.True(t, bw.KRW.Equal(aw.KRW), "KRW changed for user %d coin %s", userID, bw.CoinSymbol)
-			assert.True(t, bw.Quantity.Equal(aw.Quantity), "Quantity changed for user %d coin %s", userID, bw.CoinSymbol)
-			assert.True(t, bw.AvgBuyPrice.Equal(aw.AvgBuyPrice), "AvgBuyPrice changed for user %d coin %s", userID, bw.CoinSymbol)
-		}
-	}
+	require.Equal(t, before, after, "자산 스냅샷이 변했다")
 }
 
 type tradePairFixture struct {
@@ -309,8 +317,7 @@ func tradeForPair(p tradePairFixture, sequence int64, tag string) *model.Trade {
 // outbox는 마킹됨.
 func TestIntegrationSettleTradeBatchIsIdempotent(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	walletRepo := repository.NewWalletRepository(db)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), walletRepo)
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	pairs := seedIndependentTradePairs(t, db, 560, 3)
 	userIDs := tradePairUserIDs(pairs)
@@ -336,7 +343,7 @@ func TestIntegrationSettleTradeBatchIsIdempotent(t *testing.T) {
 		assert.True(t, r.Applied)
 	}
 
-	beforeWallets := captureWallets(t, walletRepo, userIDs)
+	beforeWallets := captureWallets(t, db, userIDs)
 	beforeLedgerCount := ledgerCountForUsers(t, db, userIDs)
 
 	secondOutboxIDs := make([]uint64, len(trades))
@@ -357,7 +364,7 @@ func TestIntegrationSettleTradeBatchIsIdempotent(t *testing.T) {
 		assert.Equal(t, firstResults[i].TradeID, r.TradeID)
 	}
 
-	afterWallets := captureWallets(t, walletRepo, userIDs)
+	afterWallets := captureWallets(t, db, userIDs)
 	assertWalletSnapshotsEqual(t, beforeWallets, afterWallets)
 	assert.Equal(t, beforeLedgerCount, ledgerCountForUsers(t, db, userIDs))
 
@@ -373,7 +380,10 @@ func ledgerCountForUsers(t *testing.T, db *gorm.DB, userIDs []uint) int64 {
 	t.Helper()
 
 	var count int64
-	require.NoError(t, db.Model(&model.LedgerEntry{}).Where("user_id IN ?", userIDs).Count(&count).Error)
+	require.NoError(t, db.Raw(`
+		SELECT COUNT(*) FROM postings p
+		JOIN accounts a ON a.id = p.account_id
+		WHERE a.owner_user_id IN ?`, userIDs).Scan(&count).Error)
 	return count
 }
 
@@ -381,8 +391,7 @@ func ledgerCountForUsers(t *testing.T, db *gorm.DB, userIDs []uint) int64 {
 // 3건 모두 마킹된다.
 func TestIntegrationSettleTradeBatchSkipsAlreadySettledTrades(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	walletRepo := repository.NewWalletRepository(db)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), walletRepo)
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	pairs := seedIndependentTradePairs(t, db, 580, 3)
 	userIDs := tradePairUserIDs(pairs)
@@ -397,7 +406,7 @@ func TestIntegrationSettleTradeBatchSkipsAlreadySettledTrades(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, preResult.Applied)
 
-	beforeWallets := captureWallets(t, walletRepo, []uint{pairs[0].buyerID, pairs[0].sellerID})
+	beforeWallets := captureWallets(t, db, []uint{pairs[0].buyerID, pairs[0].sellerID})
 
 	outboxIDs := make([]uint64, len(trades))
 	items := make([]TradeBatchItem, len(trades))
@@ -417,7 +426,7 @@ func TestIntegrationSettleTradeBatchSkipsAlreadySettledTrades(t *testing.T) {
 	assert.True(t, results[1].Applied)
 	assert.True(t, results[2].Applied)
 
-	afterWallets := captureWallets(t, walletRepo, []uint{pairs[0].buyerID, pairs[0].sellerID})
+	afterWallets := captureWallets(t, db, []uint{pairs[0].buyerID, pairs[0].sellerID})
 	assertWalletSnapshotsEqual(t, beforeWallets, afterWallets)
 
 	var order1, order2 model.Order
@@ -439,8 +448,7 @@ func TestIntegrationSettleTradeBatchSkipsAlreadySettledTrades(t *testing.T) {
 // TestIntegrationSettleTradeFailureLeavesOutboxPending과 동형.
 func TestIntegrationSettleTradeBatchFailureRollsBackEverything(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	walletRepo := repository.NewWalletRepository(db)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), walletRepo)
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	goodPairs := seedIndependentTradePairs(t, db, 600, 1)
 	badBuyerID := serviceTestUserID(610)
@@ -488,9 +496,8 @@ func TestIntegrationSettleTradeBatchFailureRollsBackEverything(t *testing.T) {
 	assert.Equal(t, model.OrderStatusPending, persistedGoodBuy.Status)
 	assert.True(t, persistedGoodBuy.FilledAmount.IsZero())
 
-	buyerKRW, err := walletRepo.FindKRWWalletByUserID(goodPairs[0].buyerID)
-	require.NoError(t, err)
-	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.NewFromInt(100_000)))
+	_, buyerLocked := ledgerBalances(t, db, goodPairs[0].buyerID, model.KRWAssetSymbol)
+	assert.True(t, buyerLocked.Equal(decimal.NewFromInt(100_000)))
 
 	for _, id := range []uint64{goodOutbox.ID, badOutbox.ID} {
 		var row model.TradeOutboxEvent
@@ -523,8 +530,7 @@ func TestIntegrationSettleTradeBatchFailureRollsBackEverything(t *testing.T) {
 // (d) outbox 흡수: 성공 배치 → 모든 outbox 행이 같은 트랜잭션에서 PROCESSED된다.
 func TestIntegrationSettleTradeBatchMarksAllOutboxRowsProcessed(t *testing.T) {
 	db := openServiceIntegrationDB(t)
-	walletRepo := repository.NewWalletRepository(db)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), walletRepo)
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	pairs := seedIndependentTradePairs(t, db, 620, 3)
 	userIDs := tradePairUserIDs(pairs)

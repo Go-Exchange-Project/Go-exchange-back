@@ -70,16 +70,30 @@ func cleanupServiceUsers(t *testing.T, db *gorm.DB, userIDs ...uint) {
 		require.NoError(t, db.Where("buy_order_id IN ? OR sell_order_id IN ?", orderIDs, orderIDs).Delete(&model.Trade{}).Error)
 	}
 
-	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.LedgerEntry{}).Error)
 	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Order{}).Error)
-	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.Wallet{}).Error)
+
+	// transfer 테스트도 이 헬퍼로 정리한다. 이벤트가 요청을 참조하므로
+	// transfer_status_events를 먼저 지운다 — 순서를 바꾸면 FK 위반이다.
+	// hold_journal_id가 가리키는 분개(journal_entries)는 남겨 둔다 — 자산별
+	// 합이 0인 분개라 검산(CheckUnbalancedJournals 등)을 오염시키지 않는다.
+	var transferRequests []model.TransferRequest
+	require.NoError(t, db.Where("user_id IN ?", userIDs).Find(&transferRequests).Error)
+	transferRequestIDs := make([]uint, 0, len(transferRequests))
+	for _, transferRequest := range transferRequests {
+		transferRequestIDs = append(transferRequestIDs, transferRequest.ID)
+	}
+	if len(transferRequestIDs) > 0 {
+		require.NoError(t, db.Where("transfer_request_id IN ?", transferRequestIDs).
+			Delete(&model.TransferStatusEvent{}).Error)
+	}
+	require.NoError(t, db.Where("user_id IN ?", userIDs).Delete(&model.TransferRequest{}).Error)
+
 	require.NoError(t, db.Where("id IN ?", userIDs).Delete(&model.User{}).Error)
 }
 
 func newIntegrationOrderService(db *gorm.DB, me *matching.MatchingEngine) *OrderService {
 	orderRepo := repository.NewOrderRepository(db)
-	walletRepo := repository.NewWalletRepository(db)
-	return NewOrderService(orderRepo, walletRepo, me)
+	return NewOrderService(orderRepo, me)
 }
 
 func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
@@ -87,13 +101,7 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 	userID := serviceTestUserID(1)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(10000),
-		AvailableBalance: decimal.NewFromInt(10000),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
 
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
@@ -113,15 +121,8 @@ func TestIntegrationCreateBuyOrderHoldsKRWAndSubmitsToEngine(t *testing.T) {
 	require.NoError(t, db.Model(&model.Order{}).Where("id = ? AND user_id = ?", order.ID, userID).Count(&orderCount).Error)
 	assert.Equal(t, int64(1), orderCount)
 
-	walletRepo := repository.NewWalletRepository(db)
-	krwWallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.RequireFromString("4997.5")))
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.RequireFromString("5002.5")))
-	assert.True(t, krwWallet.KRW.Equal(decimal.NewFromInt(10000)))
-	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID)
-	require.Len(t, entries, 1)
-	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "-5002.5", "5002.5", "4997.5", "5002.5")
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.RequireFromString("4997.5"), decimal.RequireFromString("5002.5"))
+	requireJournalByKey(t, db, orderHoldKey(order.ID))
 
 	select {
 	case engineOrder := <-me.OrderCh:
@@ -137,13 +138,7 @@ func TestIntegrationCreateBuyOrderHoldFailureRollsBackAndDoesNotSubmit(t *testin
 	userID := serviceTestUserID(2)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(50),
-		AvailableBalance: decimal.NewFromInt(50),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(50))
 
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
@@ -163,13 +158,7 @@ func TestIntegrationCreateBuyOrderHoldFailureRollsBackAndDoesNotSubmit(t *testin
 	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", userID).Count(&orderCount).Error)
 	assert.Equal(t, int64(0), orderCount)
 
-	walletRepo := repository.NewWalletRepository(db)
-	krwWallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(50)))
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, krwWallet.KRW.Equal(decimal.NewFromInt(50)))
-	assertLedgerCount(t, db, userID, 0)
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(50), decimal.Zero)
 
 	select {
 	case engineOrder := <-me.OrderCh:
@@ -183,13 +172,7 @@ func TestIntegrationCreateSellOrderHoldsCoin(t *testing.T) {
 	userID := serviceTestUserID(3)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       "BTC",
-		Quantity:         decimal.NewFromInt(5),
-		AvailableBalance: decimal.NewFromInt(5),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, "BTC", decimal.NewFromInt(5))
 
 	me := matching.NewMatchingEngine()
 	orderService := newIntegrationOrderService(db, me)
@@ -205,15 +188,8 @@ func TestIntegrationCreateSellOrderHoldsCoin(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, order.ID)
 
-	walletRepo := repository.NewWalletRepository(db)
-	btcWallet, err := walletRepo.FindByUserIDAndCoinSymbol(userID, "BTC")
-	require.NoError(t, err)
-	assert.True(t, btcWallet.AvailableBalance.Equal(decimal.NewFromInt(3)))
-	assert.True(t, btcWallet.LockedBalance.Equal(decimal.NewFromInt(2)))
-	assert.True(t, btcWallet.Quantity.Equal(decimal.NewFromInt(5)))
-	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, order.ID)
-	require.Len(t, entries, 1)
-	assertLedgerDelta(t, entries[0], "BTC", "-2", "2", "3", "2")
+	assertLedgerBalances(t, db, userID, "BTC", decimal.NewFromInt(3), decimal.NewFromInt(2))
+	requireJournalByKey(t, db, orderHoldKey(order.ID))
 }
 
 func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testing.T) {
@@ -221,13 +197,7 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 	userID := serviceTestUserID(4)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(10000),
-		AvailableBalance: decimal.NewFromInt(10000),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
 	require.NoError(t, db.Create(&model.Order{
 		UserID:       userID,
 		CoinSymbol:   "BTC",
@@ -253,10 +223,7 @@ func TestIntegrationCreateOrderAllowsOwnCrossingOrderAndSubmitsToEngine(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, order)
 
-	wallet, err := repository.NewWalletRepository(db).FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, wallet.AvailableBalance.Equal(decimal.RequireFromString("4997.5")))
-	assert.True(t, wallet.LockedBalance.Equal(decimal.RequireFromString("5002.5")))
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.RequireFromString("4997.5"), decimal.RequireFromString("5002.5"))
 
 	var buyOrderCount int64
 	require.NoError(t, db.Model(&model.Order{}).
@@ -345,7 +312,7 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRows(t, db, buyerID, sellerID, decimal.RequireFromString("500.25"), decimal.NewFromInt(5))
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		EngineSequence: 12,
@@ -388,94 +355,17 @@ func TestIntegrationSettleTradeUpdatesTradeOrdersAndWallets(t *testing.T) {
 	assert.True(t, persistedBuy.FilledAmount.Equal(decimal.NewFromInt(5)))
 	assert.True(t, persistedSell.FilledAmount.Equal(decimal.NewFromInt(5)))
 
-	walletRepo := repository.NewWalletRepository(db)
-	buyerKRW, err := walletRepo.FindKRWWalletByUserID(buyerID)
-	require.NoError(t, err)
-	buyerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(buyerID, "BTC")
-	require.NoError(t, err)
-	sellerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(sellerID, "BTC")
-	require.NoError(t, err)
-	sellerKRW, err := walletRepo.FindKRWWalletByUserID(sellerID)
-	require.NoError(t, err)
+	assertLedgerBalances(t, db, buyerID, model.KRWAssetSymbol, decimal.RequireFromString("50.025"), decimal.Zero)
+	assertLedgerBalances(t, db, buyerID, "BTC", decimal.NewFromInt(5), decimal.Zero)
+	assertLedgerBalances(t, db, sellerID, "BTC", decimal.Zero, decimal.Zero)
+	assertLedgerBalances(t, db, sellerID, model.KRWAssetSymbol, decimal.RequireFromString("449.775"), decimal.Zero)
 
-	assert.True(t, buyerKRW.AvailableBalance.Equal(decimal.RequireFromString("50.025")))
-	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
-	assert.True(t, buyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("90.045")))
-	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, sellerBTC.AvgBuyPrice.IsZero())
-	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
-	assertSettlementLedgerEntries(t, db, result.TradeID, trade.IdempotencyKey, buyerID, sellerID, "0", "0")
-}
+	buyerSnapshot := userAssetSnapshot(t, db, buyerID)
+	assert.Contains(t, buyerSnapshot["BTC"], "avg=90.045")
+	sellerSnapshot := userAssetSnapshot(t, db, sellerID)
+	assert.Contains(t, sellerSnapshot["BTC"], "avg=0")
 
-func TestIntegrationSettleTradeCreatesMissingDestinationWallets(t *testing.T) {
-	db := openServiceIntegrationDB(t)
-	buyerID := serviceTestUserID(61)
-	sellerID := serviceTestUserID(62)
-	defer cleanupServiceUsers(t, db, buyerID, sellerID)
-
-	buyerKRW := model.Wallet{
-		UserID:           buyerID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.RequireFromString("100.05"),
-		AvailableBalance: decimal.Zero,
-		LockedBalance:    decimal.RequireFromString("100.05"),
-	}
-	sellerBTC := model.Wallet{
-		UserID:           sellerID,
-		CoinSymbol:       "BTC",
-		Quantity:         decimal.NewFromInt(1),
-		AvailableBalance: decimal.Zero,
-		LockedBalance:    decimal.NewFromInt(1),
-	}
-	require.NoError(t, db.Create(&[]model.Wallet{buyerKRW, sellerBTC}).Error)
-
-	buyOrder := model.Order{
-		UserID:       buyerID,
-		CoinSymbol:   "BTC",
-		Side:         model.OrderSideBuy,
-		OrderType:    model.OrderTypeLimit,
-		Price:        decimal.NewFromInt(100),
-		Amount:       decimal.NewFromInt(1),
-		Status:       model.OrderStatusPending,
-		FilledAmount: decimal.Zero,
-	}
-	sellOrder := model.Order{
-		UserID:       sellerID,
-		CoinSymbol:   "BTC",
-		Side:         model.OrderSideSell,
-		OrderType:    model.OrderTypeLimit,
-		Price:        decimal.NewFromInt(100),
-		Amount:       decimal.NewFromInt(1),
-		Status:       model.OrderStatusPending,
-		FilledAmount: decimal.Zero,
-	}
-	require.NoError(t, db.Create(&buyOrder).Error)
-	require.NoError(t, db.Create(&sellOrder).Error)
-
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
-
-	_, err := settlementService.SettleTrade(&model.Trade{
-		CoinSymbol:  "BTC",
-		Price:       decimal.NewFromInt(100),
-		Quantity:    decimal.NewFromInt(1),
-		TradedAt:    time.Now(),
-		BuyOrderID:  buyOrder.ID,
-		SellOrderID: sellOrder.ID,
-	}, 0)
-
-	require.NoError(t, err)
-
-	walletRepo := repository.NewWalletRepository(db)
-	persistedBuyerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(buyerID, "BTC")
-	require.NoError(t, err)
-	persistedSellerKRW, err := walletRepo.FindKRWWalletByUserID(sellerID)
-	require.NoError(t, err)
-	assert.True(t, persistedBuyerBTC.AvailableBalance.Equal(decimal.NewFromInt(1)))
-	assert.True(t, persistedBuyerBTC.LockedBalance.Equal(decimal.Zero))
-	assert.True(t, persistedBuyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("100.05")))
-	assert.True(t, persistedSellerKRW.AvailableBalance.Equal(decimal.RequireFromString("99.95")))
-	assert.True(t, persistedSellerKRW.LockedBalance.Equal(decimal.Zero))
+	requireJournalByKey(t, db, "trade:"+trade.IdempotencyKey)
 }
 
 func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
@@ -485,7 +375,7 @@ func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRows(t, db, buyerID, sellerID, decimal.RequireFromString("500.25"), decimal.NewFromInt(1))
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		EngineSequence: 20,
@@ -514,15 +404,8 @@ func TestIntegrationSettleTradeFailureRollsBackAllWrites(t *testing.T) {
 	assert.True(t, persistedBuy.FilledAmount.Equal(decimal.Zero))
 	assert.True(t, persistedSell.FilledAmount.Equal(decimal.Zero))
 
-	walletRepo := repository.NewWalletRepository(db)
-	buyerKRW, err := walletRepo.FindKRWWalletByUserID(buyerID)
-	require.NoError(t, err)
-	sellerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(sellerID, "BTC")
-	require.NoError(t, err)
-	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.RequireFromString("500.25")))
-	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(1)))
-	assertLedgerCount(t, db, buyerID, 0)
-	assertLedgerCount(t, db, sellerID, 0)
+	assertLedgerBalances(t, db, buyerID, model.KRWAssetSymbol, decimal.Zero, decimal.RequireFromString("500.25"))
+	assertLedgerBalances(t, db, sellerID, "BTC", decimal.Zero, decimal.NewFromInt(1))
 }
 
 func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
@@ -532,7 +415,7 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRowsWithOrderAmount(t, db, buyerID, sellerID, decimal.NewFromInt(1000), decimal.NewFromInt(10), decimal.NewFromInt(10))
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		EngineSequence: 30,
@@ -576,23 +459,14 @@ func TestIntegrationSettleTradeDuplicateIsIdempotent(t *testing.T) {
 	assert.True(t, persistedBuy.FilledAmount.Equal(decimal.NewFromInt(5)))
 	assert.True(t, persistedSell.FilledAmount.Equal(decimal.NewFromInt(5)))
 
-	walletRepo := repository.NewWalletRepository(db)
-	buyerKRW, err := walletRepo.FindKRWWalletByUserID(buyerID)
-	require.NoError(t, err)
-	buyerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(buyerID, "BTC")
-	require.NoError(t, err)
-	sellerBTC, err := walletRepo.FindByUserIDAndCoinSymbol(sellerID, "BTC")
-	require.NoError(t, err)
-	sellerKRW, err := walletRepo.FindKRWWalletByUserID(sellerID)
-	require.NoError(t, err)
+	assertLedgerBalances(t, db, buyerID, model.KRWAssetSymbol, decimal.RequireFromString("50.025"), decimal.RequireFromString("499.75"))
+	assertLedgerBalances(t, db, buyerID, "BTC", decimal.NewFromInt(5), decimal.Zero)
+	assertLedgerBalances(t, db, sellerID, "BTC", decimal.Zero, decimal.NewFromInt(5))
+	assertLedgerBalances(t, db, sellerID, model.KRWAssetSymbol, decimal.RequireFromString("449.775"), decimal.Zero)
 
-	assert.True(t, buyerKRW.AvailableBalance.Equal(decimal.RequireFromString("50.025")))
-	assert.True(t, buyerKRW.LockedBalance.Equal(decimal.RequireFromString("499.75")))
-	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)))
-	assert.True(t, buyerBTC.AvgBuyPrice.Equal(decimal.RequireFromString("90.045")))
-	assert.True(t, sellerBTC.LockedBalance.Equal(decimal.NewFromInt(5)))
-	assert.True(t, sellerKRW.AvailableBalance.Equal(decimal.RequireFromString("449.775")))
-	assertSettlementLedgerEntries(t, db, firstResult.TradeID, trade.IdempotencyKey, buyerID, sellerID, "499.75", "5")
+	buyerSnapshot := userAssetSnapshot(t, db, buyerID)
+	assert.Contains(t, buyerSnapshot["BTC"], "avg=90.045")
+	requireJournalByKey(t, db, "trade:"+trade.IdempotencyKey)
 }
 
 func TestIntegrationSettleTradeSameIdempotencyKeyDifferentPayloadReturnsConflict(t *testing.T) {
@@ -602,7 +476,7 @@ func TestIntegrationSettleTradeSameIdempotencyKeyDifferentPayloadReturnsConflict
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRowsWithOrderAmount(t, db, buyerID, sellerID, decimal.NewFromInt(1000), decimal.NewFromInt(10), decimal.NewFromInt(10))
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	idempotencyKey := fmt.Sprintf("service-conflict-key-%d", time.Now().UnixNano())
 	trade := &model.Trade{
@@ -650,7 +524,7 @@ func TestIntegrationSettleTradeRejectsCancelledBuyOrder(t *testing.T) {
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRowsWithStatuses(t, db, buyerID, sellerID, decimal.Zero, decimal.NewFromInt(5), decimal.NewFromInt(5), model.OrderStatusCancelled, model.OrderStatusPending)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		CoinSymbol:  "BTC",
@@ -677,7 +551,7 @@ func TestIntegrationFailedSettlementRecordedForCancelledOrderTrade(t *testing.T)
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRowsWithStatuses(t, db, buyerID, sellerID, decimal.Zero, decimal.NewFromInt(5), decimal.NewFromInt(5), model.OrderStatusCancelled, model.OrderStatusPending)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 	failedSettlementService := NewFailedSettlementService(repository.NewFailedSettlementRepository(db))
 
 	trade := &model.Trade{
@@ -739,7 +613,7 @@ func TestIntegrationSettleTradeRejectsCancelledSellOrder(t *testing.T) {
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRowsWithStatuses(t, db, buyerID, sellerID, decimal.NewFromInt(500), decimal.Zero, decimal.NewFromInt(5), model.OrderStatusPending, model.OrderStatusCancelled)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		CoinSymbol:  "BTC",
@@ -825,10 +699,8 @@ func TestIntegrationCancelPendingBuyOrderReleasesKRWAndRemovesFromEngine(t *test
 	assert.Equal(t, order.ID, cancelled.OrderID)
 	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
 
-	assertCancelledOrderAndWallet(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("500.25"), decimal.Zero)
-	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID)
-	require.Len(t, entries, 1)
-	assertLedgerDelta(t, entries[0], model.KRWAssetSymbol, "500.25", "-500.25", "500.25", "0")
+	assertCancelledOrderAndBalance(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("500.25"), decimal.Zero)
+	requireJournalByKey(t, db, orderReleaseKey(order.ID, releaseReasonCancel))
 }
 
 func TestIntegrationCancelPartialBuyOrderReleasesRemainingKRW(t *testing.T) {
@@ -876,7 +748,7 @@ func TestIntegrationCancelPartialBuyOrderReleasesRemainingKRW(t *testing.T) {
 	cancelled := requireIntegrationOrderCancelledEvent(t, me)
 	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
 
-	assertCancelledOrderAndWallet(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("600.3"), decimal.Zero)
+	assertCancelledOrderAndBalance(t, db, order.ID, userID, model.KRWAssetSymbol, decimal.RequireFromString("600.3"), decimal.Zero)
 }
 
 func TestIntegrationCancelPendingSellOrderReleasesCoin(t *testing.T) {
@@ -926,10 +798,8 @@ func TestIntegrationCancelPendingSellOrderReleasesCoin(t *testing.T) {
 	cancelled := requireIntegrationOrderCancelledEvent(t, me)
 	require.NoError(t, orderService.ProcessOrderCancellation(cancelled))
 
-	assertCancelledOrderAndWallet(t, db, order.ID, userID, "BTC", decimal.NewFromInt(5), decimal.Zero)
-	entries := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, order.ID)
-	require.Len(t, entries, 1)
-	assertLedgerDelta(t, entries[0], "BTC", "5", "-5", "5", "0")
+	assertCancelledOrderAndBalance(t, db, order.ID, userID, "BTC", decimal.NewFromInt(5), decimal.Zero)
+	requireJournalByKey(t, db, orderReleaseKey(order.ID, releaseReasonCancel))
 }
 
 func TestIntegrationCancelFilledOrderIsRejected(t *testing.T) {
@@ -983,10 +853,7 @@ func TestIntegrationCancelOtherUserOrderIsRejected(t *testing.T) {
 	var persisted model.Order
 	require.NoError(t, db.First(&persisted, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, persisted.Status)
-	walletRepo := repository.NewWalletRepository(db)
-	wallet, err := walletRepo.FindKRWWalletByUserID(ownerID)
-	require.NoError(t, err)
-	assert.True(t, wallet.LockedBalance.Equal(decimal.RequireFromString("500.25")))
+	assertLedgerBalances(t, db, ownerID, model.KRWAssetSymbol, decimal.Zero, decimal.RequireFromString("500.25"))
 }
 
 // hold 해제(releaseOrderHold)의 소유권이 CancelOrder에서 ProcessOrderCancellation으로
@@ -1020,11 +887,7 @@ func TestIntegrationProcessOrderCancellationRollsBackWhenWalletLockedBalanceIsIn
 	var persisted model.Order
 	require.NoError(t, db.First(&persisted, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, persisted.Status, "실패 시 상태 커밋이 롤백돼야 한다")
-	walletRepo := repository.NewWalletRepository(db)
-	wallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, wallet.AvailableBalance.Equal(decimal.Zero))
-	assert.True(t, wallet.LockedBalance.Equal(decimal.NewFromInt(100)))
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.Zero, decimal.NewFromInt(100))
 }
 
 // 엔진 상태는 더 이상 취소 접수의 판정 근거가 아니다. CancelOrder는 엔진을
@@ -1064,10 +927,7 @@ func TestIntegrationCancelAcceptsOrderMissingFromEngineBook(t *testing.T) {
 	var persisted model.Order
 	require.NoError(t, db.First(&persisted, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, persisted.Status, "CancelOrder는 주문을 건드리지 않는다")
-	walletRepo := repository.NewWalletRepository(db)
-	wallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, wallet.LockedBalance.Equal(decimal.RequireFromString("500.25")), "CancelOrder는 지갑을 건드리지 않는다")
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.Zero, decimal.RequireFromString("500.25"))
 }
 
 func seedSettlementRows(t *testing.T, db *gorm.DB, buyerID uint, sellerID uint, buyerLockedKRW decimal.Decimal, sellerLockedBTC decimal.Decimal) (model.Order, model.Order) {
@@ -1084,14 +944,6 @@ func seedSettlementRowsWithOrderAmount(t *testing.T, db *gorm.DB, buyerID uint, 
 
 func seedSettlementRowsWithStatuses(t *testing.T, db *gorm.DB, buyerID uint, sellerID uint, buyerLockedKRW decimal.Decimal, sellerLockedBTC decimal.Decimal, orderAmount decimal.Decimal, buyStatus model.OrderStatus, sellStatus model.OrderStatus) (model.Order, model.Order) {
 	t.Helper()
-
-	wallets := []model.Wallet{
-		{UserID: buyerID, CoinSymbol: model.KRWAssetSymbol, KRW: buyerLockedKRW, AvailableBalance: decimal.Zero, LockedBalance: buyerLockedKRW},
-		{UserID: buyerID, CoinSymbol: "BTC", Quantity: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-		{UserID: sellerID, CoinSymbol: "BTC", Quantity: sellerLockedBTC, AvailableBalance: decimal.Zero, LockedBalance: sellerLockedBTC},
-		{UserID: sellerID, CoinSymbol: model.KRWAssetSymbol, KRW: decimal.Zero, AvailableBalance: decimal.Zero, LockedBalance: decimal.Zero},
-	}
-	require.NoError(t, db.Create(&wallets).Error)
 
 	buyOrder := model.Order{
 		UserID:       buyerID,
@@ -1115,7 +967,53 @@ func seedSettlementRowsWithStatuses(t *testing.T, db *gorm.DB, buyerID uint, sel
 	}
 	require.NoError(t, db.Create(&buyOrder).Error)
 	require.NoError(t, db.Create(&sellOrder).Error)
+
+	// 잠긴 잔액은 원장에 지급한 뒤 잠금 분개로 옮겨 만든다. 계정에 직접 값을
+	// 써넣지 않는다 — 그러면 전기 합과 잔액 캐시가 어긋나 검산 2가 걸린다.
+	seedLockedBalance(t, db, buyerID, model.KRWAssetSymbol, buyerLockedKRW, buyOrder.ID)
+	seedLockedBalance(t, db, sellerID, "BTC", sellerLockedBTC, sellOrder.ID)
 	return buyOrder, sellOrder
+}
+
+// seedLedgerFunds는 개발용 지급으로 사용 가능 잔액을 만든다.
+func seedLedgerFunds(t *testing.T, db *gorm.DB, userID uint, asset string, amount decimal.Decimal) {
+	t.Helper()
+
+	if !amount.IsPositive() {
+		return
+	}
+	_, err := NewDevWalletService(db).FundWallet(FundWalletInput{
+		UserID: userID, CoinSymbol: asset, Amount: amount.String(),
+		RequestKey: fmt.Sprintf("seed-fund-%d-%s-%d-%d", userID, asset, time.Now().UnixNano(), testIdemKeySeq.Add(1)),
+	})
+	require.NoError(t, err)
+}
+
+// seedLockedBalance는 지급 후 amount만큼을 잠근 상태로 만든다. 실제 주문 잠금과
+// 같은 모양의 분개(available → locked)를 쓰므로 검산 4종이 통과한다.
+func seedLockedBalance(t *testing.T, db *gorm.DB, userID uint, asset string, amount decimal.Decimal, orderID uint) {
+	t.Helper()
+
+	if !amount.IsPositive() {
+		return
+	}
+	seedLedgerFunds(t, db, userID, asset, amount)
+
+	owner := userID
+	ledger := NewLedgerService(db)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		_, _, err := ledger.Record(tx, JournalInput{
+			EventType:      model.JournalEventOrderHold,
+			IdempotencyKey: orderHoldKey(orderID),
+			ReferenceType:  model.JournalReferenceOrder,
+			ReferenceID:    orderID,
+			Postings: []PostingInput{
+				{AccountType: model.AccountUserAvailable, OwnerUserID: &owner, Asset: asset, Amount: amount.Neg()},
+				{AccountType: model.AccountUserLocked, OwnerUserID: &owner, Asset: asset, Amount: amount},
+			},
+		})
+		return err
+	}))
 }
 
 func assertNoTradePersistedForOrders(t *testing.T, db *gorm.DB, buyOrderID uint, sellOrderID uint) {
@@ -1140,20 +1038,6 @@ type cancelOrderSeed struct {
 func seedCancelOrderRows(t *testing.T, db *gorm.DB, seed cancelOrderSeed) model.Order {
 	t.Helper()
 
-	wallet := model.Wallet{
-		UserID:           seed.UserID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              seed.LockedBalance,
-		AvailableBalance: decimal.Zero,
-		LockedBalance:    seed.LockedBalance,
-	}
-	if seed.Side == model.OrderSideSell {
-		wallet.CoinSymbol = seed.CoinSymbol
-		wallet.KRW = decimal.Zero
-		wallet.Quantity = seed.LockedBalance
-	}
-	require.NoError(t, db.Create(&wallet).Error)
-
 	order := model.Order{
 		UserID:       seed.UserID,
 		CoinSymbol:   seed.CoinSymbol,
@@ -1165,6 +1049,12 @@ func seedCancelOrderRows(t *testing.T, db *gorm.DB, seed cancelOrderSeed) model.
 		FilledAmount: seed.FilledAmount,
 	}
 	require.NoError(t, db.Create(&order).Error)
+
+	asset := model.KRWAssetSymbol
+	if seed.Side == model.OrderSideSell {
+		asset = seed.CoinSymbol
+	}
+	seedLockedBalance(t, db, seed.UserID, asset, seed.LockedBalance, order.ID)
 	return order
 }
 
@@ -1241,76 +1131,90 @@ func requireCoinSnapshots(t *testing.T, snapshots <-chan matching.OrderBookSnaps
 	}
 }
 
-func assertCancelledOrderAndWallet(t *testing.T, db *gorm.DB, orderID uint, userID uint, asset string, available decimal.Decimal, locked decimal.Decimal) {
+
+// ledgerBalances는 사용자의 (available, locked) 잔액을 원장 캐시에서 읽는다.
+// 계정이 아직 없으면 0이다 — 그 자산을 만진 적이 없다는 뜻이다.
+func ledgerBalances(t *testing.T, db *gorm.DB, userID uint, asset string) (decimal.Decimal, decimal.Decimal) {
 	t.Helper()
 
-	var persisted model.Order
-	require.NoError(t, db.First(&persisted, orderID).Error)
-	assert.Equal(t, model.OrderStatusCancelled, persisted.Status)
-
-	walletRepo := repository.NewWalletRepository(db)
-	var wallet *model.Wallet
-	var err error
-	if asset == model.KRWAssetSymbol {
-		wallet, err = walletRepo.FindKRWWalletByUserID(userID)
-	} else {
-		wallet, err = walletRepo.FindByUserIDAndCoinSymbol(userID, asset)
+	var row struct {
+		Available decimal.Decimal
+		Locked    decimal.Decimal
 	}
-	require.NoError(t, err)
-	assert.True(t, wallet.AvailableBalance.Equal(available))
-	assert.True(t, wallet.LockedBalance.Equal(locked))
+	require.NoError(t, db.Raw(`
+		SELECT
+			COALESCE(SUM(b.balance) FILTER (WHERE a.account_type = 'USER_AVAILABLE'), 0) AS available,
+			COALESCE(SUM(b.balance) FILTER (WHERE a.account_type = 'USER_LOCKED'), 0)    AS locked
+		FROM accounts a
+		JOIN account_balances b ON b.account_id = a.id
+		WHERE a.owner_user_id = ? AND a.asset = ?`, userID, asset).Scan(&row).Error)
+	return row.Available, row.Locked
 }
 
-func requireLedgerEntries(t *testing.T, db *gorm.DB, userID uint, entryType model.LedgerEntryType, referenceType model.LedgerReferenceType, referenceID uint) []model.LedgerEntry {
+// assertLedgerBalances는 원장 잔액이 기대와 같은지 본다. 지갑 시절의
+// assertWalletBalances를 대신한다.
+func assertLedgerBalances(t *testing.T, db *gorm.DB, userID uint, asset string, available decimal.Decimal, locked decimal.Decimal) {
 	t.Helper()
 
-	var entries []model.LedgerEntry
-	require.NoError(t, db.
-		Where("user_id = ? AND entry_type = ? AND reference_type = ? AND reference_id = ?", userID, entryType, referenceType, referenceID).
-		Order("created_at DESC").
-		Order("id DESC").
-		Find(&entries).Error)
-	return entries
+	gotAvailable, gotLocked := ledgerBalances(t, db, userID, asset)
+	assert.True(t, gotAvailable.Equal(available),
+		"%s available=%s, 기대 %s", asset, gotAvailable.String(), available.String())
+	assert.True(t, gotLocked.Equal(locked),
+		"%s locked=%s, 기대 %s", asset, gotLocked.String(), locked.String())
 }
 
-func assertLedgerCount(t *testing.T, db *gorm.DB, userID uint, expected int64) {
+// assertCancelledOrderAndBalance는 주문이 CANCELLED로 커밋됐고 해제된 자산의
+// 원장 잔액이 기대와 같은지 함께 본다 — 단식 원장 시절의
+// assertCancelledOrderAndWallet을 대신한다.
+func assertCancelledOrderAndBalance(t *testing.T, db *gorm.DB, orderID uint, userID uint, asset string, available decimal.Decimal, locked decimal.Decimal) {
+	t.Helper()
+
+	var order model.Order
+	require.NoError(t, db.First(&order, orderID).Error)
+	assert.Equal(t, model.OrderStatusCancelled, order.Status)
+	assertLedgerBalances(t, db, userID, asset, available, locked)
+}
+
+// requireJournalByKey는 멱등성 키로 분개를 찾는다. 사건이 실제로 기록됐는지
+// 보는 단언이다 — 단식 원장 시절의 requireLedgerEntries를 대신한다.
+func requireJournalByKey(t *testing.T, db *gorm.DB, key string) model.JournalEntry {
+	t.Helper()
+
+	var journal model.JournalEntry
+	require.NoError(t, db.Where("idempotency_key = ?", key).First(&journal).Error,
+		"분개 %s가 없다", key)
+	return journal
+}
+
+// requireNoJournalByKey는 그 사건이 기록되지 않았음을 본다.
+func requireNoJournalByKey(t *testing.T, db *gorm.DB, key string) {
 	t.Helper()
 
 	var count int64
-	require.NoError(t, db.Model(&model.LedgerEntry{}).Where("user_id = ?", userID).Count(&count).Error)
-	assert.Equal(t, expected, count)
+	require.NoError(t, db.Model(&model.JournalEntry{}).Where("idempotency_key = ?", key).Count(&count).Error)
+	assert.Equal(t, int64(0), count, "분개 %s가 있으면 안 된다", key)
 }
 
-func assertLedgerDelta(t *testing.T, entry model.LedgerEntry, asset string, availableDelta string, lockedDelta string, availableAfter string, lockedAfter string) {
+// userPostingCount는 사용자의 계정에 달린 전기 수를 센다. assertLedgerCount의
+// 대체다 — "이 사용자에 대해 아무것도 기록되지 않았다"를 보는 데 쓴다.
+func userPostingCount(t *testing.T, db *gorm.DB, userID uint) int64 {
 	t.Helper()
 
-	assert.Equal(t, asset, entry.CoinSymbol)
-	assert.True(t, entry.AvailableDelta.Equal(decimal.RequireFromString(availableDelta)), "available_delta=%s", entry.AvailableDelta.String())
-	assert.True(t, entry.LockedDelta.Equal(decimal.RequireFromString(lockedDelta)), "locked_delta=%s", entry.LockedDelta.String())
-	assert.True(t, entry.AvailableBalanceAfter.Equal(decimal.RequireFromString(availableAfter)), "available_after=%s", entry.AvailableBalanceAfter.String())
-	assert.True(t, entry.LockedBalanceAfter.Equal(decimal.RequireFromString(lockedAfter)), "locked_after=%s", entry.LockedBalanceAfter.String())
+	var count int64
+	require.NoError(t, db.Raw(`
+		SELECT COUNT(*)
+		FROM postings p
+		JOIN accounts a ON a.id = p.account_id
+		WHERE a.owner_user_id = ?`, userID).Scan(&count).Error)
+	return count
 }
 
-func assertSettlementLedgerEntries(t *testing.T, db *gorm.DB, tradeID uint, idempotencyKey string, buyerID uint, sellerID uint, buyerKRWLockedAfter string, sellerBTCLockedAfter string) {
-	t.Helper()
+// orderHoldKey·orderReleaseKey는 order_ledger.go가 만드는 멱등성 키와 같은
+// 문자열을 만든다. 테스트가 키 문자열을 직접 적으면 구현이 바뀔 때 조용히 어긋난다.
+func orderHoldKey(orderID uint) string {
+	return fmt.Sprintf("order-hold:%d", orderID)
+}
 
-	var entries []model.LedgerEntry
-	require.NoError(t, db.
-		Where("entry_type = ? AND reference_type = ? AND reference_id = ?", model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, tradeID).
-		Order("user_id ASC").
-		Order("coin_symbol ASC").
-		Find(&entries).Error)
-	require.Len(t, entries, 4)
-	for _, entry := range entries {
-		assert.Equal(t, idempotencyKey, entry.ReferenceKey)
-	}
-
-	byUserAsset := make(map[string]model.LedgerEntry, len(entries))
-	for _, entry := range entries {
-		byUserAsset[fmt.Sprintf("%d/%s", entry.UserID, entry.CoinSymbol)] = entry
-	}
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "50.025", "-500.25", "50.025", buyerKRWLockedAfter)
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", buyerID, "BTC")], "BTC", "5", "0", "5", "0")
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, "BTC")], "BTC", "0", "-5", "0", sellerBTCLockedAfter)
-	assertLedgerDelta(t, byUserAsset[fmt.Sprintf("%d/%s", sellerID, model.KRWAssetSymbol)], model.KRWAssetSymbol, "449.775", "0", "449.775", "0")
+func orderReleaseKey(orderID uint, reason string) string {
+	return fmt.Sprintf("order-release:%d:%s", orderID, reason)
 }

@@ -24,9 +24,8 @@ type TradeBatchItem struct {
 // 전체가 롤백되어 아무것도 커밋되지 않는다 — 이 경우 결과는 nil이며, 호출자는 같은
 // 배치를 SettleTrade로 건별 폴백 처리해야 한다.
 //
-// 검증·산술은 SettleTrade와 정확히 같은 헬퍼(applyTradeFill, settleBuyerKRW,
-// creditBuyerCoinWithAcquisitionCost, settleSellerCoin, creditAvailable,
-// ledgerEntryFromWalletUpdate 등)를 재사용한다 — 배치 정산의 최종 상태는 같은 순서로
+// 검증·산술은 SettleTrade와 정확히 같은 헬퍼(applyTradeFill, tradePostings,
+// s.Ledger.Record 등)를 재사용한다 — 배치 정산의 최종 상태는 같은 순서로
 // SettleTrade를 N회 실행한 결과와 정확히 같아야 한다(등가성 불변식).
 func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]SettlementResult, error) {
 	if len(items) == 0 {
@@ -47,8 +46,6 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 	results := make([]SettlementResult, len(items))
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		orderRepo := s.OrderRepository.WithTx(tx)
-		walletRepo := s.WalletRepository.WithTx(tx)
-		ledgerRepo := s.LedgerRepository.WithTx(tx)
 
 		// 1. 중복 분리: idempotency_key IN (전체 키) 1왕복.
 		keys := make([]string, 0, len(items))
@@ -113,10 +110,8 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 			orderByID[lockedOrders[i].ID] = &lockedOrders[i]
 		}
 
-		// 4. 정적 검증(side·심볼 일치, settlementParticipants) + 지갑 키 수집.
+		// 4. 정적 검증(side·심볼 일치, settlementParticipants).
 		participantsByTrade := make(map[int]SettlementParticipants, len(newIndexes))
-		walletKeySet := make(map[repository.WalletKey]bool, len(newIndexes)*4)
-		creatableKeySet := make(map[repository.WalletKey]bool, len(newIndexes)*2)
 		for _, i := range newIndexes {
 			trade := items[i].Trade
 			buyOrder := orderByID[trade.BuyOrderID]
@@ -135,82 +130,47 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 				return err
 			}
 			participantsByTrade[i] = participants
-
-			buyerKRWKey := repository.WalletKey{UserID: participants.BuyerUserID, CoinSymbol: model.KRWAssetSymbol}
-			buyerCoinKey := repository.WalletKey{UserID: participants.BuyerUserID, CoinSymbol: trade.CoinSymbol}
-			sellerCoinKey := repository.WalletKey{UserID: participants.SellerUserID, CoinSymbol: trade.CoinSymbol}
-			sellerKRWKey := repository.WalletKey{UserID: participants.SellerUserID, CoinSymbol: model.KRWAssetSymbol}
-
-			walletKeySet[buyerKRWKey] = true
-			walletKeySet[buyerCoinKey] = true
-			walletKeySet[sellerCoinKey] = true
-			walletKeySet[sellerKRWKey] = true
-			creatableKeySet[buyerCoinKey] = true
-			creatableKeySet[sellerKRWKey] = true
 		}
 
-		allKeys := make([]repository.WalletKey, 0, len(walletKeySet))
-		for k := range walletKeySet {
-			allKeys = append(allKeys, k)
-		}
-
-		// 5. 지갑 확보: FindByKeys, 없는 키 중 생성 허용 역할만 CreateZeroBalanceWallets.
-		walletByKey, err := findWalletsByKeys(walletRepo, allKeys)
-		if err != nil {
-			return err
-		}
-		missingCreatable := make([]repository.WalletKey, 0)
-		for k := range walletKeySet {
-			if _, ok := walletByKey[k]; !ok && creatableKeySet[k] {
-				missingCreatable = append(missingCreatable, k)
-			}
-		}
-		if len(missingCreatable) > 0 {
-			// map 순회 순서는 무작위라, 겹치는 신규 지갑 키를 서로 다른 트랜잭션이
-			// 동시에 생성하면 배치 INSERT 행 순서가 반대로 나올 수 있다 — 정렬해
-			// 모든 트랜잭션이 같은 순서로 락을 요청하게 한다(sortedUintKeys와 같은 목적).
-			sort.Slice(missingCreatable, func(i, j int) bool {
-				if missingCreatable[i].UserID != missingCreatable[j].UserID {
-					return missingCreatable[i].UserID < missingCreatable[j].UserID
-				}
-				return missingCreatable[i].CoinSymbol < missingCreatable[j].CoinSymbol
-			})
-			if err := walletRepo.CreateZeroBalanceWallets(missingCreatable); err != nil {
-				return err
-			}
-			walletByKey, err = findWalletsByKeys(walletRepo, allKeys)
+		// 5. 이 배치가 만질 계정을 전부 확보하고 account_id 오름차순으로 한 번에 잠근다.
+		//
+		// Record는 자기 호출 안에서만 계정을 정렬한다. 체결마다 Record를 부르면 각
+		// 호출은 정렬돼 있어도 트랜잭션 전체의 획득 순서는 정렬되지 않는다 — 앞 체결이
+		// 큰 ID를 쥔 채 다음 체결이 작은 ID를 요구할 수 있고, 오름차순으로 잠그는
+		// HoldBatch와 만나면 순환 대기가 되어 교착상태가 된다.
+		//
+		// 잠글 집합은 전기에서 파생시킨다. refund·수수료 줄은 금액에 따라 있고 없고가
+		// 갈리므로, 손으로 나열하면 Record가 실제로 잠그는 집합과 어긋난다.
+		plans := make(map[int]tradeSettlementPlan, len(newIndexes))
+		accountSpecs := make([]repository.AccountSpec, 0, len(newIndexes)*6)
+		for _, i := range newIndexes {
+			trade := items[i].Trade
+			plan, err := planTradeSettlement(trade, orderByID[trade.BuyOrderID], participantsByTrade[i])
 			if err != nil {
 				return err
 			}
+			plans[i] = plan
+			accountSpecs = append(accountSpecs, postingAccountSpecs(plan.Postings)...)
 		}
-		for k := range walletKeySet {
-			if _, ok := walletByKey[k]; !ok {
-				return fmt.Errorf("wallet not found for user %d coin %s", k.UserID, k.CoinSymbol)
-			}
-		}
-
-		// 6. 지갑 일괄 락: 고유 지갑 ID 오름차순.
-		walletIDSet := make(map[uint]bool, len(walletByKey))
-		for _, w := range walletByKey {
-			walletIDSet[w.ID] = true
-		}
-		lockedWallets, err := walletRepo.LockByIDs(sortedUintKeys(walletIDSet))
+		accountRepo := s.Ledger.Accounts.WithTx(tx)
+		batchAccounts, err := accountRepo.EnsureAccounts(accountSpecs)
 		if err != nil {
 			return err
 		}
-		walletPtrByKey := make(map[repository.WalletKey]*model.Wallet, len(lockedWallets))
-		walletPtrByID := make(map[uint]*model.Wallet, len(lockedWallets))
-		for i := range lockedWallets {
-			w := &lockedWallets[i]
-			walletPtrByKey[repository.WalletKey{UserID: w.UserID, CoinSymbol: w.CoinSymbol}] = w
-			walletPtrByID[w.ID] = w
+		batchAccountIDs := make([]uint, 0, len(batchAccounts))
+		for _, account := range batchAccounts {
+			batchAccountIDs = append(batchAccountIDs, account.ID)
+		}
+		sort.Slice(batchAccountIDs, func(i, j int) bool { return batchAccountIDs[i] < batchAccountIDs[j] })
+		if _, err := accountRepo.LockBalances(batchAccountIDs); err != nil {
+			return err
 		}
 
-		// 7. 순차 산술: trade를 큐 순서대로, 전부 메모리에서 처리한다. 선행 trade의
-		// fold 결과가 후행 trade에 그대로 보인다(단건 순차 실행과 동일한 관점).
+		// 6. 순차 정산: trade를 큐 순서대로 처리한다. LedgerService.Record가 매번
+		// 계정을 잠그고 잔액 캐시를 갱신하므로, 같은 트랜잭션 안의 다음 trade는 앞선
+		// trade가 이미 반영한 잔액을 그대로 본다 — 지갑 시절의 명시적 fold가
+		// 여기서는 필요 없다. 위에서 이미 잠근 계정이라 Record의 재잠금은 대기가 없다.
 		touchedOrderIDs := make(map[uint]bool, len(newIndexes)*2)
-		touchedWalletIDs := make(map[uint]bool, len(newIndexes)*4)
-		var ledgerEntries []model.LedgerEntry
 
 		for _, i := range newIndexes {
 			trade := items[i].Trade
@@ -235,47 +195,23 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 			}
 
 			participants := participantsByTrade[i]
-			buyerKRW := walletPtrByKey[repository.WalletKey{UserID: participants.BuyerUserID, CoinSymbol: model.KRWAssetSymbol}]
-			buyerCoin := walletPtrByKey[repository.WalletKey{UserID: participants.BuyerUserID, CoinSymbol: trade.CoinSymbol}]
-			sellerCoin := walletPtrByKey[repository.WalletKey{UserID: participants.SellerUserID, CoinSymbol: trade.CoinSymbol}]
-			sellerKRW := walletPtrByKey[repository.WalletKey{UserID: participants.SellerUserID, CoinSymbol: model.KRWAssetSymbol}]
+			plan := plans[i]
 
-			reservedDebit := reservedBuyDebitAmount(buyOrder, trade)
-			executionDebit := executionQuote.Add(trade.BuyerFee)
-			sellerQuoteNet, err := amountAfterFee(executionQuote, trade.SellerFee, "seller")
-			if err != nil {
+			if _, _, err := s.Ledger.Record(tx, JournalInput{
+				EventType:      model.JournalEventTrade,
+				IdempotencyKey: fmt.Sprintf("trade:%s", trade.IdempotencyKey),
+				ReferenceType:  model.JournalReferenceTrade,
+				ReferenceID:    trade.ID,
+				Postings:       plan.Postings,
+			}); err != nil {
 				return err
 			}
-			buyerKRWUpdate, err := settleBuyerKRW(buyerKRW, reservedDebit, executionDebit)
-			if err != nil {
+			if err := applyAvgBuyPrice(tx, participants.BuyerUserID, trade.CoinSymbol, trade.Quantity, plan.ExecutionDebit); err != nil {
 				return err
 			}
-			buyerCoinUpdate, err := creditBuyerCoinWithAcquisitionCost(buyerCoin, trade.Quantity, executionDebit)
-			if err != nil {
+			if err := clearAvgBuyPriceIfEmpty(tx, participants.SellerUserID, trade.CoinSymbol); err != nil {
 				return err
 			}
-			sellerCoinUpdate, err := settleSellerCoin(sellerCoin, trade.Quantity)
-			if err != nil {
-				return err
-			}
-			sellerKRWUpdate, err := creditAvailable(sellerKRW, sellerQuoteNet)
-			if err != nil {
-				return err
-			}
-
-			// 원장 엔트리는 반드시 fold 전에 생성한다 — delta = update - 현재 잔고이므로
-			// 순서가 정합성 그 자체다.
-			ledgerEntries = append(ledgerEntries,
-				ledgerEntryFromWalletUpdate(buyerKRW, buyerKRWUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-				ledgerEntryFromWalletUpdate(buyerCoin, buyerCoinUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-				ledgerEntryFromWalletUpdate(sellerCoin, sellerCoinUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-				ledgerEntryFromWalletUpdate(sellerKRW, sellerKRWUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-			)
-
-			foldWalletBalanceUpdate(buyerKRW, buyerKRWUpdate)
-			foldWalletBalanceUpdate(buyerCoin, buyerCoinUpdate)
-			foldWalletBalanceUpdate(sellerCoin, sellerCoinUpdate)
-			foldWalletBalanceUpdate(sellerKRW, sellerKRWUpdate)
 
 			buyOrder.FilledAmount = buyFilled
 			buyOrder.FilledQuoteAmount = buyFilledQuote
@@ -286,15 +222,11 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 
 			touchedOrderIDs[buyOrder.ID] = true
 			touchedOrderIDs[sellOrder.ID] = true
-			touchedWalletIDs[buyerKRW.ID] = true
-			touchedWalletIDs[buyerCoin.ID] = true
-			touchedWalletIDs[sellerCoin.ID] = true
-			touchedWalletIDs[sellerKRW.ID] = true
 
 			results[i] = SettlementResult{Applied: true, TradeID: trade.ID}
 		}
 
-		// 8. 배치 쓰기.
+		// 7. 배치 쓰기: 주문 체결 상태만 남았다 — 잔고·원장은 각 Record 호출이 이미 반영했다.
 		orderUpdates := make([]repository.OrderExecutionBatchUpdate, 0, len(touchedOrderIDs))
 		for id := range touchedOrderIDs {
 			o := orderByID[id]
@@ -306,26 +238,6 @@ func (s *SettlementService) SettleTradeBatch(items []TradeBatchItem) ([]Settleme
 			})
 		}
 		if err := orderRepo.BatchUpdateExecutions(orderUpdates); err != nil {
-			return err
-		}
-
-		walletUpdates := make([]repository.WalletBatchUpdate, 0, len(touchedWalletIDs))
-		for id := range touchedWalletIDs {
-			w := walletPtrByID[id]
-			walletUpdates = append(walletUpdates, repository.WalletBatchUpdate{
-				WalletID:         w.ID,
-				AvailableBalance: w.AvailableBalance,
-				LockedBalance:    w.LockedBalance,
-				KRW:              w.KRW,
-				Quantity:         w.Quantity,
-				AvgBuyPrice:      w.AvgBuyPrice,
-			})
-		}
-		if err := walletRepo.BatchUpdateBalances(walletUpdates); err != nil {
-			return err
-		}
-
-		if err := ledgerRepo.CreateMany(ledgerEntries); err != nil {
 			return err
 		}
 
@@ -365,17 +277,6 @@ func markSettledOutboxBatch(tx *gorm.DB, ids []uint64) error {
 	return nil
 }
 
-// foldWalletBalanceUpdate는 계산된 업데이트를 메모리 지갑에 반영한다 — 단건 경로가
-// WalletBatchUpdate로 DB에 쓰는 5개 컬럼과 정확히 같은 필드다. 배치 내 다음 trade는
-// 커밋됐을 행과 동일한 상태를 본다.
-func foldWalletBalanceUpdate(wallet *model.Wallet, update WalletBalanceUpdate) {
-	wallet.AvailableBalance = update.AvailableBalance
-	wallet.LockedBalance = update.LockedBalance
-	wallet.KRW = update.KRW
-	wallet.Quantity = update.Quantity
-	wallet.AvgBuyPrice = update.AvgBuyPrice
-}
-
 func findTradesByIdempotencyKeys(tx *gorm.DB, keys []string) (map[string]model.Trade, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -387,18 +288,6 @@ func findTradesByIdempotencyKeys(tx *gorm.DB, keys []string) (map[string]model.T
 	result := make(map[string]model.Trade, len(trades))
 	for _, trade := range trades {
 		result[trade.IdempotencyKey] = trade
-	}
-	return result, nil
-}
-
-func findWalletsByKeys(walletRepo *repository.WalletRepository, keys []repository.WalletKey) (map[repository.WalletKey]model.Wallet, error) {
-	wallets, err := walletRepo.FindByKeys(keys)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[repository.WalletKey]model.Wallet, len(wallets))
-	for _, w := range wallets {
-		result[repository.WalletKey{UserID: w.UserID, CoinSymbol: w.CoinSymbol}] = w
 	}
 	return result, nil
 }

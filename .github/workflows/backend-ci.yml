@@ -77,8 +77,23 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      # -run Integration을 지우고 ./internal/handler를 목록에 더했다. 이름
+      # 필터가 있으면 "Integration"이 이름에 없는 테스트(원장 Task 6의
+      # T4~T10, 교착상태 회귀 2종, TestOrderAndSettlementPreserveAssets 등)가
+      # SKIP이 아니라 필터에 걸려 조용히 실행되지 않는다 — 로그에 흔적조차
+      # 없어 SKIP보다 나쁘다. handler 패키지 전체는 원래 이 목록에 없었다.
+      #
+      # -p 1은 유지한다: 세 패키지가 같은 스키마의 공유 test DB를 쓴다(CP2).
+      #
+      # TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint·
+      # TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex는 이제 각자
+      # 임시 스키마에서 008만 적용해 검증한다(order_idempotency_migration_isolation_test.go) —
+      # 공유 스키마의 goose_db_version을 건드리지 않으므로 더 이상 제외할
+      # 필요가 없다.
       - name: Run Postgres integration tests
-        run: go test -run Integration -v -p 1 ./internal/dbmigration ./internal/repository ./internal/service
+        run: >-
+          go test -v -p 1
+          ./internal/dbmigration ./internal/repository ./internal/service ./internal/handler
 
   docker-build:
     name: Docker build

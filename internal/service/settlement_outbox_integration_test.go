@@ -35,7 +35,7 @@ func TestIntegrationSettleTradeAbsorbsOutboxMarkInSameTransaction(t *testing.T) 
 	defer cleanupServiceUsers(t, db, buyerID, sellerID)
 
 	buyOrder, sellOrder := seedSettlementRows(t, db, buyerID, sellerID, decimal.NewFromInt(100_000), decimal.NewFromInt(5))
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		EngineSequence: 1,
@@ -78,7 +78,7 @@ func TestIntegrationSettleTradeFailureLeavesOutboxPending(t *testing.T) {
 	buyOrder, sellOrder := seedSettlementRowsWithStatuses(t, db, buyerID, sellerID,
 		decimal.NewFromInt(100_000), decimal.NewFromInt(5), decimal.NewFromInt(5),
 		model.OrderStatusCancelled, model.OrderStatusPending)
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 
 	trade := &model.Trade{
 		EngineSequence: 1,

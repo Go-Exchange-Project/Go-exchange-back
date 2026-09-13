@@ -42,7 +42,7 @@ func TestIntegrationOutboxReplaySettlesPendingTradeExactlyOnce(t *testing.T) {
 	require.NoError(t, db.Create(row).Error)
 	defer cleanupOutboxRows(t, db, row.ID)
 
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 	outboxRepo := repository.NewTradeOutboxRepository(db)
 	replayer := &OutboxReplayer{
 		Repo: outboxRepo,
@@ -66,10 +66,9 @@ func TestIntegrationOutboxReplaySettlesPendingTradeExactlyOnce(t *testing.T) {
 	require.NoError(t, db.Model(&model.Trade{}).Where("idempotency_key = ?", idempotencyKey).Count(&tradeCount).Error)
 	assert.Equal(t, int64(1), tradeCount, "리플레이로 정산(체결 기록)이 완결돼야 한다")
 
-	var buyerBTC model.Wallet
-	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", buyerID, "BTC").First(&buyerBTC).Error)
-	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)),
-		"매수자가 코인을 받아야 한다 (got %s)", buyerBTC.AvailableBalance)
+	buyerBTCAvail, _ := ledgerBalances(t, db, buyerID, "BTC")
+	assert.True(t, buyerBTCAvail.Equal(decimal.NewFromInt(5)),
+		"매수자가 코인을 받아야 한다 (got %s)", buyerBTCAvail)
 
 	// 같은 이벤트가 outbox에 한 번 더 남은 극단 케이스(마킹 실패 후 재부팅 등):
 	// 리플레이는 멱등이어야 한다.
@@ -84,8 +83,8 @@ func TestIntegrationOutboxReplaySettlesPendingTradeExactlyOnce(t *testing.T) {
 
 	require.NoError(t, db.Model(&model.Trade{}).Where("idempotency_key = ?", idempotencyKey).Count(&tradeCount).Error)
 	assert.Equal(t, int64(1), tradeCount, "중복 리플레이는 이중 정산을 만들면 안 된다")
-	require.NoError(t, db.Where("user_id = ? AND coin_symbol = ?", buyerID, "BTC").First(&buyerBTC).Error)
-	assert.True(t, buyerBTC.AvailableBalance.Equal(decimal.NewFromInt(5)), "잔고도 그대로여야 한다")
+	buyerBTCAvail, _ = ledgerBalances(t, db, buyerID, "BTC")
+	assert.True(t, buyerBTCAvail.Equal(decimal.NewFromInt(5)), "잔고도 그대로여야 한다")
 }
 
 // 크래시 시나리오 시뮬레이션(A-4 대칭): 부분 체결 하나(4주)와 그 잔여분에 대한
@@ -133,7 +132,7 @@ func TestIntegrationOutboxReplayFinishesPendingCancelExactlyOnce(t *testing.T) {
 	defer cleanupOutboxRows(t, db, cancelRow.ID)
 	require.Less(t, tradeRow.ID, cancelRow.ID, "trade가 cancel보다 먼저 outbox에 커밋된 순서를 전제로 한 테스트")
 
-	settlementService := NewSettlementService(db, repository.NewOrderRepository(db), repository.NewWalletRepository(db))
+	settlementService := NewSettlementService(db, repository.NewOrderRepository(db))
 	orderService := newIntegrationOrderService(db, nil)
 	outboxRepo := repository.NewTradeOutboxRepository(db)
 	replayer := &OutboxReplayer{
@@ -169,15 +168,12 @@ func TestIntegrationOutboxReplayFinishesPendingCancelExactlyOnce(t *testing.T) {
 		assert.Equal(t, model.TradeOutboxStatusProcessed, row.Status)
 	}
 
-	entries := requireLedgerEntries(t, db, buyerID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, buyOrder.ID)
-	require.Len(t, entries, 1, "잔여 hold 해제가 원장에 정확히 한 번 남아야 한다")
+	requireJournalByKey(t, db, orderReleaseKey(buyOrder.ID, releaseReasonCancel))
 
-	walletRepo := repository.NewWalletRepository(db)
-	afterFirstReplay, err := walletRepo.FindKRWWalletByUserID(buyerID)
-	require.NoError(t, err)
+	afterFirstAvail, afterFirstLocked := ledgerBalances(t, db, buyerID, model.KRWAssetSymbol)
 	// hold(10주, 1000.5) 중 체결된 4주 몫(400.2, 정산이 소진)과 잔여 6주 몫(600.3,
 	// 취소가 해제)이 정확히 전액을 커버해 locked가 0으로 떨어져야 한다.
-	assert.True(t, afterFirstReplay.LockedBalance.IsZero(), "locked=%s", afterFirstReplay.LockedBalance.String())
+	assert.True(t, afterFirstLocked.IsZero(), "locked=%s", afterFirstLocked.String())
 
 	// 같은 취소 이벤트가 outbox에 한 번 더 남은 극단 케이스(마킹 실패 후 재부팅 등):
 	// 리플레이는 멱등이어야 한다 — hold 이중 해제 없음.
@@ -193,13 +189,11 @@ func TestIntegrationOutboxReplayFinishesPendingCancelExactlyOnce(t *testing.T) {
 	require.NoError(t, db.First(&persisted, buyOrder.ID).Error)
 	assert.Equal(t, model.OrderStatusCancelled, persisted.Status)
 
-	entries = requireLedgerEntries(t, db, buyerID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, buyOrder.ID)
-	require.Len(t, entries, 1, "중복 리플레이는 hold를 이중 해제하면 안 된다")
+	requireJournalByKey(t, db, orderReleaseKey(buyOrder.ID, releaseReasonCancel))
 
-	afterDuplicateReplay, err := walletRepo.FindKRWWalletByUserID(buyerID)
-	require.NoError(t, err)
-	assert.True(t, afterDuplicateReplay.AvailableBalance.Equal(afterFirstReplay.AvailableBalance), "중복 리플레이 후 잔고가 그대로여야 한다")
-	assert.True(t, afterDuplicateReplay.LockedBalance.Equal(afterFirstReplay.LockedBalance), "중복 리플레이 후 hold가 그대로여야 한다")
+	afterDuplicateAvail, afterDuplicateLocked := ledgerBalances(t, db, buyerID, model.KRWAssetSymbol)
+	assert.True(t, afterDuplicateAvail.Equal(afterFirstAvail), "중복 리플레이 후 잔고가 그대로여야 한다")
+	assert.True(t, afterDuplicateLocked.Equal(afterFirstLocked), "중복 리플레이 후 hold가 그대로여야 한다")
 }
 
 // 크래시로 MarketOrderDone이 outbox에 남지 못한 시장가: 리플레이 후 파이널라이저가
@@ -210,14 +204,6 @@ func TestIntegrationStaleMarketOrderFinalizerReleasesHold(t *testing.T) {
 	defer cleanupServiceUsers(t, db, userID)
 
 	hold := decimal.NewFromInt(100_000)
-	wallet := model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              hold,
-		AvailableBalance: decimal.Zero,
-		LockedBalance:    hold,
-	}
-	require.NoError(t, db.Create(&wallet).Error)
 
 	staleOrder := model.Order{
 		UserID:       userID,
@@ -231,11 +217,12 @@ func TestIntegrationStaleMarketOrderFinalizerReleasesHold(t *testing.T) {
 		FilledAmount: decimal.Zero,
 	}
 	require.NoError(t, db.Create(&staleOrder).Error)
+	seedLockedBalance(t, db, userID, model.KRWAssetSymbol, hold, staleOrder.ID)
 
 	orderRepo := repository.NewOrderRepository(db)
 	finalizer := &StaleMarketOrderFinalizer{
 		Orders:    &singleUserMarketOrderSource{repo: orderRepo, userID: userID},
-		Completer: NewOrderService(orderRepo, repository.NewWalletRepository(db), nil),
+		Completer: NewOrderService(orderRepo, nil),
 		Logger:    discardServiceLogger(),
 	}
 
@@ -247,16 +234,8 @@ func TestIntegrationStaleMarketOrderFinalizerReleasesHold(t *testing.T) {
 	require.NoError(t, db.First(&finalized, staleOrder.ID).Error)
 	assert.Equal(t, model.OrderStatusCancelled, finalized.Status, "체결 없이 죽은 시장가는 취소로 확정돼야 한다")
 
-	var releasedWallet model.Wallet
-	require.NoError(t, db.First(&releasedWallet, wallet.ID).Error)
-	assert.True(t, releasedWallet.LockedBalance.IsZero(), "잔여 hold가 해제돼야 한다 (locked=%s)", releasedWallet.LockedBalance)
-	assert.True(t, releasedWallet.AvailableBalance.Equal(hold))
-
-	var releaseEntries int64
-	require.NoError(t, db.Model(&model.LedgerEntry{}).
-		Where("user_id = ? AND reference_id = ? AND entry_type = ?", userID, staleOrder.ID, model.LedgerEntryTypeOrderRelease).
-		Count(&releaseEntries).Error)
-	assert.Equal(t, int64(1), releaseEntries, "hold 해제가 원장에 남아야 한다")
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, hold, decimal.Zero)
+	requireJournalByKey(t, db, orderReleaseKey(staleOrder.ID, releaseReasonMarketRemain))
 }
 
 // 공유 테스트 DB에서 다른 테스트의 시장가 주문을 건드리지 않도록

@@ -8,8 +8,8 @@ import "time"
 // 위반 지속 이력 자체가 유용한 데이터).
 type ReconciliationViolation struct {
 	ID         uint      `gorm:"primaryKey"`
-	CheckName  string    `gorm:"not null"`       // ledger_wallet | asset_conservation | stale_market_order | legacy_mismatch
-	SubjectKey string    `gorm:"not null;index"` // 예: "wallet:123", "coin:BTC", "order:42"
+	CheckName  string    `gorm:"not null"`       // unbalanced_journal | balance_cache_drift | asset_totals | negative_account | stale_market_order
+	SubjectKey string    `gorm:"not null;index"` // unbalanced_journal: "journal:{id}" | balance_cache_drift·negative_account: "account:{id}" | asset_totals: "asset:{심볼}" | stale_market_order: "order:{id}"
 	Detail     string    `gorm:"type:text;not null"`
 	DetectedAt time.Time `gorm:"not null"`
 }

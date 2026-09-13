@@ -3,14 +3,13 @@
 -- Apply after AutoMigrate has created the base tables.
 --
 -- Existing data must satisfy these constraints before this migration can succeed.
-
-ALTER TABLE wallets
-    ALTER COLUMN user_id SET NOT NULL,
-    ALTER COLUMN coin_symbol SET NOT NULL,
-    ALTER COLUMN krw SET NOT NULL,
-    ALTER COLUMN quantity SET NOT NULL,
-    ALTER COLUMN available_balance SET NOT NULL,
-    ALTER COLUMN locked_balance SET NOT NULL;
+--
+-- The original wallets/ledger_entries constraints and indexes were removed here
+-- (double-entry ledger migration, Task 5): those tables no longer exist after
+-- AutoMigrate (model.Wallet/model.LedgerEntry deleted) and are dropped outright
+-- by migration 010. Editing this already-applied baseline is safe — goose tracks
+-- applied versions by number, not content, and this project rebuilds its dev/test
+-- schema from scratch rather than migrating old data forward.
 
 ALTER TABLE trades
     ADD COLUMN IF NOT EXISTS engine_sequence bigint NOT NULL DEFAULT 0,
@@ -54,21 +53,6 @@ ALTER TABLE failed_settlements
     ALTER COLUMN retry_count SET NOT NULL,
     ALTER COLUMN occurred_at SET NOT NULL;
 
-ALTER TABLE ledger_entries
-    ALTER COLUMN user_id SET NOT NULL,
-    ALTER COLUMN coin_symbol SET NOT NULL,
-    ALTER COLUMN entry_type SET NOT NULL,
-    ALTER COLUMN available_delta SET NOT NULL,
-    ALTER COLUMN locked_delta SET NOT NULL,
-    ALTER COLUMN available_balance_after SET NOT NULL,
-    ALTER COLUMN locked_balance_after SET NOT NULL,
-    ALTER COLUMN reference_type SET NOT NULL,
-    ALTER COLUMN reference_id SET NOT NULL,
-    ALTER COLUMN created_at SET NOT NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_user_id_coin_symbol
-    ON wallets (user_id, coin_symbol);
-
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency_key
     ON trades (idempotency_key);
 
@@ -95,54 +79,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_non_empty
 CREATE INDEX IF NOT EXISTS idx_failed_settlements_open_triage
     ON failed_settlements (status, occurred_at, id);
 
-CREATE INDEX IF NOT EXISTS idx_ledger_entries_user_asset_created_at
-    ON ledger_entries (user_id, coin_symbol, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_ledger_entries_type_reference
-    ON ledger_entries (entry_type, reference_type, reference_id);
-
-CREATE INDEX IF NOT EXISTS idx_ledger_entries_reference_key
-    ON ledger_entries (reference_key);
-
 -- +goose StatementBegin
 DO $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'wallets'::regclass
-          AND conname = 'ck_wallets_krw_non_negative'
-    ) THEN
-        ALTER TABLE wallets
-            ADD CONSTRAINT ck_wallets_krw_non_negative CHECK (krw >= 0);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'wallets'::regclass
-          AND conname = 'ck_wallets_quantity_non_negative'
-    ) THEN
-        ALTER TABLE wallets
-            ADD CONSTRAINT ck_wallets_quantity_non_negative CHECK (quantity >= 0);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'wallets'::regclass
-          AND conname = 'ck_wallets_available_balance_non_negative'
-    ) THEN
-        ALTER TABLE wallets
-            ADD CONSTRAINT ck_wallets_available_balance_non_negative CHECK (available_balance >= 0);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'wallets'::regclass
-          AND conname = 'ck_wallets_locked_balance_non_negative'
-    ) THEN
-        ALTER TABLE wallets
-            ADD CONSTRAINT ck_wallets_locked_balance_non_negative CHECK (locked_balance >= 0);
-    END IF;
-
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'trades'::regclass
@@ -285,53 +224,6 @@ BEGIN
             );
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'ledger_entries'::regclass
-          AND conname = 'ck_ledger_entries_entry_type_valid'
-    ) THEN
-        ALTER TABLE ledger_entries
-            ADD CONSTRAINT ck_ledger_entries_entry_type_valid
-            CHECK (entry_type IN ('DEV_FUND', 'ORDER_HOLD', 'ORDER_RELEASE', 'TRADE_SETTLEMENT'));
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'ledger_entries'::regclass
-          AND conname = 'ck_ledger_entries_reference_type_valid'
-    ) THEN
-        ALTER TABLE ledger_entries
-            ADD CONSTRAINT ck_ledger_entries_reference_type_valid
-            CHECK (reference_type IN ('DEV_FUND', 'ORDER', 'TRADE'));
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'ledger_entries'::regclass
-          AND conname = 'ck_ledger_entries_has_delta'
-    ) THEN
-        ALTER TABLE ledger_entries
-            ADD CONSTRAINT ck_ledger_entries_has_delta
-            CHECK (available_delta <> 0 OR locked_delta <> 0);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'ledger_entries'::regclass
-          AND conname = 'ck_ledger_entries_available_after_non_negative'
-    ) THEN
-        ALTER TABLE ledger_entries
-            ADD CONSTRAINT ck_ledger_entries_available_after_non_negative CHECK (available_balance_after >= 0);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'ledger_entries'::regclass
-          AND conname = 'ck_ledger_entries_locked_after_non_negative'
-    ) THEN
-        ALTER TABLE ledger_entries
-            ADD CONSTRAINT ck_ledger_entries_locked_after_non_negative CHECK (locked_balance_after >= 0);
-    END IF;
 END $$;
 -- +goose StatementEnd
 

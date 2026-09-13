@@ -47,16 +47,10 @@ func TestIntegrationCreateOrderSubmitsWhenIntakeHasRoom(t *testing.T) {
 	userID := serviceTestUserID(200)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(10000),
-		AvailableBalance: decimal.NewFromInt(10000),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
 
 	fakeEngine := &fakeAcceptanceEngine{admissible: true, submitSucceeds: true}
-	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), fakeEngine)
+	orderService := NewOrderService(repository.NewOrderRepository(db), fakeEngine)
 
 	order, err := createTestOrder(orderService, CreateOrderInput{
 		UserID:     userID,
@@ -74,11 +68,7 @@ func TestIntegrationCreateOrderSubmitsWhenIntakeHasRoom(t *testing.T) {
 	require.NoError(t, db.First(&persisted, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, persisted.Status)
 
-	walletRepo := repository.NewWalletRepository(db)
-	krwWallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.RequireFromString("4997.5")))
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.RequireFromString("5002.5")))
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.RequireFromString("4997.5"), decimal.RequireFromString("5002.5"))
 }
 
 // 게이트 거절: 유입 포화(IsIntakeAdmissible=false)면 DB 작업 없이 503(UNAVAILABLE),
@@ -88,16 +78,10 @@ func TestIntegrationCreateOrderFastRejectsWhenIntakeSaturated(t *testing.T) {
 	userID := serviceTestUserID(201)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(10000),
-		AvailableBalance: decimal.NewFromInt(10000),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
 
 	fakeEngine := &fakeAcceptanceEngine{admissible: false, submitSucceeds: true}
-	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), fakeEngine)
+	orderService := NewOrderService(repository.NewOrderRepository(db), fakeEngine)
 
 	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_gate"))
 
@@ -122,12 +106,7 @@ func TestIntegrationCreateOrderFastRejectsWhenIntakeSaturated(t *testing.T) {
 	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", userID).Count(&orderCount).Error)
 	assert.Equal(t, int64(0), orderCount)
 
-	walletRepo := repository.NewWalletRepository(db)
-	krwWallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(10000)))
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.Zero))
-	assertLedgerCount(t, db, userID, 0)
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000), decimal.Zero)
 }
 
 // 바운디드 거절+보상: 게이트는 통과하나 TrySubmitOrder=false(레이스)면 주문이
@@ -138,16 +117,10 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 	userID := serviceTestUserID(202)
 	defer cleanupServiceUsers(t, db, userID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID:           userID,
-		CoinSymbol:       model.KRWAssetSymbol,
-		KRW:              decimal.NewFromInt(10000),
-		AvailableBalance: decimal.NewFromInt(10000),
-		LockedBalance:    decimal.Zero,
-	}).Error)
+	seedLedgerFunds(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
 
 	fakeEngine := &fakeAcceptanceEngine{admissible: true, submitSucceeds: false}
-	orderService := NewOrderService(repository.NewOrderRepository(db), repository.NewWalletRepository(db), fakeEngine)
+	orderService := NewOrderService(repository.NewOrderRepository(db), fakeEngine)
 
 	before := testutil.ToFloat64(metrics.OrdersAdmissionRejectedTotal.WithLabelValues("engine_handoff"))
 
@@ -176,30 +149,20 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 	require.NoError(t, db.Where("user_id = ?", userID).First(&persisted).Error)
 	assert.Equal(t, model.OrderStatusRejected, persisted.Status)
 
-	walletRepo := repository.NewWalletRepository(db)
-	krwWallet, err := walletRepo.FindKRWWalletByUserID(userID)
-	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.NewFromInt(10000)), "홀드가 전액 해제돼 원래 잔고로 복원돼야 한다")
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.Zero))
+	assertLedgerBalances(t, db, userID, model.KRWAssetSymbol, decimal.NewFromInt(10000), decimal.Zero)
 
-	holds := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderHold, model.LedgerReferenceTypeOrder, persisted.ID)
-	require.Len(t, holds, 1)
-	releases := requireLedgerEntries(t, db, userID, model.LedgerEntryTypeOrderRelease, model.LedgerReferenceTypeOrder, persisted.ID)
-	require.Len(t, releases, 1)
+	requireJournalByKey(t, db, orderHoldKey(persisted.ID))
+	requireJournalByKey(t, db, orderReleaseKey(persisted.ID, releaseReasonRejected))
 
-	subject := fmt.Sprintf("wallet:%d", krwWallet.ID)
+	accountID := userAvailableAccountID(t, db, userID, model.KRWAssetSymbol)
+	subject := fmt.Sprintf("account:%d", accountID)
 	worker := &ReconciliationWorker{Repository: repository.NewReconciliationRepository(db)}
 	worker.RunOnce()
 	t.Cleanup(func() {
 		require.NoError(t, db.Where("subject_key = ?", subject).Delete(&model.ReconciliationViolation{}).Error)
 	})
 	violations := findViolationsBySubject(t, db, []string{subject})
-	for _, v := range violations[subject] {
-		// legacy_mismatch는 이 테스트가 지갑을 원장 기록 없이 직접 시드해서 나오는
-		// 알려진 잡음이다(classifyLedgerWalletRow 참고, 버그 아님). 여기서 증명하려는
-		// 것은 hold+release 쌍이 실제 정합 위반(ledger_wallet)을 만들지 않는다는 것.
-		assert.NotEqual(t, "ledger_wallet", v.CheckName, "보상 후 실제 원장-지갑 불일치가 없어야 한다: %+v", v)
-	}
+	assert.Empty(t, violations[subject], "보상 후 실제 검산 위반이 없어야 한다: %+v", violations[subject])
 }
 
 // 코디네이터 경유: OrderService.HoldCoordinator를 실제로 기동한 코디네이터로 주입하면
@@ -209,33 +172,21 @@ func TestIntegrationCreateOrderCompensatesWhenHandoffTimesOut(t *testing.T) {
 func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	db := openServiceIntegrationDB(t)
 	orderRepo := repository.NewOrderRepository(db)
-	walletRepo := repository.NewWalletRepository(db)
-	ledgerRepo := repository.NewLedgerRepository(db)
-
 	buyerID := serviceTestUserID(205)
 	poorBuyerID := serviceTestUserID(206)
 	defer cleanupServiceUsers(t, db, buyerID, poorBuyerID)
 
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: buyerID, CoinSymbol: model.KRWAssetSymbol,
-		KRW: decimal.NewFromInt(10000), AvailableBalance: decimal.NewFromInt(10000), LockedBalance: decimal.Zero,
-	}).Error)
-	require.NoError(t, db.Create(&model.Wallet{
-		UserID: poorBuyerID, CoinSymbol: model.KRWAssetSymbol,
-		KRW: decimal.NewFromInt(10), AvailableBalance: decimal.NewFromInt(10), LockedBalance: decimal.Zero,
-	}).Error)
-	// 리컨실리에이션이 원장 이력 없는 시드 잔고를 실제 위반(ledger_wallet)으로 오분류하지
-	// 않도록(classifyLedgerWalletRow: 원장 항목이 하나도 없으면 legacy_mismatch로 봐줄
-	// 근거가 없어 안전하게 ledger_wallet 처리) 초기 자금 원장 항목을 남겨둔다.
-	seedReconciliationLedgerEntry(t, db, buyerID, model.KRWAssetSymbol, decimal.NewFromInt(10000), decimal.Zero, decimal.NewFromInt(10000), decimal.Zero)
-	seedReconciliationLedgerEntry(t, db, poorBuyerID, model.KRWAssetSymbol, decimal.NewFromInt(10), decimal.Zero, decimal.NewFromInt(10), decimal.Zero)
+	// 원장은 출처가 하나라 지급 한 번이면 원장·잔액 캐시 일관성이 구조적으로
+	// 보장된다 — 지갑 시절처럼 지갑과 원장 두 곳을 따로 심을 필요가 없다.
+	seedLedgerFunds(t, db, buyerID, model.KRWAssetSymbol, decimal.NewFromInt(10000))
+	seedLedgerFunds(t, db, poorBuyerID, model.KRWAssetSymbol, decimal.NewFromInt(10))
 
-	coordinator := NewHoldCoordinator(db, orderRepo, walletRepo, ledgerRepo, repository.NewOrderIdempotencyRepository(db), 0)
+	coordinator := NewHoldCoordinator(db, orderRepo, NewLedgerService(db), repository.NewOrderIdempotencyRepository(db), 0)
 	go coordinator.Run()
 	defer coordinator.Shutdown()
 
 	fakeEngine := &fakeAcceptanceEngine{admissible: true, submitSucceeds: true}
-	orderService := NewOrderService(orderRepo, walletRepo, fakeEngine)
+	orderService := NewOrderService(orderRepo, fakeEngine)
 	orderService.HoldCoordinator = coordinator
 
 	// 정상: 코디네이터 경유 홀드 성공.
@@ -250,10 +201,7 @@ func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	require.NoError(t, db.First(&persisted, order.ID).Error)
 	assert.Equal(t, model.OrderStatusPending, persisted.Status)
 
-	krwWallet, err := walletRepo.FindKRWWalletByUserID(buyerID)
-	require.NoError(t, err)
-	assert.True(t, krwWallet.AvailableBalance.Equal(decimal.RequireFromString("4997.5")))
-	assert.True(t, krwWallet.LockedBalance.Equal(decimal.RequireFromString("5002.5")))
+	assertLedgerBalances(t, db, buyerID, model.KRWAssetSymbol, decimal.RequireFromString("4997.5"), decimal.RequireFromString("5002.5"))
 
 	// 잔고 부족: 코디네이터 경유라도 홀드 실패는 ConflictError(409)로 전파, 주문 미생성.
 	poorOrder, err := createTestOrder(orderService, CreateOrderInput{
@@ -269,14 +217,11 @@ func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	require.NoError(t, db.Model(&model.Order{}).Where("user_id = ?", poorBuyerID).Count(&poorOrderCount).Error)
 	assert.Equal(t, int64(0), poorOrderCount)
 
-	poorWallet, err := walletRepo.FindKRWWalletByUserID(poorBuyerID)
-	require.NoError(t, err)
-	assert.True(t, poorWallet.AvailableBalance.Equal(decimal.NewFromInt(10)))
-	assert.True(t, poorWallet.LockedBalance.Equal(decimal.Zero))
+	assertLedgerBalances(t, db, poorBuyerID, model.KRWAssetSymbol, decimal.NewFromInt(10), decimal.Zero)
 
 	subjects := []string{
-		fmt.Sprintf("wallet:%d", krwWallet.ID),
-		fmt.Sprintf("wallet:%d", poorWallet.ID),
+		fmt.Sprintf("account:%d", userAvailableAccountID(t, db, buyerID, model.KRWAssetSymbol)),
+		fmt.Sprintf("account:%d", userAvailableAccountID(t, db, poorBuyerID, model.KRWAssetSymbol)),
 	}
 	worker := &ReconciliationWorker{Repository: repository.NewReconciliationRepository(db)}
 	worker.RunOnce()
@@ -285,10 +230,6 @@ func TestIntegrationCreateOrderViaHoldCoordinator(t *testing.T) {
 	})
 	violations := findViolationsBySubject(t, db, subjects)
 	for _, subjectViolations := range violations {
-		for _, v := range subjectViolations {
-			// legacy_mismatch는 지갑을 원장 기록 없이 직접 시드해서 나오는 알려진 잡음
-			// (버그 아님) — 여기서 증명하려는 것은 실제 ledger_wallet 불일치가 없다는 것.
-			assert.NotEqual(t, "ledger_wallet", v.CheckName, "코디네이터 경유 홀드가 실제 원장-지갑 불일치를 만들면 안 된다: %+v", v)
-		}
+		assert.Empty(t, subjectViolations, "코디네이터 경유 홀드가 실제 검산 위반을 만들면 안 된다: %+v", subjectViolations)
 	}
 }

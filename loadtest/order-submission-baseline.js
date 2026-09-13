@@ -56,6 +56,12 @@ export function setup() {
     );
   }
 
+  // /dev/wallets/fund의 request_key는 필수다(멱등 지급). setup()은 k6 실행당
+  // 한 번만 돌므로 이 값도 실행마다 하나다 — 사용자 번호만 키에 넣으면, 같은
+  // 테스트 DB에 재실행할 때(위 register-or-login 폴백으로 재실행 가능하다)
+  // 서버가 같은 지급 요청으로 보고 두 번째 실행에서 잔고를 늘려주지 않는다.
+  const FUND_RUN_ID = `${Date.now()}`;
+
   const users = [];
   for (let i = 1; i <= TOTAL_USERS; i++) {
     // Alternate role by parity (not a contiguous 1..25/26..50 split) so that
@@ -104,8 +110,8 @@ export function setup() {
 
     const fundBody =
       role === 'buyer'
-        ? { coin_symbol: 'KRW', amount: BUYER_KRW_FUNDING }
-        : { coin_symbol: COIN_SYMBOL, amount: SELLER_BTC_FUNDING };
+        ? { coin_symbol: 'KRW', amount: BUYER_KRW_FUNDING, request_key: `loadtest-fund-${FUND_RUN_ID}-${i}` }
+        : { coin_symbol: COIN_SYMBOL, amount: SELLER_BTC_FUNDING, request_key: `loadtest-fund-${FUND_RUN_ID}-${i}` };
 
     const fundRes = http.post(`${BASE_URL}/dev/wallets/fund`, JSON.stringify(fundBody), {
       headers: {

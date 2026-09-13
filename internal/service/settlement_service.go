@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -17,10 +16,9 @@ import (
 )
 
 type SettlementService struct {
-	DB               *gorm.DB
-	OrderRepository  *repository.OrderRepository
-	WalletRepository *repository.WalletRepository
-	LedgerRepository *repository.LedgerRepository
+	DB              *gorm.DB
+	OrderRepository *repository.OrderRepository
+	Ledger          *LedgerService
 }
 
 type SettlementParticipants struct {
@@ -34,12 +32,11 @@ type SettlementResult struct {
 	TradeID   uint
 }
 
-func NewSettlementService(db *gorm.DB, orderRepo *repository.OrderRepository, walletRepo *repository.WalletRepository) *SettlementService {
+func NewSettlementService(db *gorm.DB, orderRepo *repository.OrderRepository) *SettlementService {
 	return &SettlementService{
-		DB:               db,
-		OrderRepository:  orderRepo,
-		WalletRepository: walletRepo,
-		LedgerRepository: repository.NewLedgerRepository(db),
+		DB:              db,
+		OrderRepository: orderRepo,
+		Ledger:          NewLedgerService(db),
 	}
 }
 
@@ -92,8 +89,6 @@ func (s *SettlementService) SettleTrade(trade *model.Trade, outboxEventID uint64
 		}
 
 		orderRepo := s.OrderRepository.WithTx(tx)
-		walletRepo := s.WalletRepository.WithTx(tx)
-		ledgerRepo := s.LedgerRepository.WithTx(tx)
 
 		buyOrder, err := orderRepo.FindByIDForUpdate(trade.BuyOrderID)
 		if err != nil {
@@ -134,34 +129,7 @@ func (s *SettlementService) SettleTrade(trade *model.Trade, outboxEventID uint64
 			return fmt.Errorf("sell order fill: %w", err)
 		}
 
-		wallets, err := lockSettlementWallets(walletRepo, participants, trade.CoinSymbol)
-		if err != nil {
-			return err
-		}
-		buyerKRW := wallets.BuyerKRW
-		buyerCoin := wallets.BuyerCoin
-		sellerKRW := wallets.SellerKRW
-		sellerCoin := wallets.SellerCoin
-
-		reservedDebit := reservedBuyDebitAmount(buyOrder, trade)
-		executionDebit := executionQuote.Add(trade.BuyerFee)
-		sellerQuoteNet, err := amountAfterFee(executionQuote, trade.SellerFee, "seller")
-		if err != nil {
-			return err
-		}
-		buyerKRWUpdate, err := settleBuyerKRW(buyerKRW, reservedDebit, executionDebit)
-		if err != nil {
-			return err
-		}
-		buyerCoinUpdate, err := creditBuyerCoinWithAcquisitionCost(buyerCoin, trade.Quantity, executionDebit)
-		if err != nil {
-			return err
-		}
-		sellerCoinUpdate, err := settleSellerCoin(sellerCoin, trade.Quantity)
-		if err != nil {
-			return err
-		}
-		sellerKRWUpdate, err := creditAvailable(sellerKRW, sellerQuoteNet)
+		plan, err := planTradeSettlement(trade, buyOrder, participants)
 		if err != nil {
 			return err
 		}
@@ -173,22 +141,19 @@ func (s *SettlementService) SettleTrade(trade *model.Trade, outboxEventID uint64
 			return err
 		}
 
-		if err := walletRepo.BatchUpdateBalances([]repository.WalletBatchUpdate{
-			{WalletID: buyerKRW.ID, AvailableBalance: buyerKRWUpdate.AvailableBalance, LockedBalance: buyerKRWUpdate.LockedBalance, KRW: buyerKRWUpdate.KRW, Quantity: buyerKRWUpdate.Quantity, AvgBuyPrice: buyerKRWUpdate.AvgBuyPrice},
-			{WalletID: buyerCoin.ID, AvailableBalance: buyerCoinUpdate.AvailableBalance, LockedBalance: buyerCoinUpdate.LockedBalance, KRW: buyerCoinUpdate.KRW, Quantity: buyerCoinUpdate.Quantity, AvgBuyPrice: buyerCoinUpdate.AvgBuyPrice},
-			{WalletID: sellerCoin.ID, AvailableBalance: sellerCoinUpdate.AvailableBalance, LockedBalance: sellerCoinUpdate.LockedBalance, KRW: sellerCoinUpdate.KRW, Quantity: sellerCoinUpdate.Quantity, AvgBuyPrice: sellerCoinUpdate.AvgBuyPrice},
-			{WalletID: sellerKRW.ID, AvailableBalance: sellerKRWUpdate.AvailableBalance, LockedBalance: sellerKRWUpdate.LockedBalance, KRW: sellerKRWUpdate.KRW, Quantity: sellerKRWUpdate.Quantity, AvgBuyPrice: sellerKRWUpdate.AvgBuyPrice},
+		if _, _, err := s.Ledger.Record(tx, JournalInput{
+			EventType:      model.JournalEventTrade,
+			IdempotencyKey: fmt.Sprintf("trade:%s", trade.IdempotencyKey),
+			ReferenceType:  model.JournalReferenceTrade,
+			ReferenceID:    trade.ID,
+			Postings:       plan.Postings,
 		}); err != nil {
 			return err
 		}
-
-		entries := []model.LedgerEntry{
-			ledgerEntryFromWalletUpdate(buyerKRW, buyerKRWUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-			ledgerEntryFromWalletUpdate(buyerCoin, buyerCoinUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-			ledgerEntryFromWalletUpdate(sellerCoin, sellerCoinUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
-			ledgerEntryFromWalletUpdate(sellerKRW, sellerKRWUpdate, model.LedgerEntryTypeTradeSettlement, model.LedgerReferenceTypeTrade, trade.ID, trade.IdempotencyKey),
+		if err := applyAvgBuyPrice(tx, participants.BuyerUserID, trade.CoinSymbol, trade.Quantity, plan.ExecutionDebit); err != nil {
+			return err
 		}
-		if err := ledgerRepo.CreateMany(entries); err != nil {
+		if err := clearAvgBuyPriceIfEmpty(tx, participants.SellerUserID, trade.CoinSymbol); err != nil {
 			return err
 		}
 
@@ -211,63 +176,6 @@ func markSettledOutbox(tx *gorm.DB, outboxEventID uint64) error {
 			"status":       model.TradeOutboxStatusProcessed,
 			"processed_at": time.Now().UTC(),
 		}).Error
-}
-
-type settlementWallets struct {
-	BuyerKRW   *model.Wallet
-	BuyerCoin  *model.Wallet
-	SellerKRW  *model.Wallet
-	SellerCoin *model.Wallet
-}
-
-// lockSettlementWallets는 데드락을 막기 위해 지갑을 2단계로 잠급니다.
-// 1단계: 락 없이 4개 지갑의 ID만 확보(없는 지갑은 생성).
-// 2단계: ID 오름차순으로 한 번에 FOR UPDATE.
-// 모든 정산이 같은 순서로 잠그므로 지갑 간 AB-BA 데드락이 성립하지 않습니다.
-// 잔고 산술은 반드시 2단계에서 잠근 행으로만 해야 합니다(1단계 값은 stale).
-func lockSettlementWallets(walletRepo *repository.WalletRepository, participants SettlementParticipants, coinSymbol string) (settlementWallets, error) {
-	buyerKRWRef, err := walletRepo.FindKRWWalletByUserID(participants.BuyerUserID)
-	if err != nil {
-		return settlementWallets{}, err
-	}
-	buyerCoinRef, err := walletRepo.FindOrCreateByUserIDAndCoinSymbol(participants.BuyerUserID, coinSymbol)
-	if err != nil {
-		return settlementWallets{}, err
-	}
-	sellerKRWRef, err := walletRepo.FindOrCreateByUserIDAndCoinSymbol(participants.SellerUserID, model.KRWAssetSymbol)
-	if err != nil {
-		return settlementWallets{}, err
-	}
-	sellerCoinRef, err := walletRepo.FindByUserIDAndCoinSymbol(participants.SellerUserID, coinSymbol)
-	if err != nil {
-		return settlementWallets{}, err
-	}
-
-	ids := []uint{buyerKRWRef.ID, buyerCoinRef.ID, sellerKRWRef.ID, sellerCoinRef.ID}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	locked, err := walletRepo.LockByIDs(ids)
-	if err != nil {
-		return settlementWallets{}, err
-	}
-
-	wallets := settlementWallets{}
-	for i := range locked {
-		wallet := &locked[i]
-		switch wallet.ID {
-		case buyerKRWRef.ID:
-			wallets.BuyerKRW = wallet
-		case buyerCoinRef.ID:
-			wallets.BuyerCoin = wallet
-		case sellerKRWRef.ID:
-			wallets.SellerKRW = wallet
-		case sellerCoinRef.ID:
-			wallets.SellerCoin = wallet
-		}
-	}
-	if wallets.BuyerKRW == nil || wallets.BuyerCoin == nil || wallets.SellerKRW == nil || wallets.SellerCoin == nil {
-		return settlementWallets{}, fmt.Errorf("settlement wallet lock did not resolve all four wallets")
-	}
-	return wallets, nil
 }
 
 func applyTradeFill(order *model.Order, tradeQuantity decimal.Decimal, tradeQuoteAmount decimal.Decimal) (decimal.Decimal, decimal.Decimal, model.OrderStatus, error) {

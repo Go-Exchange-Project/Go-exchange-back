@@ -6,11 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 func TestOrderIdempotencyKeysIntegration(t *testing.T) {
@@ -117,86 +115,12 @@ WHERE table_schema = current_schema()
 	})
 }
 
-// 제약은 conname 존재만 보고 조건부로 만든다. 같은 이름의 잘못된 제약이 이미 있으면
-// 이름만으로 통과하므로, 실제 정의 검증이 없으면 틀린 스키마가 version 8로 기록된다.
-func TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint(t *testing.T) {
-	wrong := map[string]struct{ name, definition string }{
-		"UNIQUE 범위가 전역이다": {
-			"order_idempotency_keys_user_key_unique", "UNIQUE (idempotency_key)"},
-		"키 길이 상한이 다르다": {
-			"order_idempotency_keys_key_length",
-			"CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 1280)"},
-		"outcome 목록이 다르다": {
-			"order_idempotency_keys_outcome_check",
-			"CHECK (outcome IN ('PENDING','ACCEPTED','REJECTED'))"},
-	}
-
-	for name, tc := range wrong {
-		t.Run(name, func(t *testing.T) {
-			db := testdb.OpenIntegrationDB(t)
-
-			require.NoError(t, db.Exec(
-				`ALTER TABLE order_idempotency_keys DROP CONSTRAINT `+tc.name).Error)
-			require.NoError(t, db.Exec(
-				`ALTER TABLE order_idempotency_keys ADD CONSTRAINT `+tc.name+` `+tc.definition).Error)
-			t.Cleanup(func() {
-				require.NoError(t, db.Exec(
-					`ALTER TABLE order_idempotency_keys DROP CONSTRAINT IF EXISTS `+tc.name).Error)
-				reapply008(t, db)
-			})
-
-			require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
-
-			err := dbmigration.Up(db)
-
-			require.Error(t, err, "잘못된 동명 제약인데 migration이 성공했다")
-			var applied int64
-			require.NoError(t, db.Raw(
-				`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
-			assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
-		})
-	}
-}
-
-// 같은 이름의 잘못된 인덱스가 있으면 migration이 실패하고 version 8이 기록되지 않아야
-// 한다. IF NOT EXISTS만으로는 조용히 통과한다.
-func TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex(t *testing.T) {
-	db := testdb.OpenIntegrationDB(t)
-
-	require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
-	// predicate 없는 전체 인덱스를 같은 이름으로 만든다.
-	require.NoError(t, db.Exec(
-		`CREATE INDEX order_idempotency_pending_updated_at ON order_idempotency_keys (updated_at)`).Error)
-	// 이 테스트는 goose version 8 행을 지우고 008을 실패시킨다. 다음 테스트가 우연히
-	// 복구해 주기를 기대하지 않고, 여기서 008을 다시 적용해 인덱스와 version을 모두 되돌린다.
-	t.Cleanup(func() {
-		require.NoError(t, db.Exec(`DROP INDEX IF EXISTS order_idempotency_pending_updated_at`).Error)
-		reapply008(t, db)
-	})
-
-	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
-
-	err := dbmigration.Up(db)
-
-	require.Error(t, err, "잘못된 동명 인덱스인데 migration이 성공했다")
-	var applied int64
-	require.NoError(t, db.Raw(
-		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
-	assert.Zero(t, applied, "실패했는데 version 8이 기록됐다")
-}
-
-// reapply008은 스키마를 훼손한 테스트가 끝난 뒤 008을 다시 적용한다.
-//
-// version 8 행을 먼저 지우는 것이 핵심이다. migration이 성공해 버린 경우에는 version 8이
-// 남아 goose가 "no migrations to run"으로 건너뛰고, 훼손된 스키마가 그대로 남는다.
-func reapply008(t *testing.T, db *gorm.DB) {
-	t.Helper()
-
-	require.NoError(t, db.Exec(`DELETE FROM goose_db_version WHERE version_id = 8`).Error)
-	require.NoError(t, dbmigration.Up(db), "cleanup에서 008 재적용이 실패했다")
-
-	var applied int64
-	require.NoError(t, db.Raw(
-		`SELECT count(*) FROM goose_db_version WHERE version_id = 8 AND is_applied`).Scan(&applied).Error)
-	require.EqualValues(t, 1, applied, "cleanup 후에도 version 8이 복구되지 않았다")
-}
+// TestOrderIdempotencyMigrationFailsOnWrongSameNamedConstraint과
+// TestOrderIdempotencyMigrationFailsOnWrongSameNamedIndex는
+// order_idempotency_migration_isolation_test.go(package dbmigration)에 있다.
+// 이 파일이 아닌 이유: 이 두 테스트는 goose_db_version의 버전 8 행을 지운 뒤
+// 008을 다시 적용해야 하는데, 이 파일이 쓰는 공유 testdb 스키마는 9·10이 이미
+// 적용돼 있어 goose가 그 재적용을 거부한다 — 격리된 임시 스키마가 필요하고,
+// 그 스키마 안에서는 goose.UpTo(..., 8)을 이 패키지 안에서 직접 불러야 해서
+// (dbmigration 패키지 밖에서는 비공개 migrationsDir()을 쓸 수 없다) 내부 테스트
+// 패키지(package dbmigration)에 둔다.
