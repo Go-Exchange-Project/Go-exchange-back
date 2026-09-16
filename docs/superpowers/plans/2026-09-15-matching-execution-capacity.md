@@ -75,7 +75,7 @@
 - [ ] **Step 4:** 이 변경으로 깨지는 기존 테스트를 설계 §9.1대로 고친다.
   - `TestBackpressureBlocksIntakeNotLatchedOrder`: quantum (1,1). 워터마크 미만 11칸을 **Start 전에** 채운다. 이후 단계(resting setup, probe, 취소 4건, 차단 주문, 소비 재개)는 그대로. 각 단계의 `free`와 조각 시작 조건 3, 워터마크 12의 관계를 주석으로 남긴다.
   - `TestStopDrainsQueuedOrderAndCancel`: quantum (1,1). resting 주문을 Start 전에 `GetOrderBook("BTC").AddOrder`로 직접 배치, 13칸도 Start 전에 채운다. queued order·cancel·Stop·drain 단언은 그대로.
-  - `TestSliceEmitBlockIncludesMarketOrderDone`(cap 4): 기본 quantum이면 panic하므로 이 Task에서는 quantum (1,1)(조각 시작 3칸)로 맞춰 컴파일·실행만 유지한다. 의미 대체는 Task 3.
+  - `TestSliceEmitBlockIncludesMarketOrderDone`(cap 4): 기본 quantum이면 panic하므로 이 Task에서는 quantum **(2,1)**(조각 시작 4칸 = cap 4)로 맞춰 기존 단언을 그대로 유지한다. 예산 2라 체결 2건 + MarketOrderDone이 조각 하나에 들어가 원래 구조(dummy 2건 뒤 MarketOrderDone send가 막힘)가 보존된다. (1,1)로 두면 조각이 2개로 나뉘어 "조각 정확히 1개" 단언이 깨진다(구현 세션 Task 1에서 발견). 의미 대체는 Task 3.
   - 그 밖에 `Start()` 전에 작은 채널을 끼우는 테스트가 있으면 같은 원칙으로 quantum을 맞춘다(`grep -n "ExecutionCh = make"`로 전수 확인하고 목록을 보고서에 적는다).
 - [ ] **Step 5 (GREEN):** `go test ./internal/matching -count=1` 전체 PASS.
 

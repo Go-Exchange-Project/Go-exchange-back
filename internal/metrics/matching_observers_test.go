@@ -64,6 +64,7 @@ func TestNewMatchingEngineObserversFeedsAllMetrics(t *testing.T) {
 	obs.Cancel(13 * time.Millisecond)
 	obs.EmitBlock(matching.EmitTrade, time.Millisecond)
 	obs.Yield()
+	obs.ParkDuration(17 * time.Millisecond)
 
 	cases := []struct {
 		name      string
@@ -77,6 +78,7 @@ func TestNewMatchingEngineObserversFeedsAllMetrics(t *testing.T) {
 		{"order_wait", "matching_engine_order_queue_wait_seconds", MatchingEngineOrderQueueWait, 0.007},
 		{"per_order", "matching_engine_executions_per_order", MatchingEngineExecutionsPerOrder, 11},
 		{"cancel_wait", "matching_engine_cancel_queue_wait_seconds", MatchingEngineCancelQueueWait, 0.013},
+		{"park_duration", "matching_engine_execution_capacity_park_seconds", MatchingEngineExecutionCapacityParkDuration, 0.017},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,6 +90,9 @@ func TestNewMatchingEngineObserversFeedsAllMetrics(t *testing.T) {
 	}
 
 	require.Equal(t, float64(1), testutil.ToFloat64(MatchingEngineQuantumYields))
+
+	obs.CancelBackpressured()
+	require.Equal(t, float64(1), testutil.ToFloat64(MatchingEngineCancelBackpressured))
 
 	tradeCount, tradeSum := histVecSample(t, MatchingEngineEmitBlock, "event", string(matching.EmitTrade))
 	require.Equal(t, uint64(1), tradeCount)

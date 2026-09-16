@@ -3,6 +3,7 @@ package matching
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ var (
 	ErrCancelOrderInvalidCommand    = errors.New("invalid matching cancel command")
 	ErrCancelOrderEngineUnavailable = errors.New("matching engine is unavailable")
 	ErrCancelOrderTimedOut          = errors.New("matching cancel timed out")
+	ErrCancelOrderBackpressured     = errors.New("matching cancel rejected: execution capacity or consecutive-cancel quota exhausted")
 	ErrSnapshotEngineUnavailable    = errors.New("matching engine is unavailable")
 	ErrSnapshotTimedOut             = errors.New("matching snapshot request timed out")
 )
@@ -67,6 +69,16 @@ type MatchingEngine struct {
 	// 시작마다 0으로 되돌린다. 엔진 goroutine에서만 쓴다.
 	sliceEmitBlock time.Duration
 
+	// reservationActive·reservationRemaining은 스케줄러 경로의 방출 예약
+	// 상태다(설계 §8.2). runSlice가 조각 시작 시 beginReservation으로 예산을
+	// 설정하고, 반환 전에 반드시 endReservation으로 해제한다. 예약 구간
+	// 안의 send(sendExecution)는 논블로킹이며 예산을 벗어나면 panic한다.
+	// remaining > 0만으로 예약 여부를 판정하지 않는다 — 예산을 넘는 이벤트가
+	// 나오면 remaining이 0이 되어 blocking Match() 경로로 잘못 빠지기
+	// 때문이다.
+	reservationActive    bool
+	reservationRemaining int
+
 	// quantum 값. 0은 matchSlice의 무제한 sentinel과 충돌하므로 항상 1
 	// 이상이어야 한다. 여기 기본값은 개발·테스트용이며, production 값은
 	// 로컬 탐색 결과로 확정한다.
@@ -84,6 +96,18 @@ type MatchingEngine struct {
 	pendingCancel        *CancelOrderCommand
 	pendingOrder         *Order
 	tickerDue            bool
+
+	// parkStartedAt은 첫 park 진입 시각이다. zero면 park 중이 아니다.
+	// ticker·취소·신호로 중간에 깨어나도 초기화하지 않는다. slice가 실제로
+	// 재개될 때만 초기화한다(finishPark).
+	parkStartedAt time.Time
+
+	// capacityCh는 샤드 포워더가 ExecutionCh에서 이벤트를 받은 직후 보내는
+	// 깨우기 신호다(버퍼 1 — 신호가 뭉쳐도 포워더가 막히지 않는다). 단일
+	// MatchingEngine을 직접 쓰는 테스트·서비스 통합 테스트에는 포워더가
+	// 없어 이 채널에 아무도 보내지 않는다 — 그 경우 ticker fallback으로
+	// 재개한다(설계 §5).
+	capacityCh chan struct{}
 
 	// crashHook은 테스트 전용이다. nil이 아니고 true를 반환하면 엔진 루프가
 	// drain·flush·채널 close 없이 즉시 반환한다 — 프로세스 크래시와 같은
@@ -125,6 +149,13 @@ type CancelOrderCommand struct {
 	// EnqueuedAt은 CancelOrder가 채운다. 제로값이면 큐 대기 관측을 건너뛴다 —
 	// 테스트가 직접 구성한 command가 가짜 지연을 만들지 않게 하기 위해서다.
 	EnqueuedAt time.Time
+	// ResponseCh 계약(설계 §4.2):
+	//  1. CancelOrder는 이 필드에 호출자가 넘긴 값을 무시하고 항상 내부
+	//     버퍼 1 채널을 새로 만들어 쓴다.
+	//  2. CancelCh에 직접 command를 넣는 경로(테스트 전용 — sweep 픽스처가
+	//     유일)는 이 필드가 nil이거나 버퍼 1 이상이어야 한다. 엔진은
+	//     논블로킹으로 응답하므로 계약을 어긴 테스트는 응답을 못 받을 뿐
+	//     엔진은 멈추지 않는다.
 	ResponseCh chan CancelOrderResult
 }
 
@@ -188,10 +219,32 @@ func NewMatchingEngine() *MatchingEngine {
 		maxConsecutiveCancels: defaultMaxConsecutiveCancels,
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
+		capacityCh:       make(chan struct{}, 1),
 	}
 }
 
+// NewMatchingEngineWithQuantum은 검증된 quantum 값을 주입한 단일 엔진을
+// 만든다. 서비스 패키지는 단일 엔진의 quantum 필드(unexported)를 바꿀 수
+// 없어 신설했다(계획 결정 1). 기존 무인자 NewMatchingEngine은 그대로 둔다.
+func NewMatchingEngineWithQuantum(cfg QuantumConfig) (*MatchingEngine, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	me := NewMatchingEngine()
+	if err := validateExecutionCapacity(cap(me.ExecutionCh), cfg.MaxMatchesPerTurn, cfg.MaxConsecutiveCancels); err != nil {
+		return nil, err
+	}
+	me.maxMatchesPerTurn = cfg.MaxMatchesPerTurn
+	me.maxConsecutiveCancels = cfg.MaxConsecutiveCancels
+	return me, nil
+}
+
 func (me *MatchingEngine) Start() {
+	if me.ExecutionCh != nil {
+		if err := validateExecutionCapacity(cap(me.ExecutionCh), me.maxMatchesPerTurn, me.maxConsecutiveCancels); err != nil {
+			panic(err)
+		}
+	}
 	go func() {
 		defer close(me.doneCh)
 		ticker := time.NewTicker(me.interval())
@@ -218,16 +271,8 @@ func (me *MatchingEngine) runTurn(ticker *time.Ticker) bool {
 	//    끝난 turn만 취소 상한을 두 배로 얻는 비대칭이 생긴다.
 	hadActive := me.activeSweep != nil
 
-	// 1. cancel phase — 상한 안에서만 드레인한다. 상한이 없으면 취소 홍수가
-	//    OrderCh를 영원히 굶긴다.
-	for me.cancelsSinceProgress < me.maxConsecutiveCancels {
-		cmd, ok := me.takeCancel()
-		if !ok {
-			break
-		}
-		me.processCancel(cmd)
-		me.cancelsSinceProgress++
-	}
+	// 1. cancel phase — §4.1
+	me.cancelPhase()
 
 	// 2. ticker phase — 코얼레싱된 스냅샷을 발행한다.
 	if me.tickerDue {
@@ -241,8 +286,12 @@ func (me *MatchingEngine) runTurn(ticker *time.Ticker) bool {
 		}
 	}
 
-	// 3. slice phase
-	if me.activeSweep != nil {
+	// 3. slice phase — 조각 시작 조건(hasSliceCapacity)을 지금 상태로
+	//    검사한다. 용량이 없으면 여기서는 아무것도 하지 않는다 — park 시작
+	//    관측은 6단계에서만 한다(5단계 admission이 방금 만든 sweep도
+	//    포함해서 한 곳에서 일원화하기 위해서다).
+	if me.activeSweep != nil && me.hasSliceCapacity() {
+		me.finishPark()
 		me.runSlice()
 		me.cancelsSinceProgress = 0 // P-a
 	}
@@ -257,7 +306,7 @@ func (me *MatchingEngine) runTurn(ticker *time.Ticker) bool {
 	if !me.shuttingDown {
 		select {
 		case <-me.stopCh:
-			me.shuttingDown = true
+			me.latchStop()
 		default:
 		}
 	}
@@ -270,7 +319,18 @@ func (me *MatchingEngine) runTurn(ticker *time.Ticker) bool {
 
 	me.Observers.turn(time.Since(turnStart))
 
-	// 6. 남은 일이 있으면 블로킹하지 않고 다음 turn으로.
+	// 6. park 판정. sliceBlockedNow는 여기서 다시 계산한다(turn 시작 값을
+	//    캐시하지 않는다 — cancel phase가 칸을 썼을 수 있다). pendingCancel이
+	//    있으면 park하지 않는다: 다음 turn의 cancel phase가 반드시 처리하거나
+	//    거절한다. pendingOrder는 park를 막지 않는다(추월 금지). tickerDue는
+	//    2단계가 이미 소모했으므로 여기서 true일 수 없다.
+	if me.sliceBlockedNow() && me.pendingCancel == nil {
+		me.enterParkOnce()
+		me.parkSelect(ticker)
+		return false
+	}
+
+	// 남은 일이 있으면 블로킹하지 않고 다음 turn으로.
 	if me.activeSweep != nil || me.pendingCancel != nil || me.pendingOrder != nil || me.tickerDue {
 		return false
 	}
@@ -304,9 +364,83 @@ func (me *MatchingEngine) runTurn(ticker *time.Ticker) bool {
 	case <-ticker.C:
 		me.tickerDue = true
 	case <-me.stopCh:
-		me.shuttingDown = true
+		me.latchStop()
 	}
 	return false
+}
+
+// free는 ExecutionCh의 남은 칸이다. nil 채널은 방출이 없는 엔진이므로
+// 무한으로 본다(설계 §3.1).
+func (me *MatchingEngine) free() int {
+	if me.ExecutionCh == nil {
+		return math.MaxInt
+	}
+	return cap(me.ExecutionCh) - len(me.ExecutionCh)
+}
+
+// hasSliceCapacity는 다음 조각(최대 maxMatchesPerTurn+1건)을 시작해도
+// 취소 여유분(maxConsecutiveCancels)을 침범하지 않을 만큼 칸이 남았는지
+// 검사한다(설계 §2.2).
+func (me *MatchingEngine) hasSliceCapacity() bool {
+	return me.free()-1-me.maxConsecutiveCancels >= me.maxMatchesPerTurn
+}
+
+// sliceBlockedNow는 activeSweep != nil && !hasSliceCapacity()다. 호출
+// 시점의 상태로 매번 다시 계산한다 — turn 시작 값을 캐시하지 않는다.
+func (me *MatchingEngine) sliceBlockedNow() bool {
+	return me.activeSweep != nil && !me.hasSliceCapacity()
+}
+
+// latchStop은 shuttingDown 전이와 ShutdownLatched 관측을 묶는다. 이미
+// true면 아무것도 하지 않는다. stop을 받는 세 경로(4단계 논블로킹 확인,
+// 8단계 일반 blocking select, park select)가 모두 이것만 부른다.
+func (me *MatchingEngine) latchStop() {
+	if me.shuttingDown {
+		return
+	}
+	me.shuttingDown = true
+	me.Observers.shutdownLatched()
+}
+
+// enterParkOnce는 6단계의 실제 park 진입 직전에만 부른다. parkStartedAt이
+// zero일 때만 시각을 기록하고 ParkStarted를 1회 호출한다.
+func (me *MatchingEngine) enterParkOnce() {
+	if !me.parkStartedAt.IsZero() {
+		return
+	}
+	me.parkStartedAt = time.Now()
+	me.Observers.parkStarted()
+}
+
+// finishPark는 3단계에서 용량이 확보돼 slice를 실행하기 직전에 부른다.
+// park 중이었으면 ParkDuration을 1회 호출하고 parkStartedAt을 초기화한다.
+// park 중이 아니었으면 no-op이다.
+func (me *MatchingEngine) finishPark() {
+	if me.parkStartedAt.IsZero() {
+		return
+	}
+	me.Observers.parkDuration(time.Since(me.parkStartedAt))
+	me.parkStartedAt = time.Time{}
+}
+
+// parkSelect는 방출 자리가 없어 조각을 시작할 수 없는 동안 대기한다.
+// OrderCh는 받지 않는다 — active sweep 중 새 주문을 받으면 추월이다.
+// 신호는 "다시 보라"일 뿐 용량 보장이 아니다. 다음 turn이 free를 다시
+// 계산한다.
+func (me *MatchingEngine) parkSelect(ticker *time.Ticker) {
+	stop := me.stopCh
+	if me.shuttingDown {
+		stop = nil // 닫힌 채널은 항상 준비 상태다. 남겨두면 shutdown 중 busy loop가 된다.
+	}
+	select {
+	case <-me.capacityCh:
+	case cmd := <-me.CancelCh:
+		me.pendingCancel = &cmd
+	case <-ticker.C:
+		me.tickerDue = true
+	case <-stop:
+		me.latchStop()
+	}
 }
 
 func (me *MatchingEngine) takeCancel() (CancelOrderCommand, bool) {
@@ -363,6 +497,11 @@ func (me *MatchingEngine) admit(order *Order) {
 func (me *MatchingEngine) runSlice() {
 	sweep := me.activeSweep
 	me.sliceEmitBlock = 0
+	// 방출 예산은 maxMatchesPerTurn+1(취소 여유분 제외) — 조각 하나가 낼 수
+	// 있는 최대 이벤트는 Trade maxMatchesPerTurn건 + MarketOrderDone 1건
+	// 뿐이다(설계 §8.2). 예산을 maxMatchesPerTurn으로 잡으면(시작 조건의
+	// +1을 빠뜨린 결함) 마지막 조각의 MarketOrderDone send에서 panic한다.
+	me.beginReservation(me.maxMatchesPerTurn + 1)
 	trades, done := me.matchSlice(sweep.book, sweep.order, me.maxMatchesPerTurn)
 	sweep.trades += trades
 	// 조각마다 dirty를 찍는다. Match 완료 후에만 찍으면 sweep 도중의 ticker가
@@ -371,11 +510,13 @@ func (me *MatchingEngine) runSlice() {
 		me.markDirty(sweep.order.CoinSymbol)
 	}
 	if !done {
+		me.endReservation() // 두 반환 경로 모두에서 해제한다 — 한쪽만 하면 다음 작업의 send가 잘못 판정된다.
 		me.Observers.slice(trades, me.sliceEmitBlock)
 		me.Observers.yield()
 		return
 	}
 	me.finishOrder(sweep.book, sweep.order)
+	me.endReservation()
 	me.Observers.slice(trades, me.sliceEmitBlock)
 	me.observeMatchLatency(sweep.order)
 	me.Observers.orderDone(sweep.trades)
@@ -414,17 +555,76 @@ func (me *MatchingEngine) orderIsAdmissible(order *Order) bool {
 	return false
 }
 
+// cancelPhase는 거절 여부를 command를 꺼내기 전에 결정한다(설계 §4.1).
+// 거절 조건은 command 내용이 아니라 엔진 상태로만 정해지므로, 꺼낸 뒤에는
+// 되돌릴 방법이 없어 먼저 결정해야 한다.
+func (me *MatchingEngine) cancelPhase() {
+	rejectBudget := len(me.CancelCh)
+	if me.pendingCancel != nil {
+		rejectBudget++
+	}
+	for {
+		blocked := me.sliceBlockedNow()
+		quotaLeft := me.cancelsSinceProgress < me.maxConsecutiveCancels
+		free := me.free()
+
+		var reject bool
+		switch {
+		case quotaLeft && free >= 1:
+			reject = false // 처리
+		case free == 0 || (blocked && !quotaLeft):
+			reject = true
+		default: // !quotaLeft && !blocked && free >= 1
+			return // 이번 turn의 slice 또는 admission이 progress를 만든다. 꺼내지 않는다.
+		}
+		if reject && rejectBudget == 0 {
+			return // 꺼내지 않는다
+		}
+		cmd, ok := me.takeCancel()
+		if !ok {
+			return
+		}
+		if reject {
+			me.rejectCancel(cmd)
+			rejectBudget--
+			continue
+		}
+		me.processCancel(cmd)
+		me.cancelsSinceProgress++
+	}
+}
+
+// rejectCancel은 §4.1에서 거절로 결정된 command에 응답한다. 오더북은
+// 건드리지 않는다.
+func (me *MatchingEngine) rejectCancel(cmd CancelOrderCommand) {
+	me.Observers.cancelBackpressured()
+	if cmd.ResponseCh != nil {
+		select {
+		case cmd.ResponseCh <- CancelOrderResult{Err: ErrCancelOrderBackpressured}:
+		default:
+		}
+	}
+}
+
+// processCancel의 순서는 설계 §4.2를 따른다: 오더북 제거 → (제거됐으면)
+// 방출 → 응답. 응답을 이벤트보다 먼저 보내면 "성공 응답을 받았는데
+// 이벤트가 아직 enqueue되지 않았다"는 상태가 생긴다.
 func (me *MatchingEngine) processCancel(cmd CancelOrderCommand) {
 	if !cmd.EnqueuedAt.IsZero() {
 		me.Observers.cancel(time.Since(cmd.EnqueuedAt))
 	}
 	result := me.handleCancel(cmd)
-	if cmd.ResponseCh != nil {
-		cmd.ResponseCh <- result
-	}
 	if result.Removed {
 		me.markDirty(cmd.CoinSymbol)
+		me.beginReservation(1) // 성공 취소의 방출 예산은 1(설계 §8.2 표) — §4.1에서 free >= 1을 이미 확인했다.
 		me.emitOrderCancelled(cmd)
+		me.endReservation()
+	}
+	if cmd.ResponseCh != nil {
+		select {
+		case cmd.ResponseCh <- result:
+		default:
+		}
 	}
 }
 
@@ -552,9 +752,10 @@ func (me *MatchingEngine) CancelOrder(cmd CancelOrderCommand) CancelOrderResult 
 	if cmd.EnqueuedAt.IsZero() {
 		cmd.EnqueuedAt = time.Now()
 	}
-	if cmd.ResponseCh == nil {
-		cmd.ResponseCh = make(chan CancelOrderResult, 1)
-	}
+	// 호출자가 넘긴 ResponseCh는 무시하고 항상 내부 버퍼 1 채널을 쓴다 —
+	// 호출자가 버퍼 없는 채널을 넘기면, 엔진의 논블로킹 응답이 CancelOrder의
+	// 수신 select 진입보다 먼저 일어나 응답이 버려지는 경합이 생긴다.
+	cmd.ResponseCh = make(chan CancelOrderResult, 1)
 
 	select {
 	case me.CancelCh <- cmd:
@@ -681,6 +882,10 @@ func (me *MatchingEngine) observeMatchLatency(order *Order) {
 
 // Match는 조각화 없이 주문을 끝까지 처리한다. 테스트·벤치 약 30곳이 이
 // 시그니처를 쓰므로 그대로 둔다. budget 0이 무제한 sentinel이다.
+//
+// 용량 계약 밖, 동기 호출 전용이다 — 스케줄러 경로(runSlice)의 예약
+// (beginReservation/endReservation)을 거치지 않으므로 send는 기존처럼
+// blocking이다(설계 §2.3, §8.2).
 func (me *MatchingEngine) Match(order *Order) {
 	sweep := me.admitOrder(order)
 	if sweep == nil {
@@ -869,11 +1074,42 @@ func (me *MatchingEngine) emitTrade(trade *model.Trade) {
 // 이 머신의 클럭 해상도는 ~645µs이므로 막히지 않은 send는 0으로 기록된다.
 // 그것이 정상이다 — _sum이 0이어도 _count는 emit 횟수와 같아야 한다.
 func (me *MatchingEngine) sendExecution(kind EmitKind, event ExecutionEvent) {
+	if me.reservationActive {
+		if me.reservationRemaining <= 0 {
+			panic(fmt.Sprintf("matching: engine %s reservation exhausted for kind=%s", me.engineID, kind))
+		}
+		select {
+		case me.ExecutionCh <- event:
+			me.reservationRemaining--
+		default:
+			// 예산이 남았는데 칸이 없다 — 단일 writer 전제나 시작 조건
+			// 계산이 틀렸다는 뜻이다. 이벤트를 버리지 않는다: default에서
+			// 그대로 반환하면 오더북과 DB가 어긋난다(설계 §8.2).
+			panic(fmt.Sprintf("matching: engine %s reservation has room (remaining=%d) but ExecutionCh is not ready for kind=%s",
+				me.engineID, me.reservationRemaining, kind))
+		}
+		me.Observers.emitBlock(kind, 0)
+		return
+	}
 	start := time.Now()
 	me.ExecutionCh <- event
 	blocked := time.Since(start)
 	me.Observers.emitBlock(kind, blocked)
 	me.sliceEmitBlock += blocked
+}
+
+// beginReservation은 예약 구간을 연다. 방출 예산은 시작 조건(칸)과
+// 다르다 — 조각은 시작 조건 maxMatchesPerTurn+1+maxConsecutiveCancels칸을
+// 요구하지만 예산은 취소 여유분을 뺀 maxMatchesPerTurn+1이다(설계 §8.2 표).
+func (me *MatchingEngine) beginReservation(budget int) {
+	me.reservationActive = true
+	me.reservationRemaining = budget
+}
+
+// endReservation은 예약 구간을 닫는다. 남은 예산은 버린다.
+func (me *MatchingEngine) endReservation() {
+	me.reservationActive = false
+	me.reservationRemaining = 0
 }
 
 func (me *MatchingEngine) emitMarketOrderDone(order *Order) {

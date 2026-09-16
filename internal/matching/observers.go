@@ -32,6 +32,19 @@ type EngineObservers struct {
 	EmitBlock func(kind EmitKind, d time.Duration)
 	// Yield는 조각이 예산 소진으로 반환될 때 1회 호출된다.
 	Yield func()
+	// ParkStarted는 runTurn 6단계의 첫 park 진입에서 1회 호출된다(중간
+	// 깨어남에서는 다시 호출되지 않는다). 메트릭 없음 — 테스트 장벽용이다.
+	ParkStarted func()
+	// ParkDuration은 첫 park 진입부터 slice가 실제로 재개될 때까지의
+	// 시간이다. finishPark가 park 중이었을 때만 1회 호출한다.
+	ParkDuration func(d time.Duration)
+	// CancelBackpressured는 cancel phase가 §4.1에 따라 취소를 거절할 때마다
+	// 호출된다.
+	CancelBackpressured func()
+	// ShutdownLatched는 stop을 받는 세 경로(4단계 논블로킹 확인, 일반
+	// blocking select, park select) 중 처음 한 번만 호출된다. 메트릭
+	// 없음 — 테스트 관측용이다.
+	ShutdownLatched func()
 }
 
 func (o EngineObservers) turn(d time.Duration) {
@@ -73,5 +86,29 @@ func (o EngineObservers) emitBlock(kind EmitKind, d time.Duration) {
 func (o EngineObservers) yield() {
 	if o.Yield != nil {
 		o.Yield()
+	}
+}
+
+func (o EngineObservers) parkStarted() {
+	if o.ParkStarted != nil {
+		o.ParkStarted()
+	}
+}
+
+func (o EngineObservers) parkDuration(d time.Duration) {
+	if o.ParkDuration != nil {
+		o.ParkDuration(d)
+	}
+}
+
+func (o EngineObservers) cancelBackpressured() {
+	if o.CancelBackpressured != nil {
+		o.CancelBackpressured()
+	}
+}
+
+func (o EngineObservers) shutdownLatched() {
+	if o.ShutdownLatched != nil {
+		o.ShutdownLatched()
 	}
 }

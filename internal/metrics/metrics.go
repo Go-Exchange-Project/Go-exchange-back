@@ -250,7 +250,7 @@ var (
 
 	MatchingEngineEmitBlock = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "matching_engine_emit_block_seconds",
-		Help:    "Duration of a single blocking send into ExecutionCh. This send has no timeout.",
+		Help:    "Enqueue observation time of a single ExecutionCh send. Scheduler-path sends are reserved and non-blocking; non-zero values include clock resolution and preemption.",
 		Buckets: prometheus.ExponentialBuckets(1e-6, 5, 9),
 	}, []string{"event"})
 
@@ -258,6 +258,17 @@ var (
 		Name:    "matching_engine_emit_block_per_slice_seconds",
 		Help:    "Total ExecutionCh blocking time accumulated within one matching slice.",
 		Buckets: prometheus.ExponentialBuckets(1e-6, 5, 9),
+	})
+
+	MatchingEngineExecutionCapacityParkDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_engine_execution_capacity_park_seconds",
+		Help:    "Time from first park entry (no execution capacity for the next slice) until the slice actually resumes.",
+		Buckets: prometheus.ExponentialBuckets(1e-4, 4, 9),
+	})
+
+	MatchingEngineCancelBackpressured = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "matching_engine_cancel_backpressured_total",
+		Help: "Number of cancel commands rejected with ErrCancelOrderBackpressured because execution capacity or the consecutive-cancel quota was exhausted.",
 	})
 )
 

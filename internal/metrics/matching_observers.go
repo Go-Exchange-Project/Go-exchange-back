@@ -33,5 +33,13 @@ func NewMatchingEngineObservers() matching.EngineObservers {
 		Yield: func() {
 			MatchingEngineQuantumYields.Inc()
 		},
+		ParkDuration: func(d time.Duration) {
+			MatchingEngineExecutionCapacityParkDuration.Observe(d.Seconds())
+		},
+		CancelBackpressured: func() {
+			MatchingEngineCancelBackpressured.Inc()
+		},
+		// ParkStarted·ShutdownLatched는 메트릭 없음 — 테스트 장벽·관측용이다
+		// (설계 §8.1). 여기서는 배선하지 않는다.
 	}
 }

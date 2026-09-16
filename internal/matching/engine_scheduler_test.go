@@ -297,13 +297,25 @@ func TestNewOrderDoesNotOvertakeActiveSweep(t *testing.T) {
 func TestBackpressureBlocksIntakeNotLatchedOrder(t *testing.T) {
 	me := newTestEngine()
 	me.ExecutionCh = make(chan ExecutionEvent, 16) // watermark = 12
-	me.maxConsecutiveCancels = 8
+	// quantum (1,1) → 조각 시작 조건 1+1+1=3. cap 16과 호환된다(기본 quantum
+	// 137은 16과 호환되지 않아 Start()가 panic한다 — 설계 §6/§9.1).
+	me.maxMatchesPerTurn = 1
+	me.maxConsecutiveCancels = 1
 	rec := newSchedRecorder()
 	rec.install(me)
 	go func() {
 		for range me.SnapshotCh {
 		}
 	}()
+
+	// watermark(12) 미만 11칸을 Start() 전에 채운다 — Start() 뒤에 외부가
+	// ExecutionCh에 쓰면 단일 writer 전제가 깨진다(설계 §2.3). 조각 시작
+	// 조건(3)은 이 11칸과 무관하다: emitBackpressured 게이트(watermark 12)는
+	// 신규 유입만 억제하는 별도 장치이고, 조각 시작 조건은 매 turn 다시
+	// 계산되는 free(=16-len)로 판정된다.
+	for i := 0; i < 11; i++ {
+		me.ExecutionCh <- ExecutionEvent{}
+	}
 	me.Start()
 
 	// 1) 취소 대상 resting 주문 4건.
@@ -313,12 +325,7 @@ func TestBackpressureBlocksIntakeNotLatchedOrder(t *testing.T) {
 		me.OrderCh <- o
 	}
 	waitDoneN(t, rec.done, 4, "resting setup")
-
-	// 2) watermark 바로 아래(11건)까지 채운다. 아직 게이트는 열려 있다.
-	for i := 0; i < 11; i++ {
-		me.ExecutionCh <- ExecutionEvent{}
-	}
-	require.False(t, me.emitBackpressured(), "아직 게이트가 열려 있어야 한다")
+	require.False(t, me.emitBackpressured(), "아직 게이트가 열려 있어야 한다(11 < watermark 12)")
 
 	// 3) 체결 0건 지정가 probe. emit이 없어야 올바른 구현도 send에 막히지 않는다.
 	probe := stopTestLimitOrder(100, model.OrderSideSell, 90000, 1)
@@ -370,6 +377,10 @@ func TestBackpressureBlocksIntakeNotLatchedOrder(t *testing.T) {
 func TestStopDrainsQueuedOrderAndCancel(t *testing.T) {
 	me := newTestEngine()
 	me.ExecutionCh = make(chan ExecutionEvent, 16)
+	// quantum (1,1) → 조각 시작 조건 1+1+1=3. cap 16과 호환된다(기본 quantum
+	// 137은 16과 호환되지 않아 Start()가 panic한다 — 설계 §6/§9.1).
+	me.maxMatchesPerTurn = 1
+	me.maxConsecutiveCancels = 1
 	rec := newSchedRecorder()
 	rec.install(me)
 	release := make(chan struct{})
@@ -389,15 +400,18 @@ func TestStopDrainsQueuedOrderAndCancel(t *testing.T) {
 		close(snapDone)
 	}()
 
-	me.Start()
+	// resting 주문은 Start() 전에 book에 직접 배치한다(엔진이 아직 돌지
+	// 않으므로 테스트 goroutine이 책을 만져도 race가 아니다). OrderCh를 거치면
+	// admit이 조각 시작 조건 검사를 받아 §2.3(단일 writer 전제) 범위를 벗어난다.
 	resting := stopTestLimitOrder(1, model.OrderSideSell, 50000, 1)
-	resting.EnqueuedAt = time.Now()
-	me.OrderCh <- resting
-	waitDoneN(t, rec.done, 1, "resting setup")
+	me.GetOrderBook("BTC").AddOrder(resting)
 
+	// 13칸도 Start() 전에 채운다 — Start() 뒤에 외부가 ExecutionCh에 쓰면
+	// 단일 writer 전제가 깨진다(설계 §2.3).
 	for i := 0; i < 13; i++ {
 		me.ExecutionCh <- ExecutionEvent{}
 	}
+	me.Start()
 	require.True(t, me.emitBackpressured())
 
 	// Stop() 전에 주문과 취소를 둘 다 큐에 넣는다.

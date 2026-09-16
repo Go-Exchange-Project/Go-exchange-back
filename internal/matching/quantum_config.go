@@ -54,3 +54,24 @@ func (c QuantumConfig) Validate() error {
 	}
 	return nil
 }
+
+// validateExecutionCapacity는 실행 방출 채널 용량이 조각 시작 조건
+// (maxMatchesPerTurn+1+maxConsecutiveCancels)을 만족하는지 검증한다(설계 §6).
+//
+// 합산(executionCapacity >= maxMatchesPerTurn+1+maxConsecutiveCancels)으로 검사하지
+// 않는다 — 큰 env 값에서 두 quantum 값의 합이 int overflow로 음수가 되면 검증을
+// 통과시키고 실제 send에서 다시 멈추기 때문이다. 뺄셈만 사용해 overflow 없이 같은
+// 경계를 검증한다.
+func validateExecutionCapacity(executionCapacity, maxMatchesPerTurn, maxConsecutiveCancels int) error {
+	if executionCapacity < 2 {
+		return fmt.Errorf("execution capacity must be >= 2 (need room for 1 cancel and 1 slice), got %d", executionCapacity)
+	}
+	if maxConsecutiveCancels > executionCapacity-2 {
+		return fmt.Errorf("maxConsecutiveCancels (%d) leaves no room for a slice within execution capacity %d", maxConsecutiveCancels, executionCapacity)
+	}
+	if maxMatchesPerTurn > executionCapacity-1-maxConsecutiveCancels {
+		return fmt.Errorf("maxMatchesPerTurn (%d) exceeds available execution capacity %d (executionCapacity=%d, maxConsecutiveCancels=%d)",
+			maxMatchesPerTurn, executionCapacity-1-maxConsecutiveCancels, executionCapacity, maxConsecutiveCancels)
+	}
+	return nil
+}

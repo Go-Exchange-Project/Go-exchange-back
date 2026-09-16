@@ -2,6 +2,7 @@ package matching
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,33 +170,36 @@ func TestImmediateCompletionEmitsOnlyOrderAdmitted(t *testing.T) {
 	require.Empty(t, rec.slices, "즉시 완료 주문은 Slice를 내지 않는다")
 }
 
-// Slice의 emitBlock은 마지막 emit(MarketOrderDone)의 블로킹까지 포함해야 한다.
-// Slice를 finishOrder보다 먼저 부르면 하류 포화 시 가장 오래 막히는 지점이
-// 측정에서 통째로 빠진다.
+// 마지막 조각 전 park가 관측되고, 재개된 마지막 조각이 Trade와
+// MarketOrderDone을 순서대로 낸다(설계 §9.1 — 원래 이름은
+// TestSliceEmitBlockIncludesMarketOrderDone였고 blocking-send 시간을
+// 측정했으나, park 도입 후 조각 시작 자체가 용량을 미리 확인하므로 조각
+// 내부 send는 더 이상 유의미하게 블로킹되지 않는다. 이제는 "용량 부족 시
+// 마지막 조각 전에 park한다"와 "재개된 조각이 순서를 지킨다"를 확인한다).
 //
-// 구성이 까다롭다. cap=4면 emitBackpressured 임계가 int(4*0.75)=3이므로,
-// 미리 2건만 채워두면 (2 < 3) 주문은 admit되지만 trade 2건이 나가면 채널이
-// 가득 차(4/4) 마지막 MarketOrderDone send가 반드시 막힌다.
-// cap을 더 줄이면 임계가 0이 되어 주문이 아예 admit되지 않는다.
-func TestSliceEmitBlockIncludesMarketOrderDone(t *testing.T) {
-	const hold = 200 * time.Millisecond
-
+// quantum (1,1) → 조각 시작 조건 1+1+1=3. 매도 maker 2건, 시장가 매수 1건
+// (정확히 2건 체결)이라 maxMatchesPerTurn=1은 필연적으로 조각을 2개로
+// 나눈다 — 첫 조각(Trade 1건)은 free 3으로 시작 가능하고, 마지막 조각
+// (Trade 1건 + MarketOrderDone 1건)은 free 2라 park해야 한다.
+func TestParkBeforeFinalSliceIsObservedAndSliceEmitsMarketOrderDone(t *testing.T) {
 	me := newTestEngine()
-	rec := &recordedObservers{}
-	rec.install(me)
+	me.maxMatchesPerTurn = 1
+	me.maxConsecutiveCancels = 1
 	me.ExecutionCh = make(chan ExecutionEvent, 4)
+
+	var started, finished atomic.Int64
+	me.Observers = EngineObservers{
+		ParkStarted:  func() { started.Add(1) },
+		ParkDuration: func(time.Duration) { finished.Add(1) },
+	}
+
+	// free = 3이 되도록 Start() 전에 dummy 1건만 채운다(§2.3: Start() 뒤
+	// 외부 write 금지). dummy 2건(원래 구성, free=2)은 첫 조각 전부터 park해
+	// 테스트 의도(마지막 조각 앞에서만 park)가 달라지므로 쓰지 않는다.
 	me.ExecutionCh <- ExecutionEvent{}
-	me.ExecutionCh <- ExecutionEvent{}
-	require.False(t, me.emitBackpressured(), "admit이 가능한 상태여야 한다")
+
 	go func() {
 		for range me.SnapshotCh {
-		}
-	}()
-
-	release := make(chan struct{})
-	go func() {
-		<-release
-		for range me.ExecutionCh {
 		}
 	}()
 
@@ -206,28 +210,28 @@ func TestSliceEmitBlockIncludesMarketOrderDone(t *testing.T) {
 	me.Start()
 	market := &Order{
 		ID: 3, UserID: 3, CoinSymbol: "BTC", Side: model.OrderSideBuy,
-		QuoteAmount: decimal.NewFromInt(100001),
+		QuoteAmount: decimal.NewFromInt(50000 + 50001),
 		OrderType:   model.OrderTypeMarket, EnqueuedAt: time.Now(),
 	}
 	me.OrderCh <- market
 
-	time.Sleep(hold)
-	close(release)
+	require.Eventually(t, func() bool { return started.Load() == 1 }, 3*time.Second, 2*time.Millisecond,
+		"마지막 조각 전에 park해야 한다")
+	require.Equal(t, int64(0), finished.Load(), "아직 재개하지 않았다")
+	require.Equal(t, 2, len(me.ExecutionCh), "채널 길이는 dummy 1 + 첫 조각 Trade 1 = 2여야 한다")
 
-	require.Eventually(t, func() bool {
-		_, _, _, _, slices := rec.counts()
-		return slices == 1
-	}, 5*time.Second, 5*time.Millisecond)
+	// 소비 재개: dummy 1건을 비워 free를 3으로 만든다.
+	<-me.ExecutionCh
 
-	rec.mu.Lock()
-	sliceBlock := rec.slices[0].emitBlock
-	doneBlock := rec.emitBlocks[EmitMarketDone]
-	tradeBlock := rec.emitBlocks[EmitTrade]
-	rec.mu.Unlock()
+	require.Eventually(t, func() bool { return finished.Load() == 1 }, 3*time.Second, 2*time.Millisecond,
+		"free=3이 되면 재개해야 한다")
 
-	require.Greater(t, doneBlock, hold/2, "MarketOrderDone send가 막혔어야 하는 구성이다")
-	require.GreaterOrEqual(t, sliceBlock, doneBlock+tradeBlock,
-		"Slice가 finishOrder보다 먼저 불려 MarketOrderDone 블로킹이 빠졌다")
+	firstTrade := requireNextExecutionEvent(t, me) // 첫 조각의 Trade(이미 채널에 있던 것)
+	require.NotNil(t, firstTrade.Trade)
+	lastTrade := requireNextExecutionEvent(t, me) // 마지막 조각의 Trade
+	require.NotNil(t, lastTrade.Trade)
+	done := requireNextExecutionEvent(t, me)
+	require.NotNil(t, done.MarketOrderDone, "Trade 다음에 MarketOrderDone이 순서대로 나와야 한다")
 
 	me.Stop()
 	waitEngineDone(t, me)
@@ -241,4 +245,13 @@ func TestNilObserversAreSafe(t *testing.T) {
 	me.OrderCh <- order
 	me.Stop()
 	waitEngineDone(t, me)
+
+	// 설계 §8.1 신규 4콜백도 제로값(nil)이면 안전해야 한다.
+	var o EngineObservers
+	require.NotPanics(t, func() {
+		o.parkStarted()
+		o.parkDuration(0)
+		o.cancelBackpressured()
+		o.shutdownLatched()
+	})
 }
