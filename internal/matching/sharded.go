@@ -74,6 +74,14 @@ func (se *ShardedEngine) Start() {
 		go func() {
 			defer execWG.Done()
 			for ev := range shard.ExecutionCh {
+				// 받은 직후 신호한다(버퍼 1이라 뭉쳐도 포워더가 막히지
+				// 않는다) — 팬인 send가 blocking이라 포워더 자신이
+				// 막혀도, 그 전에 이미 샤드 로컬 칸 하나를 비웠다는
+				// 사실은 신호돼 있어야 한다(설계 §5).
+				select {
+				case shard.capacityCh <- struct{}{}:
+				default:
+				}
 				se.ExecutionCh <- ev
 			}
 		}()
@@ -144,6 +152,11 @@ func NewShardedEngineWithQuantum(shardCount int, cfg QuantumConfig) (*ShardedEng
 		return nil, err
 	}
 	se := NewShardedEngine(shardCount)
+	for _, shard := range se.shards {
+		if err := validateExecutionCapacity(cap(shard.ExecutionCh), cfg.MaxMatchesPerTurn, cfg.MaxConsecutiveCancels); err != nil {
+			return nil, err
+		}
+	}
 	for _, shard := range se.shards {
 		shard.maxMatchesPerTurn = cfg.MaxMatchesPerTurn
 		shard.maxConsecutiveCancels = cfg.MaxConsecutiveCancels

@@ -2,6 +2,7 @@ package matching
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,12 +28,14 @@ import (
 //
 // **"sweep 진행 중"을 실행 속도로 만들지 않는다.** 첫 trade를 본 뒤 취소를
 // 보내는 방식은 테스트 goroutine이 엔진보다 느리면 sweep이 이미 끝나 있다.
-// 대신 ExecutionCh를 작게 잡고 소비자를 붙이지 않아 **엔진이 emit에서 막히게**
-// 한 뒤 취소를 큐에 넣고 소비자를 푼다. 엔진은 막힌 send가 풀리기 전에는
-// cancel phase에 도달할 수 없으므로, 취소는 반드시 sweep 도중에 처리된다.
+// 대신 ExecutionCh를 작게 잡고 소비자를 붙이지 않아 **엔진이 park하게** 한
+// 뒤(ParkStarted 장벽) 취소를 큐에 넣고 소비자를 푼다. park 중에는 슬라이스가
+// 시작되지 않으므로, 취소는 반드시 sweep 도중(조각 사이)에 처리된다.
 
-// sweepEmitCap은 sweep이 도중에 멈추도록 만드는 ExecutionCh 용량이다.
-// maker 수보다 훨씬 작아야 "막힌 시점 = sweep 도중"이 보장된다.
+// sweepEmitCap은 ExecutionCh 용량이다. maxMatchesPerTurn=1·
+// maxConsecutiveCancels=8(기본값)이라 조각 시작 조건은 1+1+8=10이고, 소비자가
+// releaseEmits() 전까지 없으므로 sweep은 free < 10(len > 6)이 되는 시점에
+// 스스로 park한다 — cap을 넘겨 막힐 때까지 기다리지 않는다(설계 §3).
 const sweepEmitCap = 16
 
 type sweepFixture struct {
@@ -41,6 +44,9 @@ type sweepFixture struct {
 	events  chan ExecutionEvent
 	release chan struct{}
 	drained chan struct{}
+
+	parked     chan struct{}
+	parkedOnce sync.Once
 
 	trades     atomic.Int64
 	cancelled  atomic.Int64
@@ -52,7 +58,7 @@ type sweepFixture struct {
 func newSweepFixture(t *testing.T, makers int) *sweepFixture {
 	t.Helper()
 	me := newTestEngine()
-	me.maxMatchesPerTurn = 1 // 조각 경계를 최대로 만든다
+	me.maxMatchesPerTurn = 1 // 조각 경계를 최대로 만든다(maxConsecutiveCancels는 기본값 8 그대로 — 조각 시작 조건 10)
 	events := make(chan ExecutionEvent, sweepEmitCap)
 	me.ExecutionCh = events
 	rec := newSchedRecorder()
@@ -64,6 +70,12 @@ func newSweepFixture(t *testing.T, makers int) *sweepFixture {
 		events:  events,
 		release: make(chan struct{}),
 		drained: make(chan struct{}),
+		parked:  make(chan struct{}),
+	}
+	// rec.install이 Observers를 통째로 대입하므로, ParkStarted는 그 뒤에
+	// 필드 하나만 덧붙인다(구조체 값 대입이라 다른 필드는 그대로 남는다).
+	me.Observers.ParkStarted = func() {
+		f.parkedOnce.Do(func() { close(f.parked) })
 	}
 	go func() {
 		<-f.release
@@ -96,14 +108,18 @@ func newSweepFixture(t *testing.T, makers int) *sweepFixture {
 	return f
 }
 
-// waitEmitSaturated는 엔진이 emit에서 막힐 때까지 기다린다. ExecutionCh가
-// 가득 찼다는 것은 이미 sweepEmitCap건을 체결했고 다음 send가 막힌다는 뜻이다.
-// maker 수가 그보다 크므로 이 시점은 반드시 sweep 도중이다.
-func (f *sweepFixture) waitEmitSaturated(t *testing.T) {
+// waitParked는 엔진이 조각 시작 조건 부족으로 park할 때까지 기다린다.
+// maker 수가 sweepEmitCap보다 훨씬 크므로 이 시점은 반드시 sweep 도중이다.
+// park 시점 free는 6~9(len 7~10, 조각 시작 조건 10 미만) 사이이므로, 아래
+// 각 테스트의 취소는 칸 1 이상이 남아 거절되지 않는다(Task 5 이후에도
+// 성립해야 한다 — 한도 maxConsecutiveCancels=8 이내).
+func (f *sweepFixture) waitParked(t *testing.T) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		return len(f.events) == cap(f.events)
-	}, 20*time.Second, time.Millisecond, "엔진이 sweep 도중에 막히지 않았다")
+	select {
+	case <-f.parked:
+	case <-time.After(20 * time.Second):
+		t.Fatal("엔진이 sweep 도중에 park하지 않았다")
+	}
 }
 
 // submitCancel은 취소를 큐에 넣기만 한다. 엔진이 막혀 있는 동안 호출하면
@@ -154,7 +170,7 @@ func TestActiveSweepCancelIsNotFoundThenRemovesRemainder(t *testing.T) {
 	taker := stopTestLimitOrder(1000, model.OrderSideBuy, 50000, makers+5)
 	taker.EnqueuedAt = time.Now()
 	f.me.OrderCh <- taker
-	f.waitEmitSaturated(t)
+	f.waitParked(t)
 
 	// 엔진이 막혀 있는 지금 취소를 큐에 넣는다. 엔진은 막힌 send가 풀리기
 	// 전에는 cancel phase에 도달할 수 없으므로 sweep 도중 처리가 보장된다.
@@ -194,7 +210,7 @@ func TestActiveSweepFullFillLeavesNothingToCancel(t *testing.T) {
 	taker := stopTestLimitOrder(1000, model.OrderSideBuy, 50000, makers) // 정확히 전량
 	taker.EnqueuedAt = time.Now()
 	f.me.OrderCh <- taker
-	f.waitEmitSaturated(t)
+	f.waitParked(t)
 
 	resp := f.submitCancel(1000, model.OrderSideBuy, 50000)
 	f.releaseEmits()
@@ -229,7 +245,7 @@ func TestActiveMarketSweepCancelIsNotPreempted(t *testing.T) {
 		OrderType:   model.OrderTypeMarket, EnqueuedAt: time.Now(),
 	}
 	f.me.OrderCh <- market
-	f.waitEmitSaturated(t)
+	f.waitParked(t)
 
 	resp := f.submitCancel(2000, model.OrderSideBuy, 0)
 	f.releaseEmits()
@@ -266,7 +282,7 @@ func TestMakerCancelledBetweenSlicesEscapesFill(t *testing.T) {
 	taker := stopTestLimitOrder(1000, model.OrderSideBuy, 50000, makers+1)
 	taker.EnqueuedAt = time.Now()
 	f.me.OrderCh <- taker
-	f.waitEmitSaturated(t)
+	f.waitParked(t)
 
 	resp := f.submitCancel(victimID, model.OrderSideSell, 50000)
 	f.releaseEmits()
