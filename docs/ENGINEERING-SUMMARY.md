@@ -244,8 +244,15 @@ terminal은 **내구 기록으로 인계**해 온라인 복구가 가능하게 �
 실행 간 시간 변동이 남았고 **근본 원인은 미확정**이다. 대신 시계와 무관한 결정적 계수
 (조각 수·yield 수)로 구조적 비용을 고정했다 — **이 값은 처리량을 증명하지 않는다.**
 
-**남은 한계:** `ExecutionCh` send에 timeout이 없어 하류가 멈추면 quantum이 wall-clock 진행성을
-보장하지 못한다(설계 §14 R1). 별건으로 분리돼 있다.
+**남은 한계(2026-09 매칭 하류 정지 격리로 갱신):** 스케줄러 경로의 `ExecutionCh` send는 더 이상
+무기한 blocking이 아니다 — 조각 시작 전 방출 자리를 확인하고, 자리가 없으면 park하며 그 동안에도
+취소·stop에 응답한다(park·backpressure). 다만 하류가 완전히 죽은 채로 있으면 drain 완료
+(`Done()` 닫힘)에는 여전히 상한이 없다 — 공유 팬인(sharded.go)과 `OutboxWriter`는 여전히 공통
+장애 영역이라 격리되지 않는다. 예약(reservation) 계산이 틀리면 조용히 멈추는 대신 panic한다 —
+데이터 일관성은 다음 부팅의 outbox replay·주문 bootstrap이 복구하지만, 진행성의 자동 복구는
+보장하지 않는다(같은 결함이면 재기동 후에도 다시 panic할 수 있다). 상세는
+[docs/refactor/README.md](refactor/README.md)의 "6차 리팩토링" 절과
+[2026-09-15 설계](superpowers/specs/2026-09-15-matching-execution-capacity-design.md) 참고.
 
 ### 다음 병목 후보 — **작동점에 따라 신호가 다르다**
 

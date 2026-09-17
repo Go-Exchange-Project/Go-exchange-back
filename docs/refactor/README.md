@@ -548,6 +548,35 @@ migration 009의 `varchar(16)` 도입이 노출시킨 회귀다. 원장 전환 �
 짜인 헬퍼가 그대로 남아 있었다. 접미사 예산을 고정해 16자 안에 들어오도록 고쳤다(프런트
 저장소, 테스트 헬퍼만, 지난 CP3 보고에서 이미 반영).
 
+## 6차 리팩토링 — 매칭 하류 정지 격리 (2026-09-15 착수)
+
+3차①이 "완화이지 일반 보장 아님 — 일반 보장은 주문당 emit 상한/재개형 매칭이 전제(후속)"로
+남긴 그 후속이다. quantum 설계(재개형 sweep)가 전제를 만든 뒤 이 작업이 닫았다: 하류(outbox·정산)
+정지 시 엔진 goroutine이 `ExecutionCh` send에서 무기한 블로킹되던 문제를, 조각 시작 전 방출
+자리를 검증하고 자리가 없으면 park하며 그 동안에도 취소·stop에 응답하는 스케줄러로 바꿔 없앴다.
+설계·계획:
+[2026-09-15 설계](../superpowers/specs/2026-09-15-matching-execution-capacity-design.md),
+[2026-09-15 계획](../superpowers/plans/2026-09-15-matching-execution-capacity.md).
+
+| CP | 내용 | 커밋 |
+|---|---|---|
+| A(엔진, Task 1~6) | 용량 검증(`validateExecutionCapacity`)·생성자, 관측 4종+지표 2종, park 상태 기계(`free`·`hasSliceCapacity`·`parkSelect`·`capacityCh`), 예약 emitter(`beginReservation`/`endReservation`, fail-fast panic), `cancelPhase`/`rejectCancel`(`ErrCancelOrderBackpressured`) | `c8dacff`(구현) → `e546884`(리뷰 보강: 판정표 경계 테스트 2건, k=3 복원, panic 메시지 검증) → `134e96f`(계측 결함 수정: 예약 구간 send의 enqueue 관측 시간 실측) |
+| B(서비스 통합·문서, Task 7~9) | `execution_capacity_integration_test.go` 신규(설계 §9.2 테스트 12·13 — outbox 저장 실패 회복, durable prefix + undurable suffix 복구), 이 문서·`ENGINEERING-SUMMARY.md` 갱신 | 이 커밋 |
+
+**게이트**(CP A·B 모두 통과): `go build`/`go vet` 클린, `go test -count=20 ./internal/matching`,
+Docker Linux `-race ./internal/matching`·`-race ./...`(새 스키마), quantum 선택 게이트 C1/C2/C4
+(취소 대기·스냅샷 간격·주문 대기 p99 전부 300ms 안전 상한 안), 백엔드 전체
+`go test -p 1 ./... -count=1`과 `-shuffle=on ./internal/service`(새 스키마). `BenchmarkTPS_*`는
+`Match()` 경로 무변경 확인용으로만 기록했다 — 운영 경로 처리량·500 VU 회귀 측정은 이 작업의
+범위가 아니다(MSA 준비 목록 별항).
+
+별건(CP A 진행 중 발견, 무관): Windows(`core.autocrlf=true`) 작업 트리 체크아웃에서
+`internal/dbmigration/runner_test.go`의 두 정적 테스트가 CRLF 때문에 실패하던 결함을
+같은 브랜치에서 함께 고쳤다(`bcc73ea`) — 커밋 blob 자체는 LF라 CI(Linux)는 영향받지 않았다.
+
+**범위 밖(설계 §10, 변경 없음)**: 샤드별 outbox·팬인 분리(진짜 장애 격리), Kafka relay 경계,
+운영 경로 벤치마크·500 VU 회귀, park·거절 메트릭의 SLO·알림 연결.
+
 ## 백로그 (순서 미정, 조건 충족 시 승격)
 
 | 항목 | 내용 | 승격 조건 |

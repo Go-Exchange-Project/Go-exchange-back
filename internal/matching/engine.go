@@ -65,7 +65,7 @@ type MatchingEngine struct {
 	// Start() 전에 설정하고 실행 중 교체하지 않는다 — 재대입은 data race다.
 	Observers EngineObservers
 
-	// sliceEmitBlock은 조각 하나의 emit 블로킹 누적값이다. runSlice가 조각
+	// sliceEmitBlock은 조각 하나의 emit enqueue 관측 시간 누적값이다. runSlice가 조각
 	// 시작마다 0으로 되돌린다. 엔진 goroutine에서만 쓴다.
 	sliceEmitBlock time.Duration
 
@@ -493,7 +493,7 @@ func (me *MatchingEngine) admit(order *Order) {
 // runSlice는 조각 하나를 실행하고, 마지막 조각이면 슬롯을 비운다.
 //
 // Slice 관측은 finishOrder 뒤다 — 마지막 조각의 MarketOrderDone emit
-// 블로킹이 sliceEmitBlock에 들어간 뒤여야 한다.
+// enqueue 관측 시간이 sliceEmitBlock에 들어간 뒤여야 한다.
 func (me *MatchingEngine) runSlice() {
 	sweep := me.activeSweep
 	me.sliceEmitBlock = 0
