@@ -1060,23 +1060,33 @@ func (me *MatchingEngine) emitTrade(trade *model.Trade) {
 	}
 }
 
-// sendExecution은 ExecutionCh로의 블로킹 send 시간을 관측한다.
-// send 자체에는 timeout이 없다 — 하류가 멈추면 여기서 무기한 블로킹한다.
-// 그래서 quantum은 emit "시도 횟수"만 보장하고 wall-clock은 보장하지 않는다.
+// sendExecution은 ExecutionCh로의 send를 두 경로로 분기한다(설계 §8.2).
 //
-// 막히지 않은 send도 관측한다. 그래야 emit_block_seconds의 표본 수가 곧
-// emit 횟수이고, GCP에서 _count > 0을 배선 확인으로 쓸 수 있다.
-// 논블로킹 fast path로 time.Now() 두 번을 아끼는 안을 재봤지만, 계측
+// 예약 구간 안(reservationActive == true — runSlice의 조각, 성공 취소):
+// 논블로킹이다. 시작 조건(hasSliceCapacity·§4.1의 free >= 1)이 이미 자리를
+// 확인했으므로 정상 경로에서는 막히지 않는다. 예산을 넘겨 부르거나 예산은
+// 남았는데 칸이 없으면(단일 writer 전제나 시작 조건 계산이 틀렸다는 뜻)
+// panic한다 — 조용히 정지하는 것보다 드러나는 쪽을 택한다.
+//
+// 예약 구간 밖(reservationActive == false — Match(), §2.3 계약 밖 동기
+// 호출): 기존처럼 blocking이다. send 자체에는 timeout이 없다 — 하류가
+// 멈추면 여기서 무기한 블로킹한다.
+//
+// 막히지 않은 send도 관측한다(블로킹 경로). 그래야 emit_block_seconds의
+// 표본 수가 곧 emit 횟수이고, GCP에서 _count > 0을 배선 확인으로 쓸 수
+// 있다. 논블로킹 fast path로 time.Now() 두 번을 아끼는 안을 재봤지만, 계측
 // 오버헤드 자체가 실행 간 변동(±10~20%)에 묻히는 수준이라(중앙값 기준
 // BulkFill +3.3%, _workspace/quantum/bench-*.txt) 지표 의미를 흐릴 만한
 // 이유가 되지 못했다.
 //
-// 이 머신의 클럭 해상도는 ~645µs이므로 막히지 않은 send는 0으로 기록된다.
-// 그것이 정상이다 — _sum이 0이어도 _count는 emit 횟수와 같아야 한다.
+// 이 머신의 클럭 해상도는 ~645µs이므로 막히지 않은 블로킹 send는 0으로
+// 기록된다. 그것이 정상이다 — _sum이 0이어도 _count는 emit 횟수와 같아야
+// 한다. 예약 구간 안의 send는 논블로킹이므로 관측값을 항상 0으로 기록한다.
 func (me *MatchingEngine) sendExecution(kind EmitKind, event ExecutionEvent) {
 	if me.reservationActive {
 		if me.reservationRemaining <= 0 {
-			panic(fmt.Sprintf("matching: engine %s reservation exhausted for kind=%s", me.engineID, kind))
+			panic(fmt.Sprintf("matching: engine %s reservation exhausted for kind=%s (remaining=%d)",
+				me.engineID, kind, me.reservationRemaining))
 		}
 		select {
 		case me.ExecutionCh <- event:

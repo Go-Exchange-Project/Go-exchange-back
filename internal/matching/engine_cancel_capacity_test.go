@@ -94,16 +94,15 @@ func TestParkedCancelExhaustsQuotaThenRejectsUntilResume(t *testing.T) {
 		book.AddOrder(testOrder(uint(i+1), "BTC", model.OrderSideSell, int64(50000+i), 1))
 	}
 	// victim은 매수 쪽에 둔다 — 시장가 매수 sweep은 매도 쪽만 소비하므로
-	// 건드리지 않는다.
-	victim1 := testOrder(101, "BTC", model.OrderSideBuy, 10, 1)
-	victim2 := testOrder(102, "BTC", model.OrderSideBuy, 11, 1)
-	victim3 := testOrder(103, "BTC", model.OrderSideBuy, 12, 1)
-	book.AddOrder(victim1)
-	book.AddOrder(victim2)
-	book.AddOrder(victim3)
+	// 건드리지 않는다. C(=2)건은 성공, k(=3)건은 거절 대상이다.
+	victims := make([]*Order, 5)
+	for i := range victims {
+		victims[i] = testOrder(uint(101+i), "BTC", model.OrderSideBuy, int64(10+i), 1)
+		book.AddOrder(victims[i])
+	}
 
 	// free = 6(< 7이라 park하지만, C=2건을 처리해도 6-2=4 >= 1이라 거절
-	// 사유가 "free==0"이 아니라 "한도"임을 보장한다).
+	// 사유가 "free==0"이 아니라 "한도"임을 보장한다. free ≥ 5로 여유를 둔다).
 	const prefill = 10
 	for i := 0; i < prefill; i++ {
 		me.ExecutionCh <- ExecutionEvent{}
@@ -121,28 +120,37 @@ func TestParkedCancelExhaustsQuotaThenRejectsUntilResume(t *testing.T) {
 		"park해야 한다")
 
 	// 첫 C(=2)건은 처리된다.
-	r1 := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: 101, Side: model.OrderSideBuy, Price: decimal.NewFromInt(10)})
+	r1 := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: victims[0].ID, Side: model.OrderSideBuy, Price: victims[0].Price})
 	require.True(t, r1.Removed, "첫 번째 취소는 한도 안이라 처리돼야 한다")
-	r2 := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: 102, Side: model.OrderSideBuy, Price: decimal.NewFromInt(11)})
+	r2 := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: victims[1].ID, Side: model.OrderSideBuy, Price: victims[1].Price})
 	require.True(t, r2.Removed, "두 번째 취소도 한도 안이라 처리돼야 한다")
 
 	lenBeforeReject := len(me.ExecutionCh)
 
-	// C+1번째부터는 한도 소진으로 거절된다.
-	r3 := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: 103, Side: model.OrderSideBuy, Price: decimal.NewFromInt(12)})
-	require.True(t, errors.Is(r3.Err, ErrCancelOrderBackpressured), "세 번째는 한도 소진으로 거절돼야 한다")
-	require.False(t, r3.Removed)
-	require.Equal(t, int64(1), backpressured.Load())
-	require.Equal(t, lenBeforeReject, len(me.ExecutionCh), "거절은 이벤트를 추가하지 않는다")
+	// C+1번째부터 k(=3)건은 한도 소진으로 거절된다.
+	rejected := make([]CancelOrderResult, 3)
+	for i := 0; i < 3; i++ {
+		v := victims[2+i]
+		rejected[i] = me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: v.ID, Side: model.OrderSideBuy, Price: v.Price})
+	}
+	for i, r := range rejected {
+		require.True(t, errors.Is(r.Err, ErrCancelOrderBackpressured), "거절 대상 %d는 한도 소진으로 거절돼야 한다", i)
+		require.False(t, r.Removed)
+	}
+	require.Equal(t, int64(3), backpressured.Load(), "CancelBackpressured는 k(=3)회여야 한다")
+	require.Equal(t, lenBeforeReject, len(me.ExecutionCh), "세 거절 동안 채널 이벤트 수가 바뀌지 않아야 한다")
 	// bookHasPrice는 스냅샷 캐시를 읽는다. ticker가 1s(긴 ticker)라 즉시
 	// 조회하면 아직 캐시가 갱신되지 않았을 수 있으므로 Eventually로 확인한다.
-	require.Eventually(t, func() bool { return bookHasPrice(t, me, model.OrderSideBuy, 12) },
-		3*time.Second, 20*time.Millisecond, "거절된 주문은 book에 남아 있어야 한다")
+	for _, v := range victims[2:] {
+		price := v.Price
+		require.Eventually(t, func() bool { return bookHasPrice(t, me, model.OrderSideBuy, price.IntPart()) },
+			3*time.Second, 20*time.Millisecond, "거절된 주문(%s)은 book에 남아 있어야 한다", price)
+	}
 
 	// 아직 소비하지 않았으므로 재개하지 않았다.
 	require.Equal(t, int64(0), pr.finished.Load())
 
-	// 소비 재개 → sweep 완주.
+	// 소비 재개 → sweep 완주(ParkDuration).
 	go func() {
 		for range me.ExecutionCh {
 		}
@@ -150,12 +158,15 @@ func TestParkedCancelExhaustsQuotaThenRejectsUntilResume(t *testing.T) {
 	require.Eventually(t, func() bool { return pr.finished.Load() == 1 }, 3*time.Second, 5*time.Millisecond,
 		"재개해야 한다")
 
-	// 거절됐던 취소를 다시 보내면 제거된다(재개 뒤 admission이 매 turn
+	// 거절됐던 k건을 다시 보내면 모두 제거된다(재개 뒤 admission이 매 turn
 	// cancelsSinceProgress를 초기화하므로 한도가 다시 열린다).
-	require.Eventually(t, func() bool {
-		retry := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: 103, Side: model.OrderSideBuy, Price: decimal.NewFromInt(12)})
-		return retry.Removed
-	}, 5*time.Second, 10*time.Millisecond, "재시도하면 제거돼야 한다")
+	for i, v := range victims[2:] {
+		v := v
+		require.Eventually(t, func() bool {
+			retry := me.CancelOrder(CancelOrderCommand{CoinSymbol: "BTC", OrderID: v.ID, Side: model.OrderSideBuy, Price: v.Price})
+			return retry.Removed
+		}, 5*time.Second, 10*time.Millisecond, "재시도 %d는 제거돼야 한다", i)
+	}
 
 	me.Stop()
 	waitEngineDone(t, me)
@@ -330,4 +341,92 @@ func TestCrossShardCancelBackpressureIsIsolatedPerShard(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("sharded engine did not stop in time")
 	}
+}
+
+// 설계 §4.1 판정표 경계 — cancelPhase()를 엔진 goroutine 없이 직접 호출해
+// 두 경계를 결정적으로 검증한다. quantum (4,2).
+
+// (a) free == 0 && !quotaLeft && !blocked → 거절.
+// switch의 두 case가 겹치는 경우("free==0이면서 blocked==false") 순서상
+// 거절이 맞다는 것을 고정한다. default로 잘못 떨어지면(아래 (b)만 도달해야
+// 하는 분기로 잘못 빠지면) 이 테스트가 응답을 못 받아 타임아웃으로 실패한다.
+func TestCancelPhaseDecisionTableRejectsWhenCapacityZeroAndQuotaExhausted(t *testing.T) {
+	me := NewMatchingEngine()
+	me.maxMatchesPerTurn = 4
+	me.maxConsecutiveCancels = 2
+	me.cancelsSinceProgress = 2 // quota 소진 → quotaLeft = false
+	// activeSweep은 nil로 둔다 → blocked = false.
+
+	me.ExecutionCh = make(chan ExecutionEvent, 4)
+	for i := 0; i < 4; i++ { // free = 0
+		me.ExecutionCh <- ExecutionEvent{}
+	}
+
+	var backpressured atomic.Int64
+	me.Observers = EngineObservers{CancelBackpressured: func() { backpressured.Add(1) }}
+
+	book := me.GetOrderBook("BTC")
+	target := testOrder(1, "BTC", model.OrderSideSell, 50000, 1)
+	book.AddOrder(target)
+
+	resp := make(chan CancelOrderResult, 1)
+	me.CancelCh <- CancelOrderCommand{
+		CoinSymbol: "BTC", OrderID: 1, Side: model.OrderSideSell, Price: decimal.NewFromInt(50000),
+		ResponseCh: resp,
+	}
+
+	me.cancelPhase()
+
+	select {
+	case result := <-resp:
+		require.True(t, errors.Is(result.Err, ErrCancelOrderBackpressured))
+		require.False(t, result.Removed)
+	default:
+		t.Fatal("응답이 오지 않았다 — command를 꺼내 거절했어야 한다")
+	}
+	require.Equal(t, 1, book.SellOrders.Len(), "주문이 book에 남아 있어야 한다")
+	require.Equal(t, int64(1), backpressured.Load())
+	require.Equal(t, 4, len(me.ExecutionCh), "채널 길이가 바뀌지 않아야 한다")
+	require.Equal(t, 2, me.cancelsSinceProgress, "거절은 한도를 소비하지 않는다")
+	require.Equal(t, 0, len(me.CancelCh), "command를 꺼내서 거절했어야 한다")
+}
+
+// (b) free >= 1 && !quotaLeft && !blocked → command를 꺼내지 않고 phase를
+// 끝낸다. "이번 turn의 slice 또는 admission이 progress를 만든다"는 전제라,
+// 여기서 꺼내 거절하면 진짜 진행성이 있을 때도 불필요하게 거절하게 된다.
+// switch default를 "거절"로 잘못 바꾸면 이 테스트에서 CancelCh가 비게 되고
+// 응답 채널에 거절 응답이 도착해 실패한다.
+func TestCancelPhaseDecisionTableLeavesCommandQueuedWhenCapacityAvailableAndQuotaExhausted(t *testing.T) {
+	me := NewMatchingEngine()
+	me.maxMatchesPerTurn = 4
+	me.maxConsecutiveCancels = 2
+	me.cancelsSinceProgress = 2 // quota 소진 → quotaLeft = false
+	// activeSweep은 nil → blocked = false.
+
+	me.ExecutionCh = make(chan ExecutionEvent, 16) // free = 16 >= 1
+
+	var backpressured atomic.Int64
+	me.Observers = EngineObservers{CancelBackpressured: func() { backpressured.Add(1) }}
+
+	book := me.GetOrderBook("BTC")
+	target := testOrder(1, "BTC", model.OrderSideSell, 50000, 1)
+	book.AddOrder(target)
+
+	resp := make(chan CancelOrderResult, 1)
+	me.CancelCh <- CancelOrderCommand{
+		CoinSymbol: "BTC", OrderID: 1, Side: model.OrderSideSell, Price: decimal.NewFromInt(50000),
+		ResponseCh: resp,
+	}
+
+	me.cancelPhase()
+
+	require.Equal(t, 1, len(me.CancelCh), "command를 꺼내지 않고 그대로 남아 있어야 한다")
+	select {
+	case r := <-resp:
+		t.Fatalf("응답이 오면 안 된다(꺼내지 않았으므로) — got %+v", r)
+	default:
+	}
+	require.Equal(t, int64(0), backpressured.Load(), "거절이 아니므로 CancelBackpressured가 없어야 한다")
+	require.Equal(t, 1, book.SellOrders.Len(), "주문이 book에 남아 있어야 한다")
+	require.Equal(t, 0, len(me.ExecutionCh), "채널 길이가 바뀌지 않아야 한다")
 }

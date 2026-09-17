@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,21 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
+
+// recoverPanicMessage는 fn이 panic해야 한다고 요구하고, 그 값을 문자열로
+// 돌려준다. panic하지 않으면 테스트를 실패시킨다.
+func recoverPanicMessage(t *testing.T, fn func()) (msg string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("panic이 발생하지 않았다")
+		}
+		msg = fmt.Sprint(r)
+	}()
+	fn()
+	return ""
+}
 
 // parkRecorder는 Task 3 Step1 테스트들이 공유하는 관측 헬퍼다. ParkStarted는
 // 원자 카운터, ParkDuration은 원자 카운터(finished)와 mutex로 보호한 duration
@@ -501,8 +517,11 @@ func TestSendExecutionPanicsWhenReservationBudgetExhausted(t *testing.T) {
 
 	require.NotPanics(t, func() { me.sendExecution(EmitTrade, ExecutionEvent{}) })
 	require.NotPanics(t, func() { me.sendExecution(EmitTrade, ExecutionEvent{}) })
-	require.Panics(t, func() { me.sendExecution(EmitTrade, ExecutionEvent{}) },
-		"예산 2를 넘는 3번째 send는 panic해야 한다")
+
+	msg := recoverPanicMessage(t, func() { me.sendExecution(EmitTrade, ExecutionEvent{}) })
+	require.Contains(t, msg, me.engineID, "panic 메시지에 engine ID가 있어야 한다")
+	require.Contains(t, msg, string(EmitTrade), "panic 메시지에 kind가 있어야 한다")
+	require.Contains(t, msg, "remaining=0", "panic 메시지에 remaining이 있어야 한다")
 }
 
 // 4차 리뷰 세부 사항 1 — 예산은 남았지만 채널이 준비되지 않은 send도
@@ -514,7 +533,10 @@ func TestSendExecutionPanicsWhenChannelNotReadyDespiteBudget(t *testing.T) {
 	me.ExecutionCh <- ExecutionEvent{}
 	me.beginReservation(1)
 
-	require.Panics(t, func() { me.sendExecution(EmitTrade, ExecutionEvent{}) })
+	msg := recoverPanicMessage(t, func() { me.sendExecution(EmitTrade, ExecutionEvent{}) })
+	require.Contains(t, msg, me.engineID, "panic 메시지에 engine ID가 있어야 한다")
+	require.Contains(t, msg, string(EmitTrade), "panic 메시지에 kind가 있어야 한다")
+	require.Contains(t, msg, "remaining=1", "panic 메시지에 remaining이 있어야 한다")
 	require.Equal(t, 1, len(me.ExecutionCh), "이벤트를 버리지 않는다 — 채워둔 1건만 존재해야 한다")
 }
 
