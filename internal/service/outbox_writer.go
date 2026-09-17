@@ -82,10 +82,11 @@ func (w *OutboxWriter) collectBatch(batch []matching.ExecutionEvent) ([]matching
 }
 
 // flushAndForward는 배치를 커밋될 때까지 무한 재시도합니다. 이 동안 ExecutionCh가
-// 차면 엔진은 조각 사이에서 park합니다(신규 조각을 시작하지 않을 뿐, 매칭 자체가
-// 블록되지는 않습니다) — 취소는 남은 자리·quota에 따라 처리되거나 backpressure로
-// 응답합니다. 이는 의도된 백프레셔입니다 — DB가 죽었는데 매칭만 계속되면 유실 대기
-// 이벤트가 메모리에 무한 적체됩니다.
+// 차도 엔진 goroutine은 ExecutionCh send에서 막히지 않습니다. 진행 중인 sweep은
+// 조각 사이에서 park하고(재개 전까지 체결이 진행되지 않음), 그동안 취소·stop은
+// 처리합니다 — 취소는 남은 자리·quota에 따라 처리되거나 backpressure로 응답합니다.
+// 이는 의도된 백프레셔입니다 — DB가 죽었는데 매칭만 계속되면 유실 대기 이벤트가
+// 메모리에 무한 적체됩니다.
 func (w *OutboxWriter) flushAndForward(events []matching.ExecutionEvent) {
 	rows := make([]*model.TradeOutboxEvent, 0, len(events))
 	forwarded := make([]matching.ExecutionEvent, 0, len(events))

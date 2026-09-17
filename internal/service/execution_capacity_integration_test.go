@@ -109,6 +109,10 @@ func TestExecutionCapacityOutboxFailureRecovers(t *testing.T) {
 	// 이미 정지된 뒤라 사실상 no-op다(Stop 멱등, 닫힌 채널 대기는 즉시 반환) —
 	// 본문이 중간에 t.Fatal로 끝나는 경로를 위해 안전망으로 남긴다.
 	t.Cleanup(func() {
+		// 회복(failing=false) 전에 t.Fatal로 끝나면 writer가 주입 오류를 계속
+		// 반환해 무한 재시도에 갇힌 채라 engine/writer 종료 대기가 시간 초과할
+		// 수 있다 — 안전망이므로 먼저 오류 주입을 끈다.
+		outboxRepo.failing.Store(false)
 		cancelWorker()
 		select {
 		case <-workerDone:
@@ -361,13 +365,18 @@ func assertNoDBReconciliationViolations(t *testing.T, db *gorm.DB, symbol string
 
 	recon := repository.NewLedgerReconciliationRepository(db)
 
-	// 검사 1(CheckUnbalancedJournals): 범위 계정에 posting이 있는 journal ID
-	// 집합을 postings에서 먼저 구하고, 전체 결과 중 그 집합에 속하는 행이
-	// 0건인지 본다. 종료 판정은 reconciliation_worker.go의 runUnbalancedJournalCheck와
-	// 같다 — 페이지 안의 서로 다른 journal 수로 판정한다(한 journal이 자산
-	// 여러 종의 불균형 행을 가질 수 있어 행 수로는 안 된다).
+	// 검사 1(CheckUnbalancedJournals): 사용자 계정(accountIDs)에 posting이 있는
+	// journal ID 집합을 postings에서 먼저 구하고, 전체 결과 중 그 집합에 속하는
+	// 행이 0건인지 본다. 여기서는 scopeAccountIDs(FEE_INCOME 포함)가 아니라
+	// accountIDs만 쓴다 — FEE_INCOME은 자산별 전역 계정이라 넣으면 DB에 쌓인
+	// 모든 과거 KRW 수수료 분개가 범위에 들어와 버린다. 이 테스트가 만든 체결·
+	// hold·release 분개는 전부 사용자 계정 posting을 포함하므로(수수료 분개도
+	// 매수자/매도자 쪽 posting을 동반) 판별력은 accountIDs만으로도 같다.
+	// 종료 판정은 reconciliation_worker.go의 runUnbalancedJournalCheck와 같다 —
+	// 페이지 안의 서로 다른 journal 수로 판정한다(한 journal이 자산 여러 종의
+	// 불균형 행을 가질 수 있어 행 수로는 안 된다).
 	var scopedJournalIDs []uint
-	require.NoError(t, db.Raw(`SELECT DISTINCT journal_id FROM postings WHERE account_id IN ?`, scopeAccountIDs).Scan(&scopedJournalIDs).Error)
+	require.NoError(t, db.Raw(`SELECT DISTINCT journal_id FROM postings WHERE account_id IN ?`, accountIDs).Scan(&scopedJournalIDs).Error)
 	journalScope := make(map[uint]bool, len(scopedJournalIDs))
 	for _, id := range scopedJournalIDs {
 		journalScope[id] = true
