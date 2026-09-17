@@ -32,7 +32,9 @@ func TestMigrationsDirUsesEnvOverride(t *testing.T) {
 func TestTradesBuyOrderIDIndexMigrationIsConcurrentAndValidated(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(migrationsDir(), "006_trades_buy_order_id_index.sql"))
 	require.NoError(t, err)
-	sql := string(raw)
+	// Windows(core.autocrlf=true) 작업 트리 체크아웃은 CRLF일 수 있다 — 저장된
+	// blob은 LF다. 아래 HasPrefix가 물리 EOL에 의존하므로 정규화한다.
+	sql := strings.ReplaceAll(string(raw), "\r\n", "\n")
 
 	assert.True(t, strings.HasPrefix(sql, "-- +goose NO TRANSACTION\n"))
 	assert.Contains(t, sql, "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_trades_buy_order_id")
@@ -87,7 +89,9 @@ func TestCancelCommandsMigrationDeclaresDurableContract(t *testing.T) {
 func TestTransferPollDueIndexMigrationIsConcurrentAndValidated(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(migrationsDir(), "011_transfer_poll_due_index.sql"))
 	require.NoError(t, err)
-	sql := string(raw)
+	// Windows(core.autocrlf=true) 작업 트리 체크아웃은 CRLF일 수 있다 — 저장된
+	// blob은 LF다. 아래 HasPrefix와 순서 비교가 물리 EOL에 의존하므로 정규화한다.
+	sql := strings.ReplaceAll(string(raw), "\r\n", "\n")
 
 	assert.True(t, strings.HasPrefix(sql, "-- +goose NO TRANSACTION\n"))
 
