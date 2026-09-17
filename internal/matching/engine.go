@@ -1081,13 +1081,15 @@ func (me *MatchingEngine) emitTrade(trade *model.Trade) {
 //
 // 이 머신의 클럭 해상도는 ~645µs이므로 막히지 않은 블로킹 send는 0으로
 // 기록된다. 그것이 정상이다 — _sum이 0이어도 _count는 emit 횟수와 같아야
-// 한다. 예약 구간 안의 send는 논블로킹이므로 관측값을 항상 0으로 기록한다.
+// 한다. 예약 구간 send도 enqueue 관측 시간을 기록한다 — 막히지 않으므로
+// 클럭 해상도·선점 수준의 작은 값이다.
 func (me *MatchingEngine) sendExecution(kind EmitKind, event ExecutionEvent) {
 	if me.reservationActive {
 		if me.reservationRemaining <= 0 {
 			panic(fmt.Sprintf("matching: engine %s reservation exhausted for kind=%s (remaining=%d)",
 				me.engineID, kind, me.reservationRemaining))
 		}
+		start := time.Now()
 		select {
 		case me.ExecutionCh <- event:
 			me.reservationRemaining--
@@ -1098,7 +1100,9 @@ func (me *MatchingEngine) sendExecution(kind EmitKind, event ExecutionEvent) {
 			panic(fmt.Sprintf("matching: engine %s reservation has room (remaining=%d) but ExecutionCh is not ready for kind=%s",
 				me.engineID, me.reservationRemaining, kind))
 		}
-		me.Observers.emitBlock(kind, 0)
+		blocked := time.Since(start)
+		me.Observers.emitBlock(kind, blocked)
+		me.sliceEmitBlock += blocked
 		return
 	}
 	start := time.Now()

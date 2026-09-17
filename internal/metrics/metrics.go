@@ -256,7 +256,7 @@ var (
 
 	MatchingEngineEmitBlockPerSlice = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "matching_engine_emit_block_per_slice_seconds",
-		Help:    "Total ExecutionCh blocking time accumulated within one matching slice.",
+		Help:    "Total ExecutionCh enqueue observation time accumulated within one matching slice. Scheduler-path sends are reserved and non-blocking; non-zero values include clock resolution and preemption.",
 		Buckets: prometheus.ExponentialBuckets(1e-6, 5, 9),
 	})
 
