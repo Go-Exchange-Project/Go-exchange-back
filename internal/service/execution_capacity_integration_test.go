@@ -105,6 +105,9 @@ func TestExecutionCapacityOutboxFailureRecovers(t *testing.T) {
 	go func() { writer.Run(); close(writerDone) }()
 	go func() { worker.Run(workerCtx); close(workerDone) }()
 
+	// 본문 마지막에 파이프라인을 명시적으로 멈추므로(아래), 여기 도달할 때는
+	// 이미 정지된 뒤라 사실상 no-op다(Stop 멱등, 닫힌 채널 대기는 즉시 반환) —
+	// 본문이 중간에 t.Fatal로 끝나는 경로를 위해 안전망으로 남긴다.
 	t.Cleanup(func() {
 		cancelWorker()
 		select {
@@ -216,24 +219,76 @@ func TestExecutionCapacityOutboxFailureRecovers(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond, "회복 후에도 이 심볼의 outbox 행이 생성되지 않았다")
 
 	// release → 정산을 settleForwarded 방식으로 끝까지 흘린다.
-	// 기대 이벤트 수: Trade makerCount건 + OrderCancelled 3건.
+	// 기대 이벤트 수: Trade makerCount건 + OrderCancelled 3건. 루프·이후 drain
+	// 양쪽에서 같은 처리를 쓰므로 클로저로 묶는다.
+	outboxRepoDirect := repository.NewTradeOutboxRepository(db)
 	var tradeCount, cancelledCount int
+	processForwardedEvent := func(event OutboxEvent) {
+		switch {
+		case event.Event.Trade != nil:
+			_, err := settlement.SettleTrade(event.Event.Trade, event.OutboxID)
+			require.NoError(t, err)
+			tradeCount++
+		case event.Event.OrderCancelled != nil:
+			require.NoError(t, orderService.ProcessOrderCancellation(*event.Event.OrderCancelled))
+			cancelledCount++
+		}
+		require.NoError(t, outboxRepoDirect.MarkProcessed(event.OutboxID))
+	}
+
 	deadline := time.After(30 * time.Second)
 	for tradeCount < makerCount || cancelledCount < 3 {
 		select {
 		case event := <-forwarded:
-			switch {
-			case event.Event.Trade != nil:
-				_, err := settlement.SettleTrade(event.Event.Trade, event.OutboxID)
-				require.NoError(t, err)
-				tradeCount++
-			case event.Event.OrderCancelled != nil:
-				require.NoError(t, orderService.ProcessOrderCancellation(*event.Event.OrderCancelled))
-				cancelledCount++
-			}
-			require.NoError(t, repository.NewTradeOutboxRepository(db).MarkProcessed(event.OutboxID))
+			processForwardedEvent(event)
 		case <-deadline:
 			t.Fatalf("이벤트를 기다리다 시간 초과(trade=%d/%d, cancelled=%d/3)", tradeCount, makerCount, cancelledCount)
+		}
+	}
+
+	// 기대 개수 이후에 더 붙는 이벤트(중복·유실)를 놓치지 않으려면, 위 카운트
+	// 도달 즉시 채널을 버려두는 대신 파이프라인을 순서대로 멈추고 그 안에 남은
+	// 것까지 전부 비운다. cleanupServiceUsers·cleanupServiceCancelCommands의
+	// defer가 (이 함수 자신의 defer 스택이라) t.Cleanup보다 먼저 실행되므로,
+	// worker·engine·writer가 아직 도는 채로 픽스처를 지우면 안 된다 — 여기서
+	// 명시적으로 먼저 멈춘다.
+	cancelWorker()
+	select {
+	case <-workerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel worker가 정지하지 않았다")
+	}
+
+	engine.Stop()
+	select {
+	case <-engine.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("엔진이 드레인되지 않았다")
+	}
+
+	// writerDone을 기다리는 동안에도 forwarded를 계속 읽는다 — writer가
+	// Forward에서 막혀 교착되지 않게 한다.
+	writerStopDeadline := time.After(10 * time.Second)
+	for waiting := true; waiting; {
+		select {
+		case event := <-forwarded:
+			processForwardedEvent(event)
+		case <-writerDone:
+			waiting = false
+		case <-writerStopDeadline:
+			t.Fatal("outbox writer가 종료되지 않았다")
+		}
+	}
+
+	// writer 종료 후에는 더 이상 생산자가 없다 — forwarded에 남은 것을
+	// 논블로킹으로 전부 비운다.
+drain:
+	for {
+		select {
+		case event := <-forwarded:
+			processForwardedEvent(event)
+		default:
+			break drain
 		}
 	}
 
@@ -249,8 +304,18 @@ func TestExecutionCapacityOutboxFailureRecovers(t *testing.T) {
 		return len(commands) == 3
 	}, 10*time.Second, 10*time.Millisecond, "세 취소 command 모두 PROCESSED여야 한다")
 
-	require.Equal(t, makerCount, tradeCount, "체결 수가 기대값과 정확히 일치해야 한다")
-	require.Equal(t, 3, cancelledCount, "취소 이벤트가 정확히 3건이어야 한다")
+	require.Equal(t, makerCount, tradeCount, "체결 수가 기대값과 정확히 일치해야 한다(기대 개수 이후 추가 이벤트가 없어야 한다)")
+	require.Equal(t, 3, cancelledCount, "취소 이벤트가 정확히 3건이어야 한다(기대 개수 이후 추가 이벤트가 없어야 한다)")
+
+	var totalOutboxRows int64
+	require.NoError(t, db.Model(&model.TradeOutboxEvent{}).Where("coin_symbol = ?", symbol).Count(&totalOutboxRows).Error)
+	require.EqualValues(t, makerCount+3, totalOutboxRows, "이 심볼 outbox 총 행 수가 33(=maker 30 + 취소 3)이어야 한다")
+
+	var stillPendingOutboxRows int64
+	require.NoError(t, db.Model(&model.TradeOutboxEvent{}).
+		Where("coin_symbol = ? AND status = ?", symbol, model.TradeOutboxStatusPending).
+		Count(&stillPendingOutboxRows).Error)
+	require.EqualValues(t, 0, stillPendingOutboxRows, "이 심볼 outbox에 PENDING이 남지 않아야 한다")
 
 	for _, victim := range victims {
 		var order model.Order
@@ -268,9 +333,12 @@ func TestExecutionCapacityOutboxFailureRecovers(t *testing.T) {
 	assertNoDBReconciliationViolations(t, db, symbol, append(append([]uint{}, makerIDs...), takerID, victimID), "KRW", symbol)
 }
 
-// assertNoDBReconciliationViolations는 주어진 사용자·자산 조합의 계정에 대해
-// 검산 4종을 한 번만 돌려 위반 0건을 확인한다(41명을 각각 부르는 대신 배치로
-// 확인해 반복되는 전역 스캔 비용을 줄인다).
+// assertNoDBReconciliationViolations는 검산 4종을 이 테스트가 만든 계정·journal
+// 범위로 한정해 리포지토리 Check를 직접 호출해 확인한다(TestAllEventsPassReconciliation의
+// 선례, transfer_integration_test.go). ReconciliationWorker.RunOnce()를 거치는
+// 이전 버전은 subject_key가 "account:%d"인 검사(balance_cache_drift·negative_account)만
+// 걸러내고, "journal:%d"인 unbalanced_journal과 "asset:%s"인 asset_totals는 전혀
+// 걸러지지 않아 이 함수로는 그 두 검사가 통과한 것처럼 보였다 — 판별력 구멍이었다.
 func assertNoDBReconciliationViolations(t *testing.T, db *gorm.DB, symbol string, userIDs []uint, assets ...string) {
 	t.Helper()
 
@@ -281,24 +349,111 @@ func assertNoDBReconciliationViolations(t *testing.T, db *gorm.DB, symbol string
 		userIDs, assets).Scan(&accountIDs).Error)
 	require.NotEmpty(t, accountIDs, "계정이 아직 없다")
 
-	subjects := make([]string, 0, len(accountIDs))
-	for _, id := range accountIDs {
-		subjects = append(subjects, fmt.Sprintf("account:%d", id))
+	// FEE_INCOME은 사용자 소유가 아니라 자산별 전역 계정이다 — 존재하는 것만 범위에 넣는다.
+	var feeAccountIDs []uint
+	require.NoError(t, db.Raw(`
+		SELECT id FROM accounts WHERE asset IN ? AND account_type = 'FEE_INCOME'`, assets).Scan(&feeAccountIDs).Error)
+	scopeAccountIDs := append(append([]uint{}, accountIDs...), feeAccountIDs...)
+	scopeSet := make(map[uint]bool, len(scopeAccountIDs))
+	for _, id := range scopeAccountIDs {
+		scopeSet[id] = true
 	}
-	t.Cleanup(func() {
-		require.NoError(t, db.Where("subject_key IN ?", subjects).Delete(&model.ReconciliationViolation{}).Error)
-	})
 
-	worker := &ReconciliationWorker{
-		Repository: repository.NewReconciliationRepository(db),
-		Logger:     discardServiceLogger(),
-	}
-	worker.RunOnce()
+	recon := repository.NewLedgerReconciliationRepository(db)
 
-	violations := findViolationsBySubject(t, db, subjects)
-	for _, subjectViolations := range violations {
-		require.Empty(t, subjectViolations, "검산 4종 위반이 없어야 한다(심볼 %s): %+v", symbol, subjectViolations)
+	// 검사 1(CheckUnbalancedJournals): 범위 계정에 posting이 있는 journal ID
+	// 집합을 postings에서 먼저 구하고, 전체 결과 중 그 집합에 속하는 행이
+	// 0건인지 본다. 종료 판정은 reconciliation_worker.go의 runUnbalancedJournalCheck와
+	// 같다 — 페이지 안의 서로 다른 journal 수로 판정한다(한 journal이 자산
+	// 여러 종의 불균형 행을 가질 수 있어 행 수로는 안 된다).
+	var scopedJournalIDs []uint
+	require.NoError(t, db.Raw(`SELECT DISTINCT journal_id FROM postings WHERE account_id IN ?`, scopeAccountIDs).Scan(&scopedJournalIDs).Error)
+	journalScope := make(map[uint]bool, len(scopedJournalIDs))
+	for _, id := range scopedJournalIDs {
+		journalScope[id] = true
 	}
+	const pageSize = 1000
+	var unbalancedInScope []repository.UnbalancedJournalRow
+	var afterJournalID uint
+	for {
+		rows, err := recon.CheckUnbalancedJournals(afterJournalID, pageSize)
+		require.NoError(t, err)
+		if len(rows) == 0 {
+			break
+		}
+		journalCount := 0
+		var lastJournalID uint
+		for i, row := range rows {
+			if i == 0 || row.JournalID != lastJournalID {
+				journalCount++
+				lastJournalID = row.JournalID
+			}
+			if journalScope[row.JournalID] {
+				unbalancedInScope = append(unbalancedInScope, row)
+			}
+			afterJournalID = row.JournalID
+		}
+		if journalCount < pageSize {
+			break
+		}
+	}
+	require.Empty(t, unbalancedInScope, "검산 1(unbalanced_journal) 위반이 없어야 한다(심볼 %s): %+v", symbol, unbalancedInScope)
+
+	// 검사 2(CheckBalanceCacheDrift): 범위 계정만.
+	var driftInScope []repository.BalanceDriftRow
+	var afterAccountID uint
+	for {
+		rows, err := recon.CheckBalanceCacheDrift(afterAccountID, pageSize)
+		require.NoError(t, err)
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			if scopeSet[row.AccountID] {
+				driftInScope = append(driftInScope, row)
+			}
+			afterAccountID = row.AccountID
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	require.Empty(t, driftInScope, "검산 2(balance_cache_drift) 위반이 없어야 한다(심볼 %s): %+v", symbol, driftInScope)
+
+	// 검사 3(CheckAssetTotals): 이 심볼만 본다. KRW는 전역 자산이라 이 테스트
+	// 밖의 다른 테스트가 남긴 잔여물의 영향을 받을 수 있어 여기서는 단언하지
+	// 않는다 — KRW 쪽 불균형이 있다면 그 journal은 범위 밖(우리 계정과
+	// 무관)이거나, 우리 계정과 관련됐다면 이미 검사 1(범위 journal)이 잡는다.
+	totals, err := recon.CheckAssetTotals()
+	require.NoError(t, err)
+	var symbolTotal []repository.AssetTotalRow
+	for _, row := range totals {
+		if row.Asset == symbol {
+			symbolTotal = append(symbolTotal, row)
+		}
+	}
+	require.Empty(t, symbolTotal, "검산 3(asset_totals) 위반이 없어야 한다(심볼 %s): %+v", symbol, symbolTotal)
+
+	// 검사 4(CheckNegativeAccounts): 범위 계정만.
+	var negativeInScope []repository.NegativeAccountRow
+	var afterNegativeID uint
+	for {
+		rows, err := recon.CheckNegativeAccounts(afterNegativeID, pageSize)
+		require.NoError(t, err)
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			if scopeSet[row.AccountID] {
+				negativeInScope = append(negativeInScope, row)
+			}
+			afterNegativeID = row.AccountID
+		}
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	require.Empty(t, negativeInScope, "검산 4(negative_account) 위반이 없어야 한다(심볼 %s): %+v", symbol, negativeInScope)
 }
 
 // ===== Task 8: 테스트 13 — durable prefix + undurable suffix 복구 =====
@@ -458,7 +613,7 @@ func TestExecutionCapacityDurablePrefixAndUndurableSuffixRecovery(t *testing.T) 
 	// 런타임 1 종료 직전 단언: 이 심볼의 outbox가 정확히 P건, 모두 PENDING, suffix 행 0.
 	var outboxCount int64
 	require.NoError(t, db.Model(&model.TradeOutboxEvent{}).Where("coin_symbol = ?", symbol).Count(&outboxCount).Error)
-	require.EqualValues(t, prefixCount, outboxCount, "prefix outbox 행 수가 P와 달라야 한다")
+	require.EqualValues(t, prefixCount, outboxCount, "prefix outbox 행 수가 P와 일치해야 한다")
 	var pendingCount int64
 	require.NoError(t, db.Model(&model.TradeOutboxEvent{}).
 		Where("coin_symbol = ? AND status = ?", symbol, model.TradeOutboxStatusPending).Count(&pendingCount).Error)
@@ -577,7 +732,7 @@ func TestExecutionCapacityDurablePrefixAndUndurableSuffixRecovery(t *testing.T) 
 	// FEE_INCOME 정확한 델타.
 	feeIncomeAfter := feeIncomeBalance(t, db, model.KRWAssetSymbol)
 	require.True(t, feeIncomeAfter.Sub(feeIncomeBefore).Equal(totalFeeIncome),
-		"FEE_INCOME 증가분이 기대와 달라야 한다: got %s, want %s", feeIncomeAfter.Sub(feeIncomeBefore), totalFeeIncome)
+		"FEE_INCOME 증가분이 기대와 일치해야 한다: got %s, want %s", feeIncomeAfter.Sub(feeIncomeBefore), totalFeeIncome)
 
 	// 이 심볼 outbox PENDING 0.
 	var stillPending int64
