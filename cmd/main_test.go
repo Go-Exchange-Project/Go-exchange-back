@@ -182,6 +182,26 @@ func deadlockError() error {
 	return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
 }
 
+func statementTimeoutError() error {
+	return &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}
+}
+
+// D11: 57014도 40P01(deadlock)과 같은 즉시 재시도 경로(정산)를 탄다.
+func TestProcessTradeSettlementRetriesStatementTimeoutThenSucceeds(t *testing.T) {
+	withFastTransientRetries(t)
+
+	settler := &fakeTradeSettler{
+		errs:   []error{statementTimeoutError(), statementTimeoutError(), nil},
+		result: service.SettlementResult{Applied: true, TradeID: 1},
+	}
+	recorder := &fakeFailureRecorder{}
+
+	processTradeSettlement(testTrade(), 0, settler, recorder, func(string, []byte) {}, discardLogger())
+
+	assert.Equal(t, 3, settler.calls)
+	assert.Equal(t, 0, recorder.calls, "성공했으므로 실패 기록이 없어야 한다")
+}
+
 func TestProcessTradeSettlementRetriesTransientErrorInPlace(t *testing.T) {
 	withFastTransientRetries(t)
 
@@ -286,6 +306,19 @@ func TestProcessMarketOrderDoneRetriesConflictThenSucceeds(t *testing.T) {
 	assert.Equal(t, 0, recorder.calls, "성공했으므로 실패 기록이 없어야 한다")
 }
 
+// D11: 57014가 isRetryableCompletionError를 통해 시장가 완료 경로에서도 재시도된다.
+func TestProcessMarketOrderDoneRetriesStatementTimeoutThenSucceeds(t *testing.T) {
+	withFastTransientRetries(t)
+
+	completer := &fakeMarketCompleter{errs: []error{statementTimeoutError(), statementTimeoutError(), nil}}
+	recorder := &fakeCompletionFailureRecorder{}
+
+	processMarketOrderDone(testMarketOrderDone(), completer, &fakeDependencyGuard{}, recorder, discardLogger())
+
+	assert.Equal(t, 3, completer.calls)
+	assert.Equal(t, 0, recorder.calls, "성공했으므로 실패 기록이 없어야 한다")
+}
+
 func TestProcessMarketOrderDoneRecordsFailureAfterRetriesExhausted(t *testing.T) {
 	withFastTransientRetries(t)
 
@@ -355,7 +388,7 @@ func TestSettleTradeBatchWithFallbackFallsBackToPerTradeOnBatchError(t *testing.
 	before := counterValue(t, metrics.SettlementBatchFallbacksTotal)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, nil, nil, nil, func(string, []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, recorder, nil, nil, nil, nil, nil, nil, func(string, []byte) {
 		broadcasts++
 	}, marker, discardLogger())
 
@@ -378,7 +411,7 @@ func TestSettleTradeBatchWithFallbackBroadcastsOnlyAppliedOnSuccess(t *testing.T
 	before := histogramSampleCount(t, metrics.SettlementBatchSize)
 
 	batch := []service.OutboxEvent{tradeOutboxEvent(1, 1), tradeOutboxEvent(2, 2), tradeOutboxEvent(3, 3)}
-	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil, nil, nil, func(_ string, msg []byte) {
+	settleTradeBatchWithFallback(batch, batchSettler, settler, nil, nil, nil, nil, nil, nil, nil, func(_ string, msg []byte) {
 		broadcasts++
 		lastPayload = msg
 	}, marker, discardLogger())

@@ -82,21 +82,38 @@ func (w *SettlementRetryWorker) Run(ctx context.Context) {
 	}
 }
 
+// RunOnce는 세 phase를 순서대로 돈다. 어느 phase에서든 이번 시도의 실제 오류가
+// 57014(statement_timeout)면 그 phase는 stopRun=true를 반환하고, 그 뒤의 phase는
+// 아예 시작하지 않는다(설계 §4.4) — 과부하 상황에서 32건 배치를 한 RunOnce가
+// 순차로 15초씩 쓰는 증폭을 막는다. 판정 기준은 저장된 카테고리가 아니라
+// "이번 시도"의 반환 오류다 — 원래 DEADLOCK으로 분류된 failure도 이번 재시도가
+// 57014로 끝나면 같은 중단이다. 57014가 아닌 오류는 기존대로 다음 항목으로 진행한다.
 func (w *SettlementRetryWorker) RunOnce() {
-	w.retryFailedSettlements()
-	w.retryFailedCompletions()
+	if w.retryFailedSettlements() {
+		return
+	}
+	if w.retryFailedCompletions() {
+		return
+	}
 	w.retryFailedCancellations()
 }
 
-func (w *SettlementRetryWorker) retryFailedSettlements() {
+// isStatementTimeoutStopSignal은 이번 시도의 반환 오류가 57014인지 판정한다.
+// stopRun 여부는 항상 이 값 하나로 정해진다 — RecordFailure(갱신) 자체가
+// 실패해도 판정은 바뀌지 않는다(원래 시도의 오류가 근거이므로).
+func isStatementTimeoutStopSignal(attemptErr error) bool {
+	return settlementErrorSQLState(attemptErr) == pgCodeQueryCanceled
+}
+
+func (w *SettlementRetryWorker) retryFailedSettlements() (stopRun bool) {
 	if w.Settler == nil || w.FailedSettlements == nil {
-		return
+		return false
 	}
 
 	failures, err := w.FailedSettlements.ListOpenFailures(settlementRetryBatchLimit)
 	if err != nil {
 		w.logf("retry worker: list open failed settlements failed: %v", err)
-		return
+		return false
 	}
 
 	for i := range failures {
@@ -111,10 +128,14 @@ func (w *SettlementRetryWorker) retryFailedSettlements() {
 		trade := tradeFromFailedSettlement(failure)
 		// outboxEventID=0: 재시도는 failed_settlements 기반이라 outbox와 무관하다.
 		if _, err := w.Settler.SettleTrade(trade, 0); err != nil {
+			stop := isStatementTimeoutStopSignal(err)
 			if _, recordErr := w.FailedSettlements.RecordFailure(trade, err); recordErr != nil {
 				w.logf("retry worker: record failed settlement failed: %v", recordErr)
 			}
 			w.logf("retry worker: settle trade %s failed: %v", failure.TradeIdempotencyKey, err)
+			if stop {
+				return true
+			}
 			continue
 		}
 
@@ -126,22 +147,23 @@ func (w *SettlementRetryWorker) retryFailedSettlements() {
 			w.logf("retry worker: resolve failed settlement %d failed: %v", failure.ID, err)
 		}
 	}
+	return false
 }
 
-func (w *SettlementRetryWorker) retryFailedCompletions() {
+func (w *SettlementRetryWorker) retryFailedCompletions() (stopRun bool) {
 	if w.MarketCompleter == nil || w.FailedCompletions == nil {
-		return
+		return false
 	}
 	// fail-closed: dependency를 확인할 수단이 없으면 terminal을 실행하지 않는다.
 	if w.FailedSettlements == nil {
 		w.logf("retry worker: dependency store unavailable, skipping completion phase")
-		return
+		return false
 	}
 
 	failures, err := w.FailedCompletions.ListOpenFailures(settlementRetryBatchLimit)
 	if err != nil {
 		w.logf("retry worker: list open failed market completions failed: %v", err)
-		return
+		return false
 	}
 
 	for i := range failures {
@@ -155,7 +177,7 @@ func (w *SettlementRetryWorker) retryFailedCompletions() {
 		hasOpen, depErr := w.FailedSettlements.HasOpenFailureForOrder(failure.OrderID)
 		if depErr != nil {
 			w.logf("retry worker: dependency check failed for order %d: %v", failure.OrderID, depErr)
-			return
+			return false
 		}
 		if hasOpen {
 			metrics.SettlementCompletionBlockedTotal.Inc()
@@ -169,10 +191,14 @@ func (w *SettlementRetryWorker) retryFailedCompletions() {
 			RemainingQuoteAmount: failure.RemainingQuoteAmount,
 		}
 		if err := w.MarketCompleter.CompleteMarketOrder(input); err != nil {
+			stop := isStatementTimeoutStopSignal(err)
 			if _, recordErr := w.FailedCompletions.RecordFailure(input, failure.CoinSymbol, err); recordErr != nil {
 				w.logf("retry worker: record failed market completion failed: %v", recordErr)
 			}
 			w.logf("retry worker: complete market order %d failed: %v", failure.OrderID, err)
+			if stop {
+				return true
+			}
 			continue
 		}
 
@@ -180,22 +206,23 @@ func (w *SettlementRetryWorker) retryFailedCompletions() {
 			w.logf("retry worker: resolve failed market completion %d failed: %v", failure.ID, err)
 		}
 	}
+	return false
 }
 
-func (w *SettlementRetryWorker) retryFailedCancellations() {
+func (w *SettlementRetryWorker) retryFailedCancellations() (stopRun bool) {
 	if w.CancelProcessor == nil || w.FailedCancellations == nil {
-		return
+		return false
 	}
 	// fail-closed: dependency를 확인할 수단이 없으면 terminal을 실행하지 않는다.
 	if w.FailedSettlements == nil {
 		w.logf("retry worker: dependency store unavailable, skipping cancellation phase")
-		return
+		return false
 	}
 
 	failures, err := w.FailedCancellations.ListOpenFailures(settlementRetryBatchLimit)
 	if err != nil {
 		w.logf("retry worker: list open failed order cancellations failed: %v", err)
-		return
+		return false
 	}
 
 	for i := range failures {
@@ -207,7 +234,7 @@ func (w *SettlementRetryWorker) retryFailedCancellations() {
 		hasOpen, depErr := w.FailedSettlements.HasOpenFailureForOrder(failure.OrderID)
 		if depErr != nil {
 			w.logf("retry worker: dependency check failed for order %d: %v", failure.OrderID, depErr)
-			return
+			return false
 		}
 		if hasOpen {
 			metrics.SettlementCompletionBlockedTotal.Inc()
@@ -216,10 +243,14 @@ func (w *SettlementRetryWorker) retryFailedCancellations() {
 
 		cancelled := orderCancelledFromFailure(failure)
 		if err := w.CancelProcessor.ProcessOrderCancellation(cancelled); err != nil {
+			stop := isStatementTimeoutStopSignal(err)
 			if _, recordErr := w.FailedCancellations.RecordFailure(cancelled, failure.OutboxEventID, err); recordErr != nil {
 				w.logf("retry worker: record failed order cancellation failed: %v", recordErr)
 			}
 			w.logf("retry worker: process order cancellation %d failed: %v", failure.OrderID, err)
+			if stop {
+				return true
+			}
 			continue
 		}
 
@@ -227,6 +258,7 @@ func (w *SettlementRetryWorker) retryFailedCancellations() {
 			w.logf("retry worker: resolve failed order cancellation %d failed: %v", failure.ID, err)
 		}
 	}
+	return false
 }
 
 // orderCancelledFromFailure는 저장된 실패 기록에서 취소 재시도용 이벤트를 복원합니다.

@@ -42,12 +42,20 @@ func (s *fakeCancellationDeferStore) EnsureDeferred(matching.OrderCancelled, uin
 }
 
 type fakeCancelProcessor struct {
-	err   error
+	err error
+	// errs가 설정되면 호출마다 하나씩 소비하고, 소진되면 err로 응답한다
+	// (cmd/main_test.go의 fakeTradeSettler.errs와 같은 관례).
+	errs  []error
 	calls int
 }
 
 func (p *fakeCancelProcessor) ProcessOrderCancellation(matching.OrderCancelled) error {
 	p.calls++
+	if len(p.errs) > 0 {
+		err := p.errs[0]
+		p.errs = p.errs[1:]
+		return err
+	}
 	return p.err
 }
 
@@ -81,6 +89,25 @@ func TestProcessOrderCancellationRecordsFailureWhenExecutionFails(t *testing.T) 
 	assert.True(t, handled)
 	assert.Equal(t, 1, store.recordCalls, "실제 실행 실패는 RecordFailure다")
 	assert.Zero(t, store.ensureCalls)
+}
+
+// D11: 57014가 취소 terminal의 즉시 재시도 경로에서도 재시도된다(성공하면
+// RecordFailure를 아예 타지 않는다).
+func TestProcessOrderCancellationRetriesStatementTimeoutThenSucceeds(t *testing.T) {
+	withFastTransientRetries(t)
+
+	guard := &fakeDependencyGuard{}
+	store := &fakeCancellationDeferStore{}
+	processor := &fakeCancelProcessor{errs: []error{statementTimeoutError(), statementTimeoutError(), nil}}
+
+	handled := processOrderCancellationEvent(
+		&matching.OrderCancelled{OrderID: 42, CoinSymbol: "BTC"},
+		77, processor, guard, store, discardLogger(),
+	)
+
+	assert.True(t, handled)
+	assert.Equal(t, 3, processor.calls)
+	assert.Zero(t, store.recordCalls, "재시도로 성공했으므로 실패 기록이 없어야 한다")
 }
 
 // 기록 자체가 실패하면(defer store가 죽어 있으면) outbox를 PENDING으로 남겨

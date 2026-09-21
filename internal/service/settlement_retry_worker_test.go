@@ -50,9 +50,10 @@ func (f *fakeRetryCompleter) CompleteMarketOrder(input CompleteMarketOrderInput)
 }
 
 type fakeFailedSettlementStore struct {
-	open     []model.FailedSettlement
-	resolved []uint
-	recorded int
+	open      []model.FailedSettlement
+	resolved  []uint
+	recorded  int
+	recordErr error // 설정되면 RecordFailure 자체가 실패한다(D13 갱신-실패 케이스)
 }
 
 func (s *fakeFailedSettlementStore) ListOpenFailures(int) ([]model.FailedSettlement, error) {
@@ -66,6 +67,9 @@ func (s *fakeFailedSettlementStore) ResolveFailure(input ResolveFailureInput) (*
 
 func (s *fakeFailedSettlementStore) RecordFailure(*model.Trade, error) (*model.FailedSettlement, error) {
 	s.recorded++
+	if s.recordErr != nil {
+		return nil, s.recordErr
+	}
 	return &model.FailedSettlement{}, nil
 }
 

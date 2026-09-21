@@ -229,6 +229,8 @@ type fakeFailedSettlementRepository struct {
 	hasOpen                bool
 	hasOpenErr             error
 	lastQueriedOrderID     uint
+	handoffItems           []repository.SettlementFailureHandoff
+	handoffErr             error
 }
 
 func (r *fakeFailedSettlementRepository) HasOpenFailureForOrder(orderID uint) (bool, error) {
@@ -259,4 +261,9 @@ func (r *fakeFailedSettlementRepository) MarkResolved(id uint, resolution string
 	r.markResolvedBy = resolvedBy
 	r.markResolvedNotes = notes
 	return nil
+}
+
+func (r *fakeFailedSettlementRepository) RecordFailuresAndMarkOutboxProcessed(items []repository.SettlementFailureHandoff) error {
+	r.handoffItems = items
+	return r.handoffErr
 }

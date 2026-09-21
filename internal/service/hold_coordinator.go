@@ -463,6 +463,21 @@ func (c *HoldCoordinator) collectBatch(batch []holdRequest) ([]holdRequest, bool
 func (c *HoldCoordinator) processBatch(reqs []holdRequest) {
 	results, err := c.HoldBatch(reqs)
 	if err != nil {
+		// 57014(statement_timeout)는 단건 폴백을 하지 않는다(설계 §4.3) — 과부하나
+		// 비싼 쿼리가 원인일 가능성이 커, 배치 크기만큼 단건 재처리가 줄줄이 같은
+		// 상한에 걸려 coordinator가 한 배치에 수 분간 묶일 수 있다. 배치가 이미
+		// 롤백됐으므로 주문은 아직 접수되지 않았다 — 클라이언트가 같은 멱등키로
+		// 재시도할 수 있게 unavailable(503)로 즉시 돌려준다. 55P03과 그 밖의
+		// 오류는 기존 폴백을 유지한다(핫 계정 하나만 분리하면 단건은 성공할 수 있다).
+		if SettlementErrorSQLState(err) == pgCodeQueryCanceled {
+			c.logf("hold batch of %d failed with statement timeout, skipping per-order fallback: %v", len(reqs), err)
+			unavailable := NewUnavailableErrorf("order intake is saturated, please retry shortly")
+			for _, req := range reqs {
+				req.resultCh <- holdResult{Err: unavailable}
+			}
+			return
+		}
+
 		metrics.HoldBatchFallbacksTotal.Inc()
 		c.logf("hold batch of %d failed, falling back to per-order: %v", len(reqs), err)
 		for i, res := range c.fallbackPerRequest(reqs) {

@@ -31,6 +31,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/ws"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/gorm"
 )
@@ -39,7 +40,19 @@ func main() {
 	if err := config.LoadLocalEnvFiles(); err != nil {
 		log.Fatal("load local env failed: ", err)
 	}
-	config.ConnectDB()
+	databaseDSN := config.DatabaseDSNFromEnv()
+
+	// 마이그레이션 전용 풀(설계 §3) — statement_timeout이 길고(기본 10m,
+	// CREATE INDEX CONCURRENTLY 포함) 서비스 풀과 커넥션을 나누지 않는다.
+	// AutoMigrate·goose가 끝나면 곧바로 닫는다.
+	migrationProfile, err := config.MigrationDBProfile()
+	if err != nil {
+		log.Fatal("migration db profile invalid: ", err)
+	}
+	migrationDB, migrationSQLDB, err := config.OpenDBWithProfile(databaseDSN, migrationProfile)
+	if err != nil {
+		log.Fatal("migration db connection failed: ", err)
+	}
 
 	if config.PprofEnabledFromEnv() {
 		// Binds to all interfaces inside the container; external exposure is
@@ -52,7 +65,7 @@ func main() {
 		}()
 	}
 
-	if err := config.DB.AutoMigrate(
+	if err := migrationDB.AutoMigrate(
 		&model.User{},
 		&model.Order{},
 		&model.Trade{},
@@ -72,9 +85,21 @@ func main() {
 	); err != nil {
 		log.Fatal("auto migrate failed: ", err)
 	}
-	if err := dbmigration.Up(config.DB); err != nil {
+	if err := dbmigration.Up(migrationDB); err != nil {
 		log.Fatal("db migration failed: ", err)
 	}
+	if err := migrationSQLDB.Close(); err != nil {
+		log.Fatal("close migration db pool failed: ", err)
+	}
+
+	// 서비스 풀(설계 §3) — HTTP·엔진·정산·outbox·worker가 공유한다. 기존
+	// GOEXCHANGE_DB_MAX_* env로 커넥션 수를 그대로 잇는다.
+	serviceDB, _, err := config.OpenDBWithProfile(databaseDSN, config.ServiceDBProfile(prometheus.DefaultRegisterer))
+	if err != nil {
+		log.Fatal("service db connection failed: ", err)
+	}
+	config.DB = serviceDB
+	log.Println("service db connection established")
 
 	engineShards := config.EngineShardsFromEnv()
 	maxMatchesPerTurn, maxConsecutiveCancels, quantumErr := config.MatchingQuantumFromEnv()
@@ -221,7 +246,7 @@ func main() {
 		go func() {
 			defer settlementWorkerWg.Done()
 			runSettlementWorker(settlementJobs, func(batch []service.OutboxEvent, collect func(string, []byte)) []uint {
-				return settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService,
+				return settleTradeBatchWithFallback(batch, settlementService, settlementService, failedSettlementService, failedSettlementService,
 					orderService, failedMarketCompletionService, orderService, failedSettlementService, failedOrderCancellationService,
 					collect, outboxRepo, log.Default())
 			}, func(event service.OutboxEvent) {
@@ -276,8 +301,18 @@ func main() {
 	}
 	go settlementRetryWorker.Run(backgroundCtx)
 
+	// 검산 전용 풀(설계 §3) — statement_timeout이 서비스 풀보다 길다(기본 5m).
+	// ReconciliationWorker에만 주입하고 프로세스 종료 시 별도로 close한다.
+	reconciliationProfile, err := config.ReconciliationDBProfile(prometheus.DefaultRegisterer)
+	if err != nil {
+		log.Fatal("reconciliation db profile invalid: ", err)
+	}
+	reconciliationDB, reconciliationSQLDB, err := config.OpenDBWithProfile(databaseDSN, reconciliationProfile)
+	if err != nil {
+		log.Fatal("reconciliation db connection failed: ", err)
+	}
 	reconciliationWorker := &service.ReconciliationWorker{
-		Repository: repository.NewReconciliationRepository(config.DB),
+		Repository: repository.NewReconciliationRepository(reconciliationDB),
 		Interval:   config.ReconciliationIntervalFromEnv(),
 	}
 	go reconciliationWorker.Run(backgroundCtx)
@@ -469,6 +504,12 @@ func main() {
 	}
 
 	cancelBackground()
+	// backgroundCtx 취소로 reconciliationWorker.Run 루프는 다음 tick 확인 시
+	// 종료된다 — 진행 중이던 RunOnce가 이 close와 겹쳐도 워커가 이미 각 검사의
+	// 쿼리 오류를 로그·카운터로만 처리하므로(치명적이지 않음) 별도 barrier는 두지 않는다.
+	if err := reconciliationSQLDB.Close(); err != nil {
+		log.Printf("shutdown: close reconciliation db pool failed: %v", err)
+	}
 	log.Println("shutdown complete")
 }
 
@@ -482,6 +523,11 @@ type tradeBatchSettler interface {
 
 type settlementFailureRecorder interface {
 	RecordFailure(trade *model.Trade, settlementErr error) (*model.FailedSettlement, error)
+}
+
+// settlementFailureHandoffRecorder는 배치 57014의 원자적 인계(설계 §4.3)를 추상화한다.
+type settlementFailureHandoffRecorder interface {
+	RecordBatchFailuresAndMarkOutboxProcessed(items []service.TradeOutboxFailureItem, settlementErr error) error
 }
 
 type marketOrderCompleter interface {
@@ -545,6 +591,18 @@ func dependencyBlocked(guard settlementDependencyGuard, orderID uint) (bool, err
 		return false, errNoDependencyGuard
 	}
 	return guard.HasOpenFailureForOrder(orderID)
+}
+
+// recordDBTimeoutMetric은 55P03(lock_timeout)·57014(statement_timeout) 두
+// SQLSTATE만 경로 라벨과 함께 센다(설계 §4.2) — deadlock 등 다른 transient
+// 오류는 "DB 시간 상한"이 아니므로 포함하지 않는다. 실행 실패 경로(정산·시장가
+// 완료·취소 terminal)의 각 시도 지점에서만 호출한다 — 순수 분류 함수
+// (service.IsTransientSettlementError 등) 호출로는 늘지 않는다(중복 계측 방지).
+func recordDBTimeoutMetric(err error, path string) {
+	switch code := service.SettlementErrorSQLState(err); code {
+	case "55P03", "57014":
+		metrics.DBTimeoutTotal.WithLabelValues(code, path).Inc()
+	}
 }
 
 // retryTransient는 defer 기록에만 쓰는 유한 백오프다 — worker job 안에서 실행되므로
@@ -713,6 +771,7 @@ func settleTradeBatchWithFallback(
 	batchSettler tradeBatchSettler,
 	settler tradeSettler,
 	failureRecorder settlementFailureRecorder,
+	handoffRecorder settlementFailureHandoffRecorder,
 	marketCompleter marketOrderCompleter,
 	completionFailureRecorder marketCompletionFailureRecorder,
 	cancelProcessor orderCancellationProcessor,
@@ -730,6 +789,14 @@ func settleTradeBatchWithFallback(
 	results, err := batchSettler.SettleTradeBatch(items)
 	metrics.SettlementAttemptBatch.Observe(time.Since(attemptStart).Seconds())
 	if err != nil {
+		// 57014(statement_timeout)는 단건 폴백을 하지 않는다(설계 §4.3) — 과부하나
+		// 비싼 쿼리가 원인일 가능성이 커, 32건까지도 되는 배치를 단건씩 같은 상한에
+		// 다시 걸리게 하면 시간 증폭이 그대로 남는다. 탐침도 두지 않는다(같은 이유로
+		// 최악 2×즉시재시도×15초) — 대신 배치 전체를 한 트랜잭션으로 원자적 인계한다.
+		if service.SettlementErrorSQLState(err) == "57014" {
+			return handoffStatementTimeoutBatch(batch, handoffRecorder, err, logger)
+		}
+
 		metrics.SettlementBatchFallbacksTotal.Inc()
 		logger.Printf("settle trade batch of %d failed, falling back to per-trade settlement: %v", len(batch), err)
 		var undurable []uint
@@ -750,6 +817,40 @@ func settleTradeBatchWithFallback(
 	}
 	broadcastSettledTrades(applied, broadcast, logger)
 	return nil
+}
+
+// handoffStatementTimeoutBatch는 배치 정산이 57014로 실패했을 때 단건 폴백 없이
+// 배치 전체를 원자적으로 인계한다(설계 §4.3). 결과는 둘뿐이다:
+//   - commit: failed_settlements 전원 OPEN/STATEMENT_TIMEOUT + outbox 전원
+//     PROCESSED → undurable 없음(내구 소유권이 실패 기록으로 넘어갔다).
+//   - rollback(인계 자체 실패): outbox는 PENDING 그대로(다음 부팅 replay가 소유) →
+//     배치 전체의 maker·taker 주문 ID를 undurable로 돌려줘 dispatcher가 quarantine한다.
+func handoffStatementTimeoutBatch(
+	batch []service.OutboxEvent,
+	handoffRecorder settlementFailureHandoffRecorder,
+	settlementErr error,
+	logger *log.Logger,
+) []uint {
+	if handoffRecorder == nil {
+		return undurableOrderIDsFromTradeBatch(batch)
+	}
+	items := make([]service.TradeOutboxFailureItem, len(batch))
+	for i, event := range batch {
+		items[i] = service.TradeOutboxFailureItem{Trade: event.Event.Trade, OutboxID: event.OutboxID}
+	}
+	if err := handoffRecorder.RecordBatchFailuresAndMarkOutboxProcessed(items, settlementErr); err != nil {
+		logger.Printf("statement timeout batch handoff of %d failed, quarantining batch: %v", len(batch), err)
+		return undurableOrderIDsFromTradeBatch(batch)
+	}
+	return nil
+}
+
+func undurableOrderIDsFromTradeBatch(batch []service.OutboxEvent) []uint {
+	undurable := make([]uint, 0, len(batch)*2)
+	for _, event := range batch {
+		undurable = append(undurable, event.Event.Trade.BuyOrderID, event.Event.Trade.SellOrderID)
+	}
+	return undurable
 }
 
 func processMarketOrderDone(
@@ -784,9 +885,11 @@ func processMarketOrderDone(
 	}
 
 	err := completer.CompleteMarketOrder(input)
+	recordDBTimeoutMetric(err, "market_completion")
 	for attempt := 0; err != nil && isRetryableCompletionError(err) && attempt < len(transientRetryDelays); attempt++ {
 		time.Sleep(transientRetryDelays[attempt])
 		err = completer.CompleteMarketOrder(input)
+		recordDBTimeoutMetric(err, "market_completion")
 	}
 	if err == nil {
 		return true
@@ -864,9 +967,11 @@ func processOrderCancellationEvent(
 	}
 
 	err := processor.ProcessOrderCancellation(*cancelled)
+	recordDBTimeoutMetric(err, "cancellation")
 	for attempt := 0; err != nil && service.IsTransientSettlementError(err) && attempt < len(transientRetryDelays); attempt++ {
 		time.Sleep(transientRetryDelays[attempt])
 		err = processor.ProcessOrderCancellation(*cancelled)
+		recordDBTimeoutMetric(err, "cancellation")
 	}
 	if err == nil {
 		return true
@@ -940,11 +1045,13 @@ func processTradeSettlement(
 	attemptStart := time.Now()
 	result, err := settler.SettleTrade(trade, outboxEventID)
 	metrics.SettlementAttemptSingle.Observe(time.Since(attemptStart).Seconds())
+	recordDBTimeoutMetric(err, "settlement")
 	for attempt := 0; err != nil && service.IsTransientSettlementError(err) && attempt < len(transientRetryDelays); attempt++ {
 		time.Sleep(transientRetryDelays[attempt])
 		attemptStart = time.Now()
 		result, err = settler.SettleTrade(trade, outboxEventID)
 		metrics.SettlementAttemptSingle.Observe(time.Since(attemptStart).Seconds())
+		recordDBTimeoutMetric(err, "settlement")
 	}
 	metrics.OrderSettlementDuration.Observe(time.Since(settlementStart).Seconds()) // 기존 유지
 	if err != nil {

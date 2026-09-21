@@ -57,6 +57,31 @@ func strictPositiveEnv(key string, def int) (int, error) {
 	return parsed, nil
 }
 
+// strictPositiveDurationEnv는 strictPositiveEnv와 같은 계약을 duration 값에
+// 적용한다. 미설정(LookupEnv ok=false)만 기본값을 쓰고, 그 외 이상값(빈 문자열·
+// 앞뒤 공백·0 이하·파싱 불가)은 에러다 — DB 시간 상한은 조용한 fallback보다
+// 안 뜨는 편이 낫다(quantum 값과 같은 이유, strictPositiveEnv 주석 참고).
+func strictPositiveDurationEnv(key string, def time.Duration) (time.Duration, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return def, nil
+	}
+	if raw == "" {
+		return 0, fmt.Errorf("%s is set but empty", key)
+	}
+	if raw != strings.TrimSpace(raw) {
+		return 0, fmt.Errorf("%s has surrounding whitespace: %q", key, raw)
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid duration: %q", key, raw)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be > 0, got %s", key, parsed)
+	}
+	return parsed, nil
+}
+
 // MatchingQuantumFromEnv는 매칭 스케줄러의 두 상한을 strict 파싱한다.
 // matching 타입을 반환하지 않는 것은 config → matching 의존을 만들지
 // 않기 위해서다. main이 두 값으로 matching.QuantumConfig를 구성한다.
