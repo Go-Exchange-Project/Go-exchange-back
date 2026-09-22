@@ -105,15 +105,6 @@ func isStatementTimeoutStopSignal(attemptErr error) bool {
 	return settlementErrorSQLState(attemptErr) == pgCodeQueryCanceled
 }
 
-// recordRetryWorkerDBTimeoutMetric은 설계 §4.2 계측 경로 행렬의 retry_worker
-// 라벨이다. 세 phase(정산·시장가 완료·취소) 중 어디서 멈췄든 같은 라벨을 쓴다 —
-// RunOnce 최상위 계약이 "phase 무관하게 이번 시도가 57014면 중단"이므로, 계측도
-// phase로 쪼개지 않는다. isStatementTimeoutStopSignal이 true를 반환한 실제 시도
-// 지점에서만 호출한다(중복 계측 방지 — 이 함수 자체는 부수효과가 없다).
-func recordRetryWorkerDBTimeoutMetric() {
-	metrics.DBTimeoutTotal.WithLabelValues(pgCodeQueryCanceled, "retry_worker").Inc()
-}
-
 func (w *SettlementRetryWorker) retryFailedSettlements() (stopRun bool) {
 	if w.Settler == nil || w.FailedSettlements == nil {
 		return false
@@ -137,10 +128,8 @@ func (w *SettlementRetryWorker) retryFailedSettlements() (stopRun bool) {
 		trade := tradeFromFailedSettlement(failure)
 		// outboxEventID=0: 재시도는 failed_settlements 기반이라 outbox와 무관하다.
 		if _, err := w.Settler.SettleTrade(trade, 0); err != nil {
+			recordDBTimeoutMetric(err, "retry_worker")
 			stop := isStatementTimeoutStopSignal(err)
-			if stop {
-				recordRetryWorkerDBTimeoutMetric()
-			}
 			if _, recordErr := w.FailedSettlements.RecordFailure(trade, err); recordErr != nil {
 				w.logf("retry worker: record failed settlement failed: %v", recordErr)
 			}
@@ -203,10 +192,8 @@ func (w *SettlementRetryWorker) retryFailedCompletions() (stopRun bool) {
 			RemainingQuoteAmount: failure.RemainingQuoteAmount,
 		}
 		if err := w.MarketCompleter.CompleteMarketOrder(input); err != nil {
+			recordDBTimeoutMetric(err, "retry_worker")
 			stop := isStatementTimeoutStopSignal(err)
-			if stop {
-				recordRetryWorkerDBTimeoutMetric()
-			}
 			if _, recordErr := w.FailedCompletions.RecordFailure(input, failure.CoinSymbol, err); recordErr != nil {
 				w.logf("retry worker: record failed market completion failed: %v", recordErr)
 			}
@@ -258,10 +245,8 @@ func (w *SettlementRetryWorker) retryFailedCancellations() (stopRun bool) {
 
 		cancelled := orderCancelledFromFailure(failure)
 		if err := w.CancelProcessor.ProcessOrderCancellation(cancelled); err != nil {
+			recordDBTimeoutMetric(err, "retry_worker")
 			stop := isStatementTimeoutStopSignal(err)
-			if stop {
-				recordRetryWorkerDBTimeoutMetric()
-			}
 			if _, recordErr := w.FailedCancellations.RecordFailure(cancelled, failure.OutboxEventID, err); recordErr != nil {
 				w.logf("retry worker: record failed order cancellation failed: %v", recordErr)
 			}

@@ -156,6 +156,35 @@ func TestDBTimeoutMetricIncrementsOnRetryWorkerStopInCancellationPhase(t *testin
 	assert.Equal(t, before+1, after)
 }
 
+// P1(2차 리뷰): 55P03도 retry_worker 라벨을 늘려야 한다 — 단, 57014와 달리
+// RunOnce를 중단시키지 않는다(기존 stopRun 판정은 57014 전용으로 유지, 제어
+// 흐름은 바뀌지 않는다). 두 항목·completion phase 모두 정상 진행하는지로
+// "중단하지 않음"을 함께 확인한다.
+func TestDBTimeoutMetricIncrementsOnRetryWorkerLockTimeout(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("55P03", "retry_worker"))
+
+	settler := &fakeRetrySettler{err: lockTimeoutPgError()}
+	settlementStore := &fakeFailedSettlementStore{open: []model.FailedSettlement{
+		transientOpenFailure(3, 1),
+		transientOpenFailure(4, 1),
+	}}
+	completer := &fakeRetryCompleter{}
+	completionStore := &fakeFailedCompletionStore{open: []model.FailedMarketCompletion{{ID: 5, OrderID: 100, RetryCount: 1}}}
+
+	worker := &SettlementRetryWorker{
+		Settler: settler, FailedSettlements: settlementStore,
+		MarketCompleter: completer, FailedCompletions: completionStore,
+		Logger: discardServiceLogger(),
+	}
+
+	worker.RunOnce()
+
+	after := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("55P03", "retry_worker"))
+	assert.Equal(t, before+2, after, "두 항목 모두 55P03이므로 2 늘어야 한다")
+	assert.Equal(t, 2, settler.calls, "55P03은 중단하지 않고 다음 항목으로 진행해야 한다")
+	assert.Equal(t, 1, completer.calls, "completion phase도 정상 진행해야 한다(55P03은 중단 대상이 아니다)")
+}
+
 // 대조군: 57014가 아니면 retry_worker 라벨이 늘면 안 된다.
 func TestDBTimeoutMetricDoesNotIncrementRetryWorkerOnNonStatementTimeout(t *testing.T) {
 	before := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("40P01", "retry_worker"))

@@ -155,13 +155,15 @@ gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Confi
 
 | path 라벨 | 위치 | 필수 |
 |---|---|---|
-| `settlement_single` | 단건 정산 재시도 | ✅ |
+| `settlement` | 단건 정산 재시도 | ✅ |
 | `market_completion` | 시장가 완료 재시도 | ✅ |
-| `cancel_terminal` | 취소 terminal 재시도 | ✅ |
+| `cancellation` | 취소 terminal 재시도 | ✅ |
 | `settlement_batch` | 정산 **배치** 실패(§4.3 인계 직전) | ✅ — 500 VU에서 정책이 실제로 발동하는 주요 지점 |
 | `hold_batch` | hold **배치** 실패(§4.3 503 직전) | ✅ — 같은 이유 |
-| `retry_worker` | 장기 재시도(§4.4 중단 판정 지점) | ✅ |
+| `retry_worker` | 장기 재시도(§4.4 판정 지점, phase 공통) | ✅ |
 | 그 밖(poller·검산 등) | 로그만 | 선택 |
+
+**모든 경로가 `55P03`과 `57014`를 함께 센다.** `57014`만 세면, 배치가 `55P03`으로 실패한 뒤 단건 폴백이 성공했을 때 그 lock timeout이 0건으로 보인다 — §3.3의 "배포 전 `55P03` 발생 건수 측정"이 어긋난다. `40P01`·`40001` 등 다른 transient는 시간 상한이 아니므로 세지 않는다.
 
 **`IsTransientSettlementError`에 `57014`를 넣으면 함께 바뀌는 경로**(전수): 단건 정산 재시도(`main.go:943`), 시장가 주문 완료(`isRetryableCompletionError`, `main.go:917`), 취소 terminal 처리(`main.go:867`), 실패 기록 저장 재시도(`retryTransient`, `main.go:554`). 의도한 효과이며 §8 테스트 대응표에 넣는다.
 

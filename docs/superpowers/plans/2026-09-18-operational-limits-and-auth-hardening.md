@@ -133,7 +133,7 @@ CP A 구현(`ba1ae38`) 뒤 리뷰가 P1 2건을 지적했다. CP B 전에 닫는
 
 - [ ] **Step 1 — D8·D9 격리:** 두 테스트를 `testdb.OpenIsolatedSchemaDB(t)`로 옮긴다. `ListOpenFailures`는 전역 스캔이라 공유 DB에서는 이 테스트가 **자신이 만들지 않은 OPEN 실패까지 resolve**한다(실측 호출 1→7). 프로덕션 조회를 좁히지 않는다. 격리 후 settler 호출 수를 **정확히 1회**로 되돌린다.
 - [ ] **Step 2 (RED) — 배치 계측:** 설계 §4.2 행렬대로 `settlement_batch`·`hold_batch`·`retry_worker` 라벨이 빠져 있다. 현재는 배치 정산(`cmd/main.go` 인계 직전)과 hold 배치(`hold_coordinator.go` 503 직전)에서 카운터가 오르지 않는다 — 500 VU에서 정책이 발동해도 0건으로 보인다. 각 경로의 증가를 단언하는 테스트를 먼저 쓴다.
-- [ ] **Step 3:** 세 경로에 계측 추가(시도 단위 1). 기존 세 경로(`settlement_single`·`market_completion`·`cancel_terminal`)의 라벨·단위는 바꾸지 않는다.
+- [ ] **Step 3:** 세 경로에 계측 추가(시도 단위 1). 기존 세 경로(`settlement`·`market_completion`·`cancellation`)의 라벨·단위는 바꾸지 않는다. **새 경로도 `55P03`과 `57014`를 함께 센다** — `57014`만 세면 배치가 `55P03`으로 실패한 뒤 단건 폴백이 성공했을 때 0건으로 보인다.
 - [ ] **Step 4 (GREEN):** `go test -p 1 ./cmd ./internal/service ./internal/metrics -count=1`, 이어서 `-count=5`로 결정성 확인.
 - [ ] **Step 5:** 스테이징(파일 지정) → `commit-message` 스킬 → 커밋. 푸시 금지.
 

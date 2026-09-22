@@ -186,6 +186,10 @@ func statementTimeoutError() error {
 	return &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}
 }
 
+func lockTimeoutError() error {
+	return &pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"}
+}
+
 // D11: 57014도 40P01(deadlock)과 같은 즉시 재시도 경로(정산)를 탄다.
 func TestProcessTradeSettlementRetriesStatementTimeoutThenSucceeds(t *testing.T) {
 	withFastTransientRetries(t)

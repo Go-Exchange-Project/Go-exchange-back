@@ -17,6 +17,10 @@ func statementTimeoutPgError() error {
 	return &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}
 }
 
+func lockTimeoutPgError() error {
+	return &pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"}
+}
+
 func pendingOutboxEventFixture(t *testing.T, db *gorm.DB, coinSymbol string) model.TradeOutboxEvent {
 	t.Helper()
 	event := model.TradeOutboxEvent{

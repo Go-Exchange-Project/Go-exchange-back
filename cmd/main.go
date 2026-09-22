@@ -789,12 +789,16 @@ func settleTradeBatchWithFallback(
 	results, err := batchSettler.SettleTradeBatch(items)
 	metrics.SettlementAttemptBatch.Observe(time.Since(attemptStart).Seconds())
 	if err != nil {
+		// 55P03·57014 둘 다 배포 전 게이트(설계 §3.3)가 세는 대상이다 — 55P03은
+		// 아래에서 기존 단건 폴백으로 흘러가지만(제어 흐름은 그대로), 그 발생
+		// 건수도 recordDBTimeoutMetric으로 남긴다.
+		recordDBTimeoutMetric(err, "settlement_batch")
+
 		// 57014(statement_timeout)는 단건 폴백을 하지 않는다(설계 §4.3) — 과부하나
 		// 비싼 쿼리가 원인일 가능성이 커, 32건까지도 되는 배치를 단건씩 같은 상한에
 		// 다시 걸리게 하면 시간 증폭이 그대로 남는다. 탐침도 두지 않는다(같은 이유로
 		// 최악 2×즉시재시도×15초) — 대신 배치 전체를 한 트랜잭션으로 원자적 인계한다.
 		if service.SettlementErrorSQLState(err) == "57014" {
-			metrics.DBTimeoutTotal.WithLabelValues("57014", "settlement_batch").Inc()
 			return handoffStatementTimeoutBatch(batch, handoffRecorder, err, logger)
 		}
 

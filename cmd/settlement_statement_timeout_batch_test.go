@@ -150,6 +150,33 @@ func TestDBTimeoutMetricIncrementsOnSettlementBatchHandoff(t *testing.T) {
 	assert.Equal(t, before+1, after, "배치 정산이 57014로 실패하면 settlement_batch 라벨이 늘어야 한다")
 }
 
+// P1(2차 리뷰): 55P03도 settlement_batch 라벨을 늘려야 한다 — 배치가 55P03으로
+// 실패해도(§3.3의 배포 전 게이트가 세는 대상) 단건 폴백 자체는 그대로 유지된다.
+// 계측만 추가하고 제어 흐름(핸드오프로 안 빠짐)은 바꾸지 않는다.
+func TestDBTimeoutMetricIncrementsOnSettlementBatchLockTimeout(t *testing.T) {
+	batch := []service.OutboxEvent{tradeOutboxEventForOrders(1, 10, 20)}
+	settler := &stubCountingSettler{}
+
+	before := counterVecValue(t, metrics.DBTimeoutTotal, "55P03", "settlement_batch")
+
+	undurable := settleTradeBatchWithFallback(
+		batch,
+		stubBatchSettler{err: lockTimeoutError()},
+		settler,
+		&stubCountingFailureRecorder{},
+		&stubHandoffRecorder{},
+		nil, nil, nil, nil, nil,
+		func(string, []byte) {},
+		stubOutboxMarker{},
+		discardLogger(),
+	)
+
+	after := counterVecValue(t, metrics.DBTimeoutTotal, "55P03", "settlement_batch")
+	assert.Equal(t, before+1, after, "55P03도 settlement_batch 라벨이 늘어야 한다")
+	assert.Equal(t, 1, settler.calls, "55P03은 기존처럼 단건 폴백을 타야 한다(제어 흐름 불변)")
+	assert.Empty(t, undurable, "단건 폴백이 성공했으므로 undurable이 없어야 한다")
+}
+
 // 대조군: 57014가 아닌 배치 오류(단건 폴백 경로)는 settlement_batch 라벨을 늘리면 안 된다.
 func TestDBTimeoutMetricDoesNotIncrementSettlementBatchOnNonStatementTimeout(t *testing.T) {
 	batch := []service.OutboxEvent{tradeOutboxEventForOrders(1, 10, 20)}
