@@ -794,6 +794,7 @@ func settleTradeBatchWithFallback(
 		// 다시 걸리게 하면 시간 증폭이 그대로 남는다. 탐침도 두지 않는다(같은 이유로
 		// 최악 2×즉시재시도×15초) — 대신 배치 전체를 한 트랜잭션으로 원자적 인계한다.
 		if service.SettlementErrorSQLState(err) == "57014" {
+			metrics.DBTimeoutTotal.WithLabelValues("57014", "settlement_batch").Inc()
 			return handoffStatementTimeoutBatch(batch, handoffRecorder, err, logger)
 		}
 

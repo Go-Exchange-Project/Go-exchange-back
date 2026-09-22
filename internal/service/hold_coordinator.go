@@ -470,6 +470,7 @@ func (c *HoldCoordinator) processBatch(reqs []holdRequest) {
 		// 재시도할 수 있게 unavailable(503)로 즉시 돌려준다. 55P03과 그 밖의
 		// 오류는 기존 폴백을 유지한다(핫 계정 하나만 분리하면 단건은 성공할 수 있다).
 		if SettlementErrorSQLState(err) == pgCodeQueryCanceled {
+			metrics.DBTimeoutTotal.WithLabelValues(pgCodeQueryCanceled, "hold_batch").Inc()
 			c.logf("hold batch of %d failed with statement timeout, skipping per-order fallback: %v", len(reqs), err)
 			unavailable := NewUnavailableErrorf("order intake is saturated, please retry shortly")
 			for _, req := range reqs {

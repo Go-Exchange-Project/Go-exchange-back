@@ -81,7 +81,8 @@ func TestIntegrationHoldCoordinatorSkipsFallbackOnStatementTimeout(t *testing.T)
 	go coordinator.Run()
 	defer coordinator.Shutdown()
 
-	before := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
+	beforeFallbacks := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
+	beforeTimeout := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "hold_batch"))
 
 	order := &model.Order{
 		UserID: buyerID, CoinSymbol: "BTC", Side: model.OrderSideBuy, OrderType: model.OrderTypeLimit,
@@ -94,6 +95,12 @@ func TestIntegrationHoldCoordinatorSkipsFallbackOnStatementTimeout(t *testing.T)
 	require.True(t, ok, "unavailable 계열 DomainError여야 한다: %v", submitErr)
 	require.Equal(t, ErrorKindUnavailable, kind)
 
-	after := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
-	require.Equal(t, before, after, "57014는 단건 폴백(fallbackPerRequest)을 타지 않아야 한다")
+	afterFallbacks := testutil.ToFloat64(metrics.HoldBatchFallbacksTotal)
+	require.Equal(t, beforeFallbacks, afterFallbacks, "57014는 단건 폴백(fallbackPerRequest)을 타지 않아야 한다")
+
+	// P1-2(설계 §4.2 계측 경로 행렬): hold 배치가 즉시 unavailable로 응답하는
+	// 지점에서도 goexchange_db_timeout_total{sqlstate="57014",path="hold_batch"}가
+	// 늘어야 한다.
+	afterTimeout := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "hold_batch"))
+	require.Equal(t, beforeTimeout+1, afterTimeout, "hold_batch 라벨이 늘어야 한다")
 }

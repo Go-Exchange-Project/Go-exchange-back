@@ -4,7 +4,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/model"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -100,6 +102,72 @@ func TestRetryWorkerStopsEvenWhenRecordFailureItselfFails(t *testing.T) {
 
 	assert.Equal(t, 1, settler.calls, "첫 failure에서 멈춰 두 번째(id=4)는 처리되지 않는다")
 	assert.Zero(t, completer.calls, "completion phase도 건너뛰어야 한다")
+}
+
+// P1-2(설계 §4.2 계측 경로 행렬): retry worker가 57014로 RunOnce를 중단할 때도
+// goexchange_db_timeout_total{sqlstate="57014",path="retry_worker"}가 늘어야
+// 한다 — 세 phase(settlement·completion·cancellation) 중 어디서 멈췄든 같은
+// 라벨을 쓴다(리뷰 지시: 라벨을 phase별로 더 쪼개지 않는다).
+func TestDBTimeoutMetricIncrementsOnRetryWorkerStopInSettlementPhase(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "retry_worker"))
+
+	settler := &fakeRetrySettler{err: statementTimeoutPgError()}
+	settlementStore := &fakeFailedSettlementStore{open: []model.FailedSettlement{transientOpenFailure(3, 1)}}
+	worker := &SettlementRetryWorker{Settler: settler, FailedSettlements: settlementStore, Logger: discardServiceLogger()}
+
+	worker.RunOnce()
+
+	after := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "retry_worker"))
+	assert.Equal(t, before+1, after)
+}
+
+func TestDBTimeoutMetricIncrementsOnRetryWorkerStopInCompletionPhase(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "retry_worker"))
+
+	completer := &fakeRetryCompleter{err: statementTimeoutPgError()}
+	completionStore := &fakeFailedCompletionStore{open: []model.FailedMarketCompletion{{ID: 5, OrderID: 100, RetryCount: 1}}}
+	worker := &SettlementRetryWorker{
+		FailedSettlements: &fakeFailedSettlementStore{},
+		MarketCompleter:   completer, FailedCompletions: completionStore,
+		Logger: discardServiceLogger(),
+	}
+
+	worker.RunOnce()
+
+	after := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "retry_worker"))
+	assert.Equal(t, before+1, after)
+}
+
+func TestDBTimeoutMetricIncrementsOnRetryWorkerStopInCancellationPhase(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "retry_worker"))
+
+	processor := &fakeCancelProcessor{err: statementTimeoutPgError()}
+	cancellationStore := &fakeFailedCancellationStore{open: []model.FailedOrderCancellation{{ID: 7, OrderID: 200, RetryCount: 1}}}
+	worker := &SettlementRetryWorker{
+		FailedSettlements:   &fakeFailedSettlementStore{},
+		CancelProcessor:     processor,
+		FailedCancellations: cancellationStore,
+		Logger:              discardServiceLogger(),
+	}
+
+	worker.RunOnce()
+
+	after := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("57014", "retry_worker"))
+	assert.Equal(t, before+1, after)
+}
+
+// 대조군: 57014가 아니면 retry_worker 라벨이 늘면 안 된다.
+func TestDBTimeoutMetricDoesNotIncrementRetryWorkerOnNonStatementTimeout(t *testing.T) {
+	before := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("40P01", "retry_worker"))
+
+	settler := &fakeRetrySettler{err: errors.New("boom")}
+	settlementStore := &fakeFailedSettlementStore{open: []model.FailedSettlement{transientOpenFailure(3, 1)}}
+	worker := &SettlementRetryWorker{Settler: settler, FailedSettlements: settlementStore, Logger: discardServiceLogger()}
+
+	worker.RunOnce()
+
+	after := testutil.ToFloat64(metrics.DBTimeoutTotal.WithLabelValues("40P01", "retry_worker"))
+	assert.Equal(t, before, after)
 }
 
 // 대조군: 57014가 아닌 transient 오류(기존 deadlock 등)는 다음 항목으로 계속

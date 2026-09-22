@@ -124,6 +124,54 @@ func TestSettleTradeBatchWithFallbackStillFallsBackOnNonStatementTimeoutError(t 
 	assert.Equal(t, 1, settler.calls, "기존처럼 단건 폴백(settler.SettleTrade)을 타야 한다")
 }
 
+// P1-2(설계 §4.2 계측 경로 행렬): 배치 정산이 57014로 실패해 원자적 인계로
+// 넘어가는 지점에서도 goexchange_db_timeout_total{sqlstate="57014",path="settlement_batch"}가
+// 늘어야 한다 — 기존 recordDBTimeoutMetric은 단건 재시도 세 곳(settlement·
+// market_completion·cancellation)뿐이라 이 배치 경로는 계측되지 않았다.
+func TestDBTimeoutMetricIncrementsOnSettlementBatchHandoff(t *testing.T) {
+	batch := []service.OutboxEvent{tradeOutboxEventForOrders(1, 10, 20)}
+	handoff := &stubHandoffRecorder{}
+
+	before := counterVecValue(t, metrics.DBTimeoutTotal, "57014", "settlement_batch")
+
+	settleTradeBatchWithFallback(
+		batch,
+		stubBatchSettler{err: statementTimeoutError()},
+		&stubCountingSettler{},
+		&stubCountingFailureRecorder{},
+		handoff,
+		nil, nil, nil, nil, nil,
+		func(string, []byte) {},
+		stubOutboxMarker{},
+		discardLogger(),
+	)
+
+	after := counterVecValue(t, metrics.DBTimeoutTotal, "57014", "settlement_batch")
+	assert.Equal(t, before+1, after, "배치 정산이 57014로 실패하면 settlement_batch 라벨이 늘어야 한다")
+}
+
+// 대조군: 57014가 아닌 배치 오류(단건 폴백 경로)는 settlement_batch 라벨을 늘리면 안 된다.
+func TestDBTimeoutMetricDoesNotIncrementSettlementBatchOnNonStatementTimeout(t *testing.T) {
+	batch := []service.OutboxEvent{tradeOutboxEventForOrders(1, 10, 20)}
+
+	before := counterVecValue(t, metrics.DBTimeoutTotal, "40P01", "settlement_batch")
+
+	settleTradeBatchWithFallback(
+		batch,
+		stubBatchSettler{err: deadlockError()},
+		&stubCountingSettler{},
+		&stubCountingFailureRecorder{},
+		&stubHandoffRecorder{},
+		nil, nil, nil, nil, nil,
+		func(string, []byte) {},
+		stubOutboxMarker{},
+		discardLogger(),
+	)
+
+	after := counterVecValue(t, metrics.DBTimeoutTotal, "40P01", "settlement_batch")
+	assert.Equal(t, before, after)
+}
+
 // D14①: 배치 인계가 rollback되면(원자적 인계 자체 실패) 배치 전체가 dispatcher의
 // 기존 quarantine 경로를 타 terminal이 dispatch되지 않는다 — outbox는 PENDING
 // 그대로 남는다(TestDispatcherSkipsTerminalForQuarantinedOrder와 같은 메커니즘을

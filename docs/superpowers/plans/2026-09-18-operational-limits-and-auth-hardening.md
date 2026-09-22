@@ -127,6 +127,16 @@
 - [ ] **Step 2:** 구현. 세 phase가 중단 여부를 반환하고 `RunOnce`가 이후 항목·phase를 건너뛴다.
 - [ ] **Step 3 (GREEN):** `go test -p 1 ./internal/service ./cmd -count=1`.
 
+## Task 4.5: CP A 리뷰 보완 (2026-09-22 판정)
+
+CP A 구현(`ba1ae38`) 뒤 리뷰가 P1 2건을 지적했다. CP B 전에 닫는다. 별도 커밋 1개.
+
+- [ ] **Step 1 — D8·D9 격리:** 두 테스트를 `testdb.OpenIsolatedSchemaDB(t)`로 옮긴다. `ListOpenFailures`는 전역 스캔이라 공유 DB에서는 이 테스트가 **자신이 만들지 않은 OPEN 실패까지 resolve**한다(실측 호출 1→7). 프로덕션 조회를 좁히지 않는다. 격리 후 settler 호출 수를 **정확히 1회**로 되돌린다.
+- [ ] **Step 2 (RED) — 배치 계측:** 설계 §4.2 행렬대로 `settlement_batch`·`hold_batch`·`retry_worker` 라벨이 빠져 있다. 현재는 배치 정산(`cmd/main.go` 인계 직전)과 hold 배치(`hold_coordinator.go` 503 직전)에서 카운터가 오르지 않는다 — 500 VU에서 정책이 발동해도 0건으로 보인다. 각 경로의 증가를 단언하는 테스트를 먼저 쓴다.
+- [ ] **Step 3:** 세 경로에 계측 추가(시도 단위 1). 기존 세 경로(`settlement_single`·`market_completion`·`cancel_terminal`)의 라벨·단위는 바꾸지 않는다.
+- [ ] **Step 4 (GREEN):** `go test -p 1 ./cmd ./internal/service ./internal/metrics -count=1`, 이어서 `-count=5`로 결정성 확인.
+- [ ] **Step 5:** 스테이징(파일 지정) → `commit-message` 스킬 → 커밋. 푸시 금지.
+
 ## Task 5: CP A 게이트와 커밋
 
 - [ ] `go build ./... && go vet ./...`
@@ -156,6 +166,7 @@
     - 사용자 없음·비밀번호 오류는 그대로 **401**이다(인증 실패 계약을 깨뜨리는 구현을 잡는다).
     - 구현 시 handler 매핑뿐 아니라 `AuthService.Login`이 인식된 timeout을 일반 invalid credentials로 덮지 않아야 한다.
 - [ ] **Step 3:** 구현.
+  - **서비스 DB 풀 상한 env화**(설계 §3, CP A 리뷰에서 복구된 항목): `GOEXCHANGE_DB_STATEMENT_TIMEOUT`(15s)·`GOEXCHANGE_DB_LOCK_TIMEOUT`(3s)·`GOEXCHANGE_DB_IDLE_TX_TIMEOUT`(30s)을 strict 파싱으로 연다(기본값은 현재 고정값과 같다). 잘못된 값이면 부팅 실패. 파싱 단위 테스트를 Step 1 RED에 포함한다.
   - 서비스 `http.Server`에 4종 상한 + `MaxHeaderBytes`(전부 env).
   - 관리 서버: `GOEXCHANGE_ADMIN_ADDR`, `WriteTimeout` 120s(env), `/metrics` 이전, pprof 등록(env 게이트), `:6060` 리스너 제거, bind 실패 `log.Fatal`.
   - 종료: 서비스·관리 각자 `context.WithTimeout`(예산 비공유). 서비스 성공 시에만 drain. 서비스 실패 시 `exitFunc(1)` **직후 명시적 return**. 관리 실패는 `Close()` 후 진행.
@@ -201,7 +212,7 @@
   - compose 3종: `GOEXCHANGE_ADMIN_ADDR=0.0.0.0:9101`, stress만 `127.0.0.1:9101:9101` published(`127.0.0.1:6060:6060` 제거), prod·deploy는 미공개.
   - `docker-compose.deploy.yml:36`의 JWT 폴백을 `:?GOEXCHANGE_JWT_SECRET is required`로.
   - `monitoring/prometheus.yml` 타깃 `backend:8080` → `backend:9101`.
-  - `.env.prod.example`·`.env.deploy.example`·`.env.stress.example`에 새 env 추가.
+  - `.env.prod.example`·`.env.deploy.example`·`.env.stress.example`에 새 env 추가(HTTP·admin·rate limit·trusted proxies와 함께 **DB 상한 3종**도 포함).
 - [ ] **Step 4:** 문서. `docs/gcp-stress-test-runbook.md`(`ssh -L 6060` → `9101`, 프로파일 URL, `:8080/metrics` 절차, 적용한 rate limit 값과 preflight), `TESTING.md`(JWT 필수·새 env), `docs/EC2_DEPLOYMENT.md`·`docs/DOCKER_DEPLOYMENT.md`. 과거 benchmark 기록은 고치지 않는다.
 - [ ] **Step 5:** 게이트.
   - `go build ./... && go vet ./...`

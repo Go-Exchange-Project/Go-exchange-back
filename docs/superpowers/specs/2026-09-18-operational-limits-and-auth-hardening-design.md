@@ -90,6 +90,7 @@ adminSrv := &http.Server{
 | **서비스** | HTTP·엔진·정산·outbox·worker | 15s | 3s | 30s | 기존 `GOEXCHANGE_DB_MAX_OPEN_CONNS`(기본 25) |
 | **검산** | ReconciliationWorker 전용 | 5m (`GOEXCHANGE_RECONCILIATION_STATEMENT_TIMEOUT`) | 3s | 0(비활성) | 최대 2 |
 
+- **서비스 풀의 세 값은 env로 연다**(2차 전면 개정 때 실수로 빠졌다 — CP A 리뷰에서 복구): `GOEXCHANGE_DB_STATEMENT_TIMEOUT`(기본 15s), `GOEXCHANGE_DB_LOCK_TIMEOUT`(3s), `GOEXCHANGE_DB_IDLE_TX_TIMEOUT`(30s). §3.3대로 `lock_timeout`은 정상 부하에서도 발동할 수 있으므로 **재빌드 없이 조정 가능해야 한다.** 파싱은 strict(잘못된 값이면 부팅 실패).
 - **검산 repository는 이 풀만 쓴다.** `ReconciliationWorker.Repository`를 검산 풀로 만든 리포지토리로 주입한다. 워커 종료 시 풀을 close한다.
 - DB 총 연결 예산 = 서비스 25 + 검산 2 + (부팅 한정 2). 마이그레이션 풀은 서비스 시작 전에 닫힌다.
 - `SET LOCAL`은 쓰지 않는다. 검산을 하나의 긴 트랜잭션으로 묶으면 오래된 snapshot과 락 유지 문제가 생긴다.
@@ -148,7 +149,19 @@ gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Confi
 
 ### 4.2 관측
 
-`55P03`·`57014`를 경로 라벨과 함께 세는 카운터를 추가한다(`goexchange_db_timeout_total{sqlstate,path}`). §3.3 게이트와 이후 SLO 작업이 이 값을 쓴다.
+`55P03`·`57014`를 경로 라벨과 함께 세는 카운터를 추가한다(`goexchange_db_timeout_total{sqlstate,path}`). 단위는 **시도(attempt)마다 1** — 한 논리 작업이 4번 timeout이면 4건이다(DB에 실제로 가해진 부하를 나타낸다). §3.3 게이트와 이후 SLO 작업이 이 값을 쓴다.
+
+**계측 경로 행렬**(빠지면 부하 측정에서 정책 발동이 0건으로 보인다):
+
+| path 라벨 | 위치 | 필수 |
+|---|---|---|
+| `settlement_single` | 단건 정산 재시도 | ✅ |
+| `market_completion` | 시장가 완료 재시도 | ✅ |
+| `cancel_terminal` | 취소 terminal 재시도 | ✅ |
+| `settlement_batch` | 정산 **배치** 실패(§4.3 인계 직전) | ✅ — 500 VU에서 정책이 실제로 발동하는 주요 지점 |
+| `hold_batch` | hold **배치** 실패(§4.3 503 직전) | ✅ — 같은 이유 |
+| `retry_worker` | 장기 재시도(§4.4 중단 판정 지점) | ✅ |
+| 그 밖(poller·검산 등) | 로그만 | 선택 |
 
 **`IsTransientSettlementError`에 `57014`를 넣으면 함께 바뀌는 경로**(전수): 단건 정산 재시도(`main.go:943`), 시장가 주문 완료(`isRetryableCompletionError`, `main.go:917`), 취소 terminal 처리(`main.go:867`), 실패 기록 저장 재시도(`retryTransient`, `main.go:554`). 의도한 효과이며 §8 테스트 대응표에 넣는다.
 
