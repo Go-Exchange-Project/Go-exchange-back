@@ -109,6 +109,13 @@ func (s *AuthService) Login(input LoginInput) (AuthResult, error) {
 	}
 	user, err := s.UserRepository.FindByEmail(email)
 	if err != nil {
+		// D12: 인식된 DB 시간 상한(55P03·57014)은 "비밀번호가 틀렸다"로 덮지
+		// 않는다 — 핸들러가 503으로 매핑할 수 있게 DomainError로 구분해 돌려준다.
+		// 그 밖의 오류(사용자 없음 포함)는 기존 401 계약 그대로 일반 오류다.
+		switch settlementErrorSQLState(err) {
+		case pgCodeLockNotAvailable, pgCodeQueryCanceled:
+			return AuthResult{}, NewUnavailableErrorf("login is temporarily unavailable, please retry")
+		}
 		return AuthResult{}, fmt.Errorf("invalid email or password")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)); err != nil {

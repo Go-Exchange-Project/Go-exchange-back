@@ -18,6 +18,13 @@ import (
 const (
 	EnvMigrationStatementTimeout      = "GOEXCHANGE_MIGRATION_STATEMENT_TIMEOUT"
 	EnvReconciliationStatementTimeout = "GOEXCHANGE_RECONCILIATION_STATEMENT_TIMEOUT"
+
+	// 설계 §3 — 서비스 풀의 세 시간 상한. 2차 전면 개정 때 실수로 env화가
+	// 빠졌던 항목을 CP A 리뷰에서 복구했다(Task 6). lock_timeout은 정상
+	// 부하에서도 발동할 수 있어(§3.3) 재빌드 없이 조정 가능해야 한다.
+	EnvDBStatementTimeout = "GOEXCHANGE_DB_STATEMENT_TIMEOUT"
+	EnvDBLockTimeout      = "GOEXCHANGE_DB_LOCK_TIMEOUT"
+	EnvDBIdleTxTimeout    = "GOEXCHANGE_DB_IDLE_TX_TIMEOUT"
 )
 
 // 설계 §3 표의 고정값. lock_timeout·idle_in_transaction_session_timeout·커넥션
@@ -45,6 +52,21 @@ func MigrationStatementTimeoutFromEnv() (time.Duration, error) {
 // ReconciliationStatementTimeoutFromEnv는 ReconciliationWorker 전용 풀의 statement_timeout이다.
 func ReconciliationStatementTimeoutFromEnv() (time.Duration, error) {
 	return strictPositiveDurationEnv(EnvReconciliationStatementTimeout, defaultReconciliationStatementTimeout)
+}
+
+// DBStatementTimeoutFromEnv는 서비스 풀의 statement_timeout이다(기본 15s).
+func DBStatementTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvDBStatementTimeout, defaultServiceStatementTimeout)
+}
+
+// DBLockTimeoutFromEnv는 서비스 풀의 lock_timeout이다(기본 3s).
+func DBLockTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvDBLockTimeout, defaultServiceLockTimeout)
+}
+
+// DBIdleTxTimeoutFromEnv는 서비스 풀의 idle_in_transaction_session_timeout이다(기본 30s).
+func DBIdleTxTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvDBIdleTxTimeout, defaultServiceIdleInTransactionSessionTimeout)
 }
 
 // DBTimeoutProfile은 세 DB 풀(마이그레이션·서비스·검산) 공통의 시간 상한·풀 크기·
@@ -85,18 +107,31 @@ func MigrationDBProfile() (DBTimeoutProfile, error) {
 }
 
 // ServiceDBProfile은 HTTP·엔진·정산·outbox·worker가 공유하는 기존 풀이다.
-// 커넥션 수는 기존 GOEXCHANGE_DB_MAX_* env를 그대로 쓴다(설계 §3 표).
-func ServiceDBProfile(registerer prometheus.Registerer) DBTimeoutProfile {
+// 커넥션 수는 기존 GOEXCHANGE_DB_MAX_* env를 그대로 쓴다(설계 §3 표). 세 시간
+// 상한은 strict 파싱이라 잘못된 값이면 에러를 돌려준다(부팅 실패로 이어진다).
+func ServiceDBProfile(registerer prometheus.Registerer) (DBTimeoutProfile, error) {
+	statementTimeout, err := DBStatementTimeoutFromEnv()
+	if err != nil {
+		return DBTimeoutProfile{}, err
+	}
+	lockTimeout, err := DBLockTimeoutFromEnv()
+	if err != nil {
+		return DBTimeoutProfile{}, err
+	}
+	idleTxTimeout, err := DBIdleTxTimeoutFromEnv()
+	if err != nil {
+		return DBTimeoutProfile{}, err
+	}
 	return DBTimeoutProfile{
 		Name:                            "service",
-		StatementTimeout:                defaultServiceStatementTimeout,
-		LockTimeout:                     defaultServiceLockTimeout,
-		IdleInTransactionSessionTimeout: defaultServiceIdleInTransactionSessionTimeout,
+		StatementTimeout:                statementTimeout,
+		LockTimeout:                     lockTimeout,
+		IdleInTransactionSessionTimeout: idleTxTimeout,
 		MaxOpenConns:                    MaxOpenConnsFromEnv(),
 		MaxIdleConns:                    MaxIdleConnsFromEnv(),
 		ConnMaxLifetime:                 ConnMaxLifetimeFromEnv(),
 		Registerer:                      registerer,
-	}
+	}, nil
 }
 
 // ReconciliationDBProfile은 ReconciliationWorker 전용 풀이다(설계 §3).

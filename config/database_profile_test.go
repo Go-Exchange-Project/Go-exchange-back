@@ -134,12 +134,47 @@ func TestServiceDBProfileMatchesDesignDefaults(t *testing.T) {
 	require.NoError(t, os.Unsetenv(EnvDBMaxOpenConns))
 	require.NoError(t, os.Unsetenv(EnvDBMaxIdleConns))
 	require.NoError(t, os.Unsetenv(EnvDBConnMaxLifetime))
+	require.NoError(t, os.Unsetenv(EnvDBStatementTimeout))
+	require.NoError(t, os.Unsetenv(EnvDBLockTimeout))
+	require.NoError(t, os.Unsetenv(EnvDBIdleTxTimeout))
 
-	profile := ServiceDBProfile(nil)
+	profile, err := ServiceDBProfile(nil)
+	require.NoError(t, err)
 	require.Equal(t, 15*time.Second, profile.StatementTimeout)
 	require.Equal(t, 3*time.Second, profile.LockTimeout)
 	require.Equal(t, 30*time.Second, profile.IdleInTransactionSessionTimeout)
 	require.Equal(t, 25, profile.MaxOpenConns)
+}
+
+// Task 6 리뷰 복구 항목(설계 §3): 서비스 풀의 세 시간 상한이 env로 열려 있다.
+func TestServiceDBProfileTimeoutsFromEnv(t *testing.T) {
+	requireUnsetEnv(t, EnvDBStatementTimeout)
+	requireUnsetEnv(t, EnvDBLockTimeout)
+	requireUnsetEnv(t, EnvDBIdleTxTimeout)
+
+	t.Setenv(EnvDBStatementTimeout, "20s")
+	t.Setenv(EnvDBLockTimeout, "5s")
+	t.Setenv(EnvDBIdleTxTimeout, "45s")
+
+	profile, err := ServiceDBProfile(nil)
+	require.NoError(t, err)
+	require.Equal(t, 20*time.Second, profile.StatementTimeout)
+	require.Equal(t, 5*time.Second, profile.LockTimeout)
+	require.Equal(t, 45*time.Second, profile.IdleInTransactionSessionTimeout)
+}
+
+func TestServiceDBProfileTimeoutsRejectInvalidEnv(t *testing.T) {
+	for _, key := range []string{EnvDBStatementTimeout, EnvDBLockTimeout, EnvDBIdleTxTimeout} {
+		t.Run(key, func(t *testing.T) {
+			requireUnsetEnv(t, EnvDBStatementTimeout)
+			requireUnsetEnv(t, EnvDBLockTimeout)
+			requireUnsetEnv(t, EnvDBIdleTxTimeout)
+			t.Setenv(key, "0s")
+
+			_, err := ServiceDBProfile(nil)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestReconciliationDBProfileMatchesDesignDefaults(t *testing.T) {
@@ -160,7 +195,8 @@ func TestThreeDBProfilesHaveDistinctStatementTimeouts(t *testing.T) {
 
 	migration, err := MigrationDBProfile()
 	require.NoError(t, err)
-	service := ServiceDBProfile(nil)
+	service, err := ServiceDBProfile(nil)
+	require.NoError(t, err)
 	reconciliation, err := ReconciliationDBProfile(nil)
 	require.NoError(t, err)
 

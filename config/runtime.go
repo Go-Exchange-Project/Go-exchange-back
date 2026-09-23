@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -24,6 +25,27 @@ const (
 
 	EnvGOExchangeMatchingMaxMatchesPerTurn     = "GOEXCHANGE_MATCHING_MAX_MATCHES_PER_TURN"
 	EnvGOExchangeMatchingMaxConsecutiveCancels = "GOEXCHANGE_MATCHING_MAX_CONSECUTIVE_CANCELS"
+
+	// 설계 §2 — 서비스 HTTP 서버 4종 상한 + MaxHeaderBytes.
+	EnvHTTPReadHeaderTimeout = "GOEXCHANGE_HTTP_READ_HEADER_TIMEOUT"
+	EnvHTTPReadTimeout       = "GOEXCHANGE_HTTP_READ_TIMEOUT"
+	EnvHTTPWriteTimeout      = "GOEXCHANGE_HTTP_WRITE_TIMEOUT"
+	EnvHTTPIdleTimeout       = "GOEXCHANGE_HTTP_IDLE_TIMEOUT"
+	EnvHTTPMaxHeaderBytes    = "GOEXCHANGE_HTTP_MAX_HEADER_BYTES"
+
+	// 설계 §2.2·§7 — 관리 서버(/metrics·pprof) 주소·WriteTimeout.
+	EnvAdminAddr         = "GOEXCHANGE_ADMIN_ADDR"
+	EnvAdminWriteTimeout = "GOEXCHANGE_ADMIN_WRITE_TIMEOUT"
+
+	// 설계 §6.2·§6.3 — rate limit 활성화·대상별 rps/burst·프록시 신뢰 CIDR.
+	EnvRateLimitEnabled       = "GOEXCHANGE_RATE_LIMIT_ENABLED"
+	EnvAuthRateLimitRPS       = "GOEXCHANGE_AUTH_RATE_LIMIT_RPS"
+	EnvAuthRateLimitBurst     = "GOEXCHANGE_AUTH_RATE_LIMIT_BURST"
+	EnvOrderRateLimitRPS      = "GOEXCHANGE_ORDER_RATE_LIMIT_RPS"
+	EnvOrderRateLimitBurst    = "GOEXCHANGE_ORDER_RATE_LIMIT_BURST"
+	EnvTransferRateLimitRPS   = "GOEXCHANGE_TRANSFER_RATE_LIMIT_RPS"
+	EnvTransferRateLimitBurst = "GOEXCHANGE_TRANSFER_RATE_LIMIT_BURST"
+	EnvTrustedProxies         = "GOEXCHANGE_TRUSTED_PROXIES"
 )
 
 // strictPositiveEnv는 기존 parsePositiveIntEnv(database.go)와 달리 조용히
@@ -107,6 +129,115 @@ const (
 	defaultMatchingMaxMatchesPerTurn     = 128
 	defaultMatchingMaxConsecutiveCancels = 8
 )
+
+// 설계 §2의 운영 시작점 — 정확성 경계가 아니다.
+const (
+	defaultHTTPReadHeaderTimeout = 5 * time.Second
+	defaultHTTPReadTimeout       = 15 * time.Second
+	defaultHTTPWriteTimeout      = 20 * time.Second
+	defaultHTTPIdleTimeout       = 60 * time.Second
+	defaultHTTPMaxHeaderBytes    = 1 << 20
+
+	defaultAdminAddr         = "127.0.0.1:9101"
+	defaultAdminWriteTimeout = 120 * time.Second
+)
+
+// 설계 §6.2 — 대상별 rate limit 기본값(부하 프로필에서 env로 조정).
+const (
+	defaultAuthRateLimitRPS       = 1
+	defaultAuthRateLimitBurst     = 10
+	defaultOrderRateLimitRPS      = 20
+	defaultOrderRateLimitBurst    = 40
+	defaultTransferRateLimitRPS   = 2
+	defaultTransferRateLimitBurst = 5
+)
+
+func HTTPReadHeaderTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvHTTPReadHeaderTimeout, defaultHTTPReadHeaderTimeout)
+}
+
+func HTTPReadTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvHTTPReadTimeout, defaultHTTPReadTimeout)
+}
+
+func HTTPWriteTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvHTTPWriteTimeout, defaultHTTPWriteTimeout)
+}
+
+func HTTPIdleTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvHTTPIdleTimeout, defaultHTTPIdleTimeout)
+}
+
+func HTTPMaxHeaderBytesFromEnv() (int, error) {
+	return strictPositiveEnv(EnvHTTPMaxHeaderBytes, defaultHTTPMaxHeaderBytes)
+}
+
+// AdminAddrFromEnv은 문자열이라 strict 파싱 대상이 아니다(strictPositiveEnv 계열은
+// 숫자·duration 전용) — 미설정만 기본값을 쓰고, 그 외에는 트림한 값을 그대로 쓴다.
+func AdminAddrFromEnv() string {
+	return envOrDefault(EnvAdminAddr, defaultAdminAddr)
+}
+
+func AdminWriteTimeoutFromEnv() (time.Duration, error) {
+	return strictPositiveDurationEnv(EnvAdminWriteTimeout, defaultAdminWriteTimeout)
+}
+
+// RateLimitEnabledFromEnv은 기본 켜짐이다 — 끄면 운영 미들웨어 경로를 우회한
+// 다른 시스템을 측정하게 되므로(설계 §6.4), 부하 테스트에서도 끄지 않는다.
+func RateLimitEnabledFromEnv() bool {
+	value, ok := os.LookupEnv(EnvRateLimitEnabled)
+	if !ok {
+		return true
+	}
+	return parseBoolEnv(value)
+}
+
+func AuthRateLimitRPSFromEnv() (int, error) {
+	return strictPositiveEnv(EnvAuthRateLimitRPS, defaultAuthRateLimitRPS)
+}
+
+func AuthRateLimitBurstFromEnv() (int, error) {
+	return strictPositiveEnv(EnvAuthRateLimitBurst, defaultAuthRateLimitBurst)
+}
+
+func OrderRateLimitRPSFromEnv() (int, error) {
+	return strictPositiveEnv(EnvOrderRateLimitRPS, defaultOrderRateLimitRPS)
+}
+
+func OrderRateLimitBurstFromEnv() (int, error) {
+	return strictPositiveEnv(EnvOrderRateLimitBurst, defaultOrderRateLimitBurst)
+}
+
+func TransferRateLimitRPSFromEnv() (int, error) {
+	return strictPositiveEnv(EnvTransferRateLimitRPS, defaultTransferRateLimitRPS)
+}
+
+func TransferRateLimitBurstFromEnv() (int, error) {
+	return strictPositiveEnv(EnvTransferRateLimitBurst, defaultTransferRateLimitBurst)
+}
+
+// TrustedProxiesFromEnv은 콤마 구분 CIDR 목록을 반환한다(설계 §6.3). 미설정이면
+// nil — gin의 SetTrustedProxies(nil)과 짝을 이뤄 RemoteAddr만 신뢰한다. 잘못된
+// CIDR은 에러이며, 호출자가 부팅 실패로 이어야 한다.
+func TrustedProxiesFromEnv() ([]string, error) {
+	raw, ok := os.LookupEnv(EnvTrustedProxies)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	proxies := make([]string, 0, len(parts))
+	for _, part := range parts {
+		cidr := strings.TrimSpace(part)
+		if cidr == "" {
+			return nil, fmt.Errorf("%s contains an empty entry", EnvTrustedProxies)
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return nil, fmt.Errorf("%s contains invalid CIDR %q: %w", EnvTrustedProxies, cidr, err)
+		}
+		proxies = append(proxies, cidr)
+	}
+	return proxies, nil
+}
 
 const defaultSettlementWorkers = 10
 const defaultSettlementConcurrency = 4

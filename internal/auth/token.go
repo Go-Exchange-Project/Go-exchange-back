@@ -58,11 +58,7 @@ func NewTokenManager(secret string, ttl time.Duration) (*TokenManager, error) {
 }
 
 func NewTokenManagerFromEnv() (*TokenManager, error) {
-	secret := os.Getenv(EnvJWTSecret)
-	if strings.TrimSpace(secret) == "" {
-		secret = "dev-only-change-me"
-	}
-	return NewTokenManager(secret, 24*time.Hour)
+	return NewTokenManager(os.Getenv(EnvJWTSecret), 24*time.Hour)
 }
 
 func (tm *TokenManager) Generate(userID uint) (string, error) {

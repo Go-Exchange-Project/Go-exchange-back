@@ -65,18 +65,39 @@ ssh -i ~/.ssh/goexchange-gcp goexchange@<load_gen_external_ip> \
 
 `server_internal_ip`를 쓰는 이유는 같은 VPC 안에서는 내부 IP가 더 빠르고, 외부 IP 대역폭/과금을 피할 수 있기 때문이다.
 
+### 6.1. setup 단계 인증 rate limit 계약 (설계 §6.4)
+
+`setup()`은 25000명을 100명씩(`SETUP_BATCH_SIZE`) 배치로 가입시킨다. 배치 사이엔
+`SETUP_BATCH_INTERVAL_SECONDS = 0.5`초 고정 sleep이 있다(하니스 소스에 직접
+박혀 있다 — env로 열지 않는다, 값을 바꾸면 아래 한도도 다시 계산해야 한다).
+
+- `docker-compose.stress.yml`은 이 계약에서 역산한 `GOEXCHANGE_AUTH_RATE_LIMIT_RPS=400`,
+  `GOEXCHANGE_AUTH_RATE_LIMIT_BURST=200`을 기본으로 이미 갖고 있다(여유 2배,
+  계산 과정은 계획서 Task 9 Step 1 참고). 주문·이체 한도는 사용자당 2~5rps라
+  기본값과 충돌하지 않으므로 건드리지 않는다.
+- **preflight**: register·login 응답이 429면 `setup()`이 `setup preflight: ...
+  rate limited (429)`로 즉시 실패한다(k6 실행 자체가 에러로 종료된다). k6 실행이
+  `setup preflight` 에러 없이 `submitOrders` 단계로 넘어갔다면 preflight를
+  통과한 것이다 — 별도 커맨드가 필요 없다.
+- 이 에러가 나면 본 실행을 진행하지 말고 `GOEXCHANGE_AUTH_RATE_LIMIT_RPS`·
+  `BURST`를 올리거나 `SETUP_BATCH_INTERVAL_SECONDS`를 늘린 뒤(둘 다 바꾸면
+  위 계산을 다시 한다) 재실행한다.
+- 실행 결과(이 실행에서 429가 있었는지, 있었다면 어떤 조치로 해소했는지)는
+  8번 단계의 `docs/benchmarks/03-YYYY-MM-DD-gcp-stress-test.md`에 함께 남긴다.
+
 ## 6.5. (선택) CPU 프로파일 캡처
 
 이전 실행에서 CPU 포화가 관측된 VU 구간(예: 150~200)이 있다면, 그 구간에서 30초 CPU 프로파일을 캡처해 실제 병목 함수를 확인할 수 있다.
 
 1. `.env`에 `GOEXCHANGE_ENABLE_PPROF=true`가 설정된 채로 서버가 기동 중인지 확인한다 (기본값은 `false`이므로 명시적으로 켜야 한다).
-2. 로컬에서 서버 인스턴스로 SSH 터널을 연다:
+2. 로컬에서 서버 인스턴스로 SSH 터널을 연다(관리 서버 — 설계 §7. `/metrics`도
+   같은 포트다):
    ```bash
-   ssh -L 6060:localhost:6060 -i ~/.ssh/goexchange-gcp goexchange@<server_external_ip>
+   ssh -L 9101:localhost:9101 -i ~/.ssh/goexchange-gcp goexchange@<server_external_ip>
    ```
 3. k6가 목표 VU 구간에 진입한 시점에, 로컬의 또 다른 터미널에서 프로파일을 받는다:
    ```bash
-   go tool pprof -seconds=30 -output=cpu.prof http://localhost:6060/debug/pprof/profile
+   go tool pprof -seconds=30 -output=cpu.prof http://localhost:9101/debug/pprof/profile
    ```
 4. 캡처가 끝나면 분석한다:
    ```bash

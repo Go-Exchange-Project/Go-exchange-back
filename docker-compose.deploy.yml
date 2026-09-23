@@ -33,7 +33,7 @@ services:
       GOEXCHANGE_DB_PORT: "5432"
       GOEXCHANGE_DB_SSLMODE: disable
       GOEXCHANGE_DB_CONNECT_TIMEOUT: "10"
-      GOEXCHANGE_JWT_SECRET: ${GOEXCHANGE_JWT_SECRET:-change-me-to-a-long-random-secret}
+      GOEXCHANGE_JWT_SECRET: ${GOEXCHANGE_JWT_SECRET:?GOEXCHANGE_JWT_SECRET is required}
       GOEXCHANGE_MARKET_RULES_PATH: /app/config/market_rules.json
       GOEXCHANGE_MIGRATIONS_DIR: /app/migrations
       GOEXCHANGE_ENABLE_DEV_TOOLS: ${GOEXCHANGE_ENABLE_DEV_TOOLS:-true}
@@ -41,6 +41,9 @@ services:
       GOEXCHANGE_ENABLE_UPBIT: ${GOEXCHANGE_ENABLE_UPBIT:-false}
       GOEXCHANGE_CORS_ALLOWED_ORIGINS: ${GOEXCHANGE_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       GOEXCHANGE_WS_ALLOWED_ORIGINS: ${GOEXCHANGE_WS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      # 설계 §7 — 컨테이너에서는 0.0.0.0으로 바인드해야 포트 포워딩이 닿는다.
+      # 미공개(published 없음)라 호스트 밖에서는 접근할 수 없다.
+      GOEXCHANGE_ADMIN_ADDR: ${GOEXCHANGE_ADMIN_ADDR:-0.0.0.0:9101}
     ports:
       - "8080:8080"
     healthcheck:

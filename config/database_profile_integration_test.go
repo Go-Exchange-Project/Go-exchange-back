@@ -133,7 +133,8 @@ func TestOpenDBWithProfileFailsWhenAnyShowValueMismatches(t *testing.T) {
 func TestServiceAndReconciliationPoolsHaveDifferentStatementTimeout(t *testing.T) {
 	dsn := testProfileDSN(t)
 
-	serviceProfile := ServiceDBProfile(nil)
+	serviceProfile, err := ServiceDBProfile(nil)
+	require.NoError(t, err)
 	serviceProfile.MaxOpenConns, serviceProfile.MaxIdleConns = 2, 2
 	_, serviceDB, err := OpenDBWithProfile(dsn, serviceProfile)
 	require.NoError(t, err)

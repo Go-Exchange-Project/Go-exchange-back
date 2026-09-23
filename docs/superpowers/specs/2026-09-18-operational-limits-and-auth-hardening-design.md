@@ -21,7 +21,7 @@
 | pprof | `main.go:51` `:6060` 별도 리스너(상한 없음). runbook은 `ssh -L 6060`으로 **30초** CPU 프로파일을 받는다(`docs/gcp-stress-test-runbook.md:75,79`) |
 | 프록시 신뢰 | `gin.Default()`는 모든 프록시를 신뢰 — `c.ClientIP()`가 `X-Forwarded-For`로 위조 가능 |
 | WebSocket | `internal/ws/handler.go:105,161,170` 업그레이드 후 자체 deadline(읽기 60초, 쓰기 10초, ping 54초) |
-| 부하 하니스 | setup이 한 IP에서 배치 단위로 가입을 동시 전송(`loadtest/order-submission-stress.js:75`). 주문은 VU별 사용자 + 200~500ms 간격이라 사용자당 2~5rps |
+| 부하 하니스 | setup이 한 IP에서 배치 단위로 가입을 동시 전송(`loadtest/order-submission-stress.js:75`), **배치 사이 간격 없음**(다음 배치가 이전 배치 완료 직후 출발). 주문은 VU별 사용자 + 200~500ms 간격이라 사용자당 2~5rps |
 
 ## 1. 목표와 비목표
 
@@ -310,8 +310,10 @@ RecordFailuresAndMarkOutboxProcessed(items []SettlementFailureHandoff) error
 실제 충돌 지점은 주문이 아니라 **인증**이다. stress 하니스 setup은 한 IP에서 가입을 배치로 동시 전송하므로 기본 burst 10이면 첫 배치부터 실패한다. 주문은 사용자당 2~5rps라 기본 20rps와 충돌하지 않는다.
 
 - limiter를 **끄지 않는다**(끄면 운영 미들웨어 경로를 우회한 다른 시스템을 측정한다).
-- **예시값이 아니라 결정적 계약으로 정한다.** `burst ≥ 배치 크기`만으로는 부족하다 — 배치가 연달아 빠르게 나가면 세 번째 배치부터 걸린다. 다음을 모두 만족시킨다:
-  - `docker-compose.stress.yml`에 인증 `rps`·`burst`를 **setup의 실제 전송률보다 높게** 설정한다. 계획 단계에서 하니스의 `TOTAL_USERS`·`SETUP_BATCH_SIZE`와 배치 간격으로 필요한 rps를 계산해 값을 정한다(현재 기본 하니스 기준 계산을 계획서에 적는다).
+- **예시값이 아니라 결정적 계약으로 정한다.** `burst ≥ 배치 크기`만으로는 부족하다 — 배치가 연달아 빠르게 나가면 세 번째 배치부터 걸린다. 그런데 **현재 하니스의 setup에는 배치 간격이 없다**(`order-submission-stress.js:75-155`는 register → (409면 login 폴백) → fund를 동기로 처리하고 곧바로 다음 배치로 넘어간다. `sleep(0.2~0.5)`는 `submitOrders`에만 있다 — 구현 중 발견한 설계 오류다). 간격이 이전 배치의 서버 왕복 시간이면 전송률이 배포 환경·서버 부하에 따라 달라져 결정적 계약을 세울 수 없다. 그래서 다음 순서로 정한다:
+  - **하니스에 고정 배치 간격을 넣는다.** 배치 루프 끝에 `sleep(S)`를 두어 연속한 register 배치 사이 간격이 최소 `S`가 되게 한다. 왕복 시간은 간격을 늘릴 뿐 줄이지 않으므로 전송률의 **상한**이 `SETUP_BATCH_SIZE / S`로 고정된다. 대상은 배치형 3종(`order-submission-stress.js`·`order-spike-single-symbol.js`·`order-submission-multisymbol.js`). `order-submission-baseline.js`는 순차 50건이라 burst 하나로 덮인다.
+  - **한도는 그 상한에서 역산한다.** 길이 `T` 구간의 최대 도착량은 `SETUP_BATCH_SIZE × (T/S + 1)`, 토큰 버킷 허용량은 `rps × T + burst`다. `rps ≥ SETUP_BATCH_SIZE/S`이고 `burst ≥ SETUP_BATCH_SIZE`면 모든 `T`에서 거절이 없다. 여유를 둔 실제 적용값은 계획서 Task 9에 적는다.
+  - register와 login은 **서로 다른 버킷**이므로 같은 한도가 각각 적용된다(재실행 시 한 배치가 register 100건 + login 100건을 내지만 버킷이 갈린다).
   - **preflight**: 부하 본 실행 전에 setup만 돌려 `429`가 **한 건이라도 나오면 중단**한다. k6 setup 단계에서 상태 코드를 검사해 즉시 실패시킨다.
   - 실제 적용값과 preflight 결과를 runbook에 기록한다.
 
@@ -408,4 +410,5 @@ RecordFailuresAndMarkOutboxProcessed(items []SettlementFailureHandoff) error
 - 2차 설계 리뷰: `STATEMENT_TIMEOUT` 내구 카테고리와 장기 retry worker 연결(§4.4), D8을 "기록 없음"에서 "transient 기록 → retry worker 해결"로 정정, 배치 단건 폴백의 시간 증폭 정책(§4.3), shutdown 안전 조건을 서비스/관리로 분리하고 주입 가능한 exit 함수 명시(§5), transfer poller·hold coordinator 행을 실제 동작으로 정정, `IsTransientSettlementError` 파급 경로 전수(§4.2), 비주문 HTTP 503 매핑 테스트(D12), rate limiter 2층 락(§6.2), stress 인증 한도를 preflight 포함 결정적 계약으로(§6.4), DB 통계 collector 중복 등록 주의(§3.1).
 - 3차 설계 리뷰: 정산 탐침 제거(내구 소유권 이중화·시간 예산 미정의) → 배치 `57014`는 전원 `STATEMENT_TIMEOUT` 내구 인계, 실패 기록 성공 시 outbox PROCESSED·기록 실패 시에만 PENDING(§4.3 소유권 표), retry worker가 재차 `57014`를 받으면 RunOnce 중단(§4.4), D10 기대값을 소유권 규약에 맞게 정정하고 D13 추가, rate limiter map/entry 락 획득 순서 고정과 A3 결정적 경쟁 테스트(§6.2·§8), 구현 시 `exitFunc(1)` 직후 명시적 return.
 - 4차 설계 리뷰: 내구 인계 자체의 증폭을 원자적 배치 인계로 차단(새 `RecordFailuresAndMarkOutboxProcessed`, 결과는 commit/rollback 둘뿐, rollback 시 배치 전체를 undurable로 반환), retry worker circuit break 판정을 저장된 카테고리가 아니라 **이번 시도의 반환 오류**로 넓히고 failure 갱신 실패 시에도 RunOnce 종료, D10을 원자적 결과로 정정하고 dispatcher 연결(D14) 추가.
+- CP B 구현 중 발견(2026-09-23): §6.4가 전제한 setup의 "배치 간격"이 하니스에 존재하지 않았다(서버 왕복 시간에 좌우되는 값이라 결정적 계산 불가). 하니스에 고정 간격 `S`를 추가하고 `rps ≥ SETUP_BATCH_SIZE/S`·`burst ≥ SETUP_BATCH_SIZE`로 역산하도록 §6.4를 고쳤다. 현황 표에 "배치 사이 간격 없음"도 반영.
 - 5차 설계 리뷰: circuit break를 `RunOnce` 최상위 계약으로 확정(세 phase가 중단 여부를 반환, 발생 지점 이후의 남은 항목·phase를 실행하지 않음 — completion·cancellation 판단을 계획서로 미루지 않는다), 원자적 메서드의 입력·행 수 계약 명시(일대일 항목 구조체, 중복·0·빈 입력 거부, `RowsAffected` 검사, `status='PENDING'` 조건, 전체 rollback, 중복 제거 복사 금지), D13을 `RunOnce` 전체 호출과 phase별 발생원으로 확장.

@@ -22,6 +22,7 @@ const (
 	CodeValidation         = "VALIDATION_ERROR"
 	CodeInvalidCredentials = "INVALID_CREDENTIALS"
 	CodeUnavailable        = "SERVICE_UNAVAILABLE"
+	CodeRateLimited        = "RATE_LIMITED"
 	retryAfterSeconds      = "1"
 )
 

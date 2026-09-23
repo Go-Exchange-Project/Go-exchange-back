@@ -8,7 +8,6 @@ import (
 	"hash/fnv"
 	"log"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -20,7 +19,6 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/dbmigration"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/handler"
-	"github.com/Go-Exchange-Project/Go-exchange-back/internal/httpapi"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/matching"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/metrics"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/middleware"
@@ -29,10 +27,7 @@ import (
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/service"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/upbit"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/ws"
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/gorm"
 )
 
@@ -52,17 +47,6 @@ func main() {
 	migrationDB, migrationSQLDB, err := config.OpenDBWithProfile(databaseDSN, migrationProfile)
 	if err != nil {
 		log.Fatal("migration db connection failed: ", err)
-	}
-
-	if config.PprofEnabledFromEnv() {
-		// Binds to all interfaces inside the container; external exposure is
-		// prevented by docker-compose's host-side 127.0.0.1:6060:6060 mapping,
-		// not by this bind address (binding to 127.0.0.1 here would make it
-		// unreachable through Docker's port forwarding, which routes via the
-		// container's eth0, not its loopback).
-		go func() {
-			log.Println("pprof listening on :6060:", http.ListenAndServe(":6060", nil))
-		}()
 	}
 
 	if err := migrationDB.AutoMigrate(
@@ -93,8 +77,13 @@ func main() {
 	}
 
 	// 서비스 풀(설계 §3) — HTTP·엔진·정산·outbox·worker가 공유한다. 기존
-	// GOEXCHANGE_DB_MAX_* env로 커넥션 수를 그대로 잇는다.
-	serviceDB, _, err := config.OpenDBWithProfile(databaseDSN, config.ServiceDBProfile(prometheus.DefaultRegisterer))
+	// GOEXCHANGE_DB_MAX_* env로 커넥션 수를 그대로 잇는다. 세 시간 상한도
+	// env로 연다(GOEXCHANGE_DB_STATEMENT_TIMEOUT 등, Task 6에서 복구).
+	serviceProfile, err := config.ServiceDBProfile(prometheus.DefaultRegisterer)
+	if err != nil {
+		log.Fatal("service db profile invalid: ", err)
+	}
+	serviceDB, _, err := config.OpenDBWithProfile(databaseDSN, serviceProfile)
 	if err != nil {
 		log.Fatal("service db connection failed: ", err)
 	}
@@ -396,52 +385,119 @@ func main() {
 		log.Println("upbit feed disabled by GOEXCHANGE_ENABLE_UPBIT")
 	}
 
-	r := gin.Default()
-
-	r.Use(cors.New(cors.Config{
-		AllowOrigins: config.CORSAllowedOriginsFromEnv(),
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders: corsAllowedHeaders,
-	}))
-	r.Use(metrics.HTTPMiddleware())
-
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-	r.GET("/ping", func(c *gin.Context) {
-		httpapi.WriteData(c, http.StatusOK, gin.H{
-			"message": "pong",
-		})
-	})
-
-	r.GET("/ws", func(c *gin.Context) {
-		ws.ServeWs(hub, c)
-	})
-
-	r.POST("/auth/register", authHandler.Register)
-	r.POST("/auth/login", authHandler.Login)
-	r.GET("/markets/rules", marketHandler.GetRules)
-	r.GET("/orderbook", orderBookHandler.GetSnapshot)
-
-	authenticated := r.Group("/")
-	authenticated.Use(middleware.AuthRequired(tokenManager))
-	authenticated.GET("/orders", orderHandler.ListOrders)
-	authenticated.GET("/orders/:id", orderHandler.GetOrder)
-	authenticated.POST("/orders", orderHandler.CreateOrder)
-	authenticated.DELETE("/orders/:id", orderHandler.CancelOrder)
-	authenticated.GET("/wallets", orderHandler.ListWallets)
-	authenticated.GET("/trades", orderHandler.ListTrades)
-	authenticated.POST("/transfers/deposits", transferHandler.RequestDeposit)
-	authenticated.POST("/transfers/withdrawals", transferHandler.RequestWithdrawal)
-	authenticated.GET("/transfers", transferHandler.ListTransfers)
-	if config.DevToolsEnabledFromEnv() {
-		devHandler := handler.NewDevHandler(service.NewDevWalletService(config.DB))
-		dev := authenticated.Group("/dev")
-		dev.Use(middleware.DevToolsRequired(config.DevToolsTokenFromEnv()))
-		dev.POST("/wallets/fund", devHandler.FundWallet)
-		// 가짜 은행·가짜 체인이 우리에게 알림을 보내는 것을 흉내 낸다 — 실제
-		// 외부가 호출하는 라우트가 아니므로 dev-tools 뒤에 둔다.
-		dev.POST("/transfers/callback", transferHandler.ReceiveCallback)
+	// 설계 §6.3 — 프록시 신뢰 CIDR. 잘못된 CIDR은 부팅 실패.
+	trustedProxies, err := config.TrustedProxiesFromEnv()
+	if err != nil {
+		log.Fatal("trusted proxies invalid: ", err)
 	}
+
+	// 설계 §6.2 — rate limiter 3종(인증 공용, 주문, 이체). 비활성이면 모두 nil로
+	// 둬 미들웨어가 통과시킨다(A6).
+	var authRateLimiter, orderRateLimiter, transferRateLimiter *middleware.RateLimiter
+	if config.RateLimitEnabledFromEnv() {
+		authRPS, err := config.AuthRateLimitRPSFromEnv()
+		if err != nil {
+			log.Fatal("auth rate limit rps invalid: ", err)
+		}
+		authBurst, err := config.AuthRateLimitBurstFromEnv()
+		if err != nil {
+			log.Fatal("auth rate limit burst invalid: ", err)
+		}
+		orderRPS, err := config.OrderRateLimitRPSFromEnv()
+		if err != nil {
+			log.Fatal("order rate limit rps invalid: ", err)
+		}
+		orderBurst, err := config.OrderRateLimitBurstFromEnv()
+		if err != nil {
+			log.Fatal("order rate limit burst invalid: ", err)
+		}
+		transferRPS, err := config.TransferRateLimitRPSFromEnv()
+		if err != nil {
+			log.Fatal("transfer rate limit rps invalid: ", err)
+		}
+		transferBurst, err := config.TransferRateLimitBurstFromEnv()
+		if err != nil {
+			log.Fatal("transfer rate limit burst invalid: ", err)
+		}
+
+		authRateLimiter = middleware.NewRateLimiter(middleware.RateLimiterConfig{RPS: authRPS, Burst: authBurst})
+		orderRateLimiter = middleware.NewRateLimiter(middleware.RateLimiterConfig{RPS: orderRPS, Burst: orderBurst})
+		transferRateLimiter = middleware.NewRateLimiter(middleware.RateLimiterConfig{RPS: transferRPS, Burst: transferBurst})
+
+		const rateLimitCleanupInterval = 10 * time.Minute
+		const rateLimitIdleAfter = 10 * time.Minute
+		go authRateLimiter.RunCleanup(backgroundCtx, rateLimitCleanupInterval, rateLimitIdleAfter)
+		go orderRateLimiter.RunCleanup(backgroundCtx, rateLimitCleanupInterval, rateLimitIdleAfter)
+		go transferRateLimiter.RunCleanup(backgroundCtx, rateLimitCleanupInterval, rateLimitIdleAfter)
+	}
+
+	devToolsEnabled := config.DevToolsEnabledFromEnv()
+	var devWalletService *service.DevWalletService
+	if devToolsEnabled {
+		devWalletService = service.NewDevWalletService(config.DB)
+	}
+
+	r, err := newRouter(routerConfig{
+		corsOrigins:         config.CORSAllowedOriginsFromEnv(),
+		trustedProxies:      trustedProxies,
+		hub:                 hub,
+		authHandler:         authHandler,
+		marketHandler:       marketHandler,
+		orderBookHandler:    orderBookHandler,
+		orderHandler:        orderHandler,
+		transferHandler:     transferHandler,
+		tokenManager:        tokenManager,
+		devToolsEnabled:     devToolsEnabled,
+		devWalletService:    devWalletService,
+		devToolsToken:       config.DevToolsTokenFromEnv(),
+		authRateLimiter:     authRateLimiter,
+		orderRateLimiter:    orderRateLimiter,
+		transferRateLimiter: transferRateLimiter,
+	})
+	if err != nil {
+		log.Fatal("router setup failed: ", err)
+	}
+
+	// 서비스 HTTP 서버 4종 상한(설계 §2.1) — env, strict 파싱.
+	readHeaderTimeout, err := config.HTTPReadHeaderTimeoutFromEnv()
+	if err != nil {
+		log.Fatal("http read header timeout invalid: ", err)
+	}
+	readTimeout, err := config.HTTPReadTimeoutFromEnv()
+	if err != nil {
+		log.Fatal("http read timeout invalid: ", err)
+	}
+	writeTimeout, err := config.HTTPWriteTimeoutFromEnv()
+	if err != nil {
+		log.Fatal("http write timeout invalid: ", err)
+	}
+	idleTimeout, err := config.HTTPIdleTimeoutFromEnv()
+	if err != nil {
+		log.Fatal("http idle timeout invalid: ", err)
+	}
+	maxHeaderBytes, err := config.HTTPMaxHeaderBytesFromEnv()
+	if err != nil {
+		log.Fatal("http max header bytes invalid: ", err)
+	}
+	srv := newServiceHTTPServer(":8080", r, httpTimeoutConfig{
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	})
+
+	// 관리 서버(설계 §2.2·§7) — /metrics·pprof를 서비스 포트에서 분리한다.
+	// bind 실패는 부팅 실패다: 관리 포트가 조용히 없으면 지표·프로파일이 사라진다.
+	adminWriteTimeout, err := config.AdminWriteTimeoutFromEnv()
+	if err != nil {
+		log.Fatal("admin write timeout invalid: ", err)
+	}
+	adminAddr := config.AdminAddrFromEnv()
+	adminSrv := newAdminHTTPServer(adminAddr, newAdminMux(config.PprofEnabledFromEnv()), adminWriteTimeout)
+	adminLn := bindAdminServer(adminAddr, func(args ...interface{}) { log.Fatal(args...) })
+	serveAdminServer(adminSrv, adminLn)
+	log.Printf("admin server listening on %s", adminAddr)
 
 	// graceful shutdown 체인: HTTP 차단 → hold coordinator 정지 → cancel worker 정지
 	// → 엔진 드레인(ExecutionCh close) → outbox writer flush(큐 close) →
@@ -455,7 +511,6 @@ func main() {
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
-	srv := &http.Server{Addr: ":8080", Handler: r}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal("http server failed: ", err)
@@ -467,50 +522,50 @@ func main() {
 	stopSignals()
 	log.Println("shutdown: signal received, draining pipeline")
 
-	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := srv.Shutdown(httpCtx); err != nil {
-		log.Printf("shutdown: http server shutdown failed: %v", err)
-	}
-	cancelHTTP()
+	// 서비스·관리 서버는 종료 예산을 공유하지 않는다(설계 §5) — 서비스 Shutdown이
+	// 실패하면 파이프라인을 닫지 않고 exitFunc(1)로 죽는다(닫는 것보다 안전하다:
+	// 부팅 replay·bootstrap·cancel worker 장벽이 복구한다). 관리 서버 실패는
+	// 서비스가 성공했으면 드레인을 막지 않는다.
+	runShutdownSequence(srv, 10*time.Second, adminSrv, 10*time.Second, func() {
+		// HTTP가 in-flight CreateOrder 핸들러를 전부 드레인한 뒤에만 안전하다 — 그래야
+		// 진행 중인 Submit()이 없어 input close와의 send-on-closed 경쟁이 없다. 반드시
+		// 엔진 Stop() 앞: 엔진이 멈추면 이후 접수된 홀드가 매칭될 수 없다.
+		holdCoordinator.Shutdown()
 
-	// HTTP가 in-flight CreateOrder 핸들러를 전부 드레인한 뒤에만 안전하다 — 그래야
-	// 진행 중인 Submit()이 없어 input close와의 send-on-closed 경쟁이 없다. 반드시
-	// 엔진 Stop() 앞: 엔진이 멈추면 이후 접수된 홀드가 매칭될 수 없다.
-	holdCoordinator.Shutdown()
+		// cancel worker가 엔진보다 먼저 끝나야 drain 중 새 dispatch가 들어오지 않는다.
+		// 상한을 넘겨도 엔진 정지로 넘어가지 않는다 — worker가 아직 CancelOrder를
+		// 호출하고 있으면 진행 중인 취소가 오더북에 반영되지 못한다.
+		stopCancelWorkerThenEngine(cancelCancelWorker, cancelWorkerDone, 10*time.Second, me.Stop, log.Printf)
 
-	// cancel worker가 엔진보다 먼저 끝나야 drain 중 새 dispatch가 들어오지 않는다.
-	// 상한을 넘겨도 엔진 정지로 넘어가지 않는다 — worker가 아직 CancelOrder를
-	// 호출하고 있으면 진행 중인 취소가 오더북에 반영되지 못한다.
-	stopCancelWorkerThenEngine(cancelCancelWorker, cancelWorkerDone, 10*time.Second, me.Stop, log.Printf)
+		// downstream 상한은 worker가 실제로 끝난 뒤부터 센다. worker를 기다리는 동안
+		// 흘러간 시간이 엔진·outbox·정산 drain의 몫을 깎으면 안 된다.
+		// context의 Done()은 닫히는 채널이라 세 단계가 모두 만료를 관측한다.
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelDrain()
 
-	// downstream 상한은 worker가 실제로 끝난 뒤부터 센다. worker를 기다리는 동안
-	// 흘러간 시간이 엔진·outbox·정산 drain의 몫을 깎으면 안 된다.
-	// context의 Done()은 닫히는 채널이라 세 단계가 모두 만료를 관측한다.
-	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelDrain()
+		waitForShutdownStage("matching engine", me.Done(), drainCtx.Done(), log.Printf)
+		waitForShutdownStage("outbox writer flush", outboxWriterDone, drainCtx.Done(), log.Printf)
 
-	waitForShutdownStage("matching engine", me.Done(), drainCtx.Done(), log.Printf)
-	waitForShutdownStage("outbox writer flush", outboxWriterDone, drainCtx.Done(), log.Printf)
+		settlementDrained := make(chan struct{})
+		go func() {
+			settlementWg.Wait()
+			close(settlementJobs)
+			settlementWorkerWg.Wait()
+			close(settlementDrained)
+		}()
+		if !waitForShutdownStage("settlement workers", settlementDrained, drainCtx.Done(), log.Printf) {
+			log.Println("shutdown: next boot replay will finish the rest")
+		}
 
-	settlementDrained := make(chan struct{})
-	go func() {
-		settlementWg.Wait()
-		close(settlementJobs)
-		settlementWorkerWg.Wait()
-		close(settlementDrained)
-	}()
-	if !waitForShutdownStage("settlement workers", settlementDrained, drainCtx.Done(), log.Printf) {
-		log.Println("shutdown: next boot replay will finish the rest")
-	}
-
-	cancelBackground()
-	// backgroundCtx 취소로 reconciliationWorker.Run 루프는 다음 tick 확인 시
-	// 종료된다 — 진행 중이던 RunOnce가 이 close와 겹쳐도 워커가 이미 각 검사의
-	// 쿼리 오류를 로그·카운터로만 처리하므로(치명적이지 않음) 별도 barrier는 두지 않는다.
-	if err := reconciliationSQLDB.Close(); err != nil {
-		log.Printf("shutdown: close reconciliation db pool failed: %v", err)
-	}
-	log.Println("shutdown complete")
+		cancelBackground()
+		// backgroundCtx 취소로 reconciliationWorker.Run 루프는 다음 tick 확인 시
+		// 종료된다 — 진행 중이던 RunOnce가 이 close와 겹쳐도 워커가 이미 각 검사의
+		// 쿼리 오류를 로그·카운터로만 처리하므로(치명적이지 않음) 별도 barrier는 두지 않는다.
+		if err := reconciliationSQLDB.Close(); err != nil {
+			log.Printf("shutdown: close reconciliation db pool failed: %v", err)
+		}
+		log.Println("shutdown complete")
+	}, os.Exit, log.Printf)
 }
 
 type tradeSettler interface {

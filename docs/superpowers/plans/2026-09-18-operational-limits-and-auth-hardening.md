@@ -6,7 +6,8 @@
 
 **설계 문서(확정):** [2026-09-18-operational-limits-and-auth-hardening-design.md](../specs/2026-09-18-operational-limits-and-auth-hardening-design.md) — 6차 리뷰에서 확정.
 **기준 SHA:** `5e79abc` (main) · **브랜치:** 백엔드 `feat/operational-limits`(신규), 프런트 `feat/rate-limit-idempotency`(신규)
-**상태:** 계획 확정(2026-09-21, 3차 리뷰). 구현 미착수.
+**상태:** 계획 확정(2026-09-21, 3차 리뷰). CP A 확정(2026-09-22). CP B Task 6~8 구현 완료, Task 9 진행 중.
+**Task 9 정정(2026-09-23):** Step 1이 전제한 setup 배치 간격이 하니스에 없었다(설계 §6.4의 오류). 간격을 하니스에 추가하고 한도를 역산하도록 Step 1~3을 고쳤다.
 
 ## Global Constraints
 
@@ -206,10 +207,17 @@ CP A 구현(`ba1ae38`) 뒤 리뷰가 P1 2건을 지적했다. CP B 전에 닫는
 
 **설계:** §6.4, §7, §8
 
-- [ ] **Step 1:** 부하 한도 계산. `loadtest/*.js`의 `TOTAL_USERS`·`SETUP_BATCH_SIZE`·배치 간격으로 setup의 실제 인증 전송률을 계산해 `docker-compose.stress.yml`의 인증 `rps`·`burst`를 정한다(계산 과정을 보고서에 적는다).
-- [ ] **Step 2:** setup preflight — k6 setup에서 가입·로그인 응답이 `429`면 즉시 실패시킨다.
+- [ ] **Step 1:** 하니스에 고정 배치 간격을 넣고 한도를 역산한다(설계 §6.4 — 현재 하니스에는 배치 간격이 없어 전송률이 서버 왕복 시간에 좌우된다).
+  - 배치형 3종(`order-submission-stress.js`·`order-spike-single-symbol.js`·`order-submission-multisymbol.js`)에 상수 `SETUP_BATCH_INTERVAL_SECONDS = 0.5`를 두고, setup 배치 루프의 **끝**(fund 응답 검증 뒤)에 `sleep(SETUP_BATCH_INTERVAL_SECONDS)`를 넣는다. env로 열지 않는다 — 값이 바뀌면 아래 계약이 깨진다. 주석에 "이 간격이 인증 rate limit 계약의 근거"라고 적는다.
+  - `order-submission-baseline.js`는 순차 50건(`TOTAL_USERS=50`, 배치 없음)이라 burst 하나로 덮인다. 고치지 않는다.
+  - **계산:** 배치 크기 `B=100`, 간격 `S=0.5s` → 길이 `T` 구간의 최대 도착량 `B × (T/S + 1) = 200T + 100`. 토큰 버킷 허용량 `rps×T + burst`. 여유 2배를 두어 **`rps=400`, `burst=200`** → `400T + 200 > 200T + 100`(모든 `T ≥ 0`). 왕복 시간은 간격을 늘릴 뿐이라 실제 도착량은 항상 이 상한 이하다.
+  - register와 login은 별도 버킷이라 같은 값이 각각 적용된다(재실행 시 한 배치가 register 100 + login 100을 내도 버킷이 갈린다).
+  - setup 소요 증가: stress 250배치 × 0.5s = **+125s**(`setupTimeout: '20m'` 여유 안), spike·multisymbol(기본 3000명) 30배치 × 0.5s = +15s.
+  - 주문·이체 한도는 stress에서 조정하지 않는다(설계 §6.4 — 사용자당 2~5rps라 기본값과 충돌 없음). 적용값·계산 과정을 보고서와 runbook에 적는다.
+- [ ] **Step 2:** setup preflight — k6 setup에서 가입·로그인 응답이 `429`면 즉시 실패시킨다(배치형 3종 모두). `/dev/wallets/fund`는 limiter 대상이 아니므로 검사 대상에 넣지 않는다.
 - [ ] **Step 3:** 설정 파일.
   - compose 3종: `GOEXCHANGE_ADMIN_ADDR=0.0.0.0:9101`, stress만 `127.0.0.1:9101:9101` published(`127.0.0.1:6060:6060` 제거), prod·deploy는 미공개.
+  - `docker-compose.stress.yml`에 Step 1에서 역산한 인증 한도 `GOEXCHANGE_AUTH_RATE_LIMIT_RPS=400`·`GOEXCHANGE_AUTH_RATE_LIMIT_BURST=200`을 명시한다(주문·이체는 기본값). prod·deploy는 기본값을 쓴다.
   - `docker-compose.deploy.yml:36`의 JWT 폴백을 `:?GOEXCHANGE_JWT_SECRET is required`로.
   - `monitoring/prometheus.yml` 타깃 `backend:8080` → `backend:9101`.
   - `.env.prod.example`·`.env.deploy.example`·`.env.stress.example`에 새 env 추가(HTTP·admin·rate limit·trusted proxies와 함께 **DB 상한 3종**도 포함).
