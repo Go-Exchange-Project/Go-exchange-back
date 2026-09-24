@@ -9,12 +9,32 @@ import (
 
 // C1: rate limit·프록시 신뢰 env — 기본값, 유효 override, 잘못된 값 거부.
 func TestRateLimitEnabledFromEnvDefaultsToTrue(t *testing.T) {
-	assert.True(t, RateLimitEnabledFromEnv())
+	enabled, err := RateLimitEnabledFromEnv()
+	require.NoError(t, err)
+	assert.True(t, enabled)
 }
 
-func TestRateLimitEnabledFromEnvHonorsFalse(t *testing.T) {
-	t.Setenv(EnvRateLimitEnabled, "false")
-	assert.False(t, RateLimitEnabledFromEnv())
+func TestRateLimitEnabledFromEnvAcceptsRecognizedTokens(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"true": true, "TRUE": true, "1": true, "yes": true, "on": true,
+		"false": false, "FALSE": false, "0": false, "no": false, "off": false,
+	} {
+		t.Setenv(EnvRateLimitEnabled, raw)
+		enabled, err := RateLimitEnabledFromEnv()
+		require.NoError(t, err, raw)
+		assert.Equal(t, want, enabled, raw)
+	}
+}
+
+// 설계 §6.2 — 파싱 불가는 부팅 실패. 오타가 조용히 limiter를 끄면 안 된다.
+func TestRateLimitEnabledFromEnvRejectsUnrecognizedValues(t *testing.T) {
+	for _, raw := range []string{"treu", "flase", "", " ", "maybe", "2"} {
+		t.Run("value="+raw, func(t *testing.T) {
+			t.Setenv(EnvRateLimitEnabled, raw)
+			_, err := RateLimitEnabledFromEnv()
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestAuthRateLimitRPSAndBurstFromEnvDefaults(t *testing.T) {

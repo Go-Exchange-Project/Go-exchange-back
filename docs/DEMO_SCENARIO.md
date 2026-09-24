@@ -14,7 +14,12 @@ GOEXCHANGE_DEV_TOOLS_TOKEN=local-dev-token
 GOEXCHANGE_ENABLE_UPBIT=false
 GOEXCHANGE_CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 GOEXCHANGE_WS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+GOEXCHANGE_JWT_SECRET=<local-jwt-secret>
+GOEXCHANGE_AUTH_RATE_LIMIT_RPS=400
+GOEXCHANGE_AUTH_RATE_LIMIT_BURST=200
 ```
+
+`GOEXCHANGE_JWT_SECRET`은 필수입니다(없으면 서버가 부팅하지 않습니다). 인증 rate limit 값은 시연 중 연속 가입·로그인이 429에 걸리지 않게 넉넉히 잡은 로컬용 값입니다.
 
 프론트엔드 `.env.local` 예시:
 

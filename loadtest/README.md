@@ -17,6 +17,9 @@
    export GOEXCHANGE_DB_USER=goexchange_test
    export GOEXCHANGE_DB_NAME=goexchange_test
    export GOEXCHANGE_DB_PASSWORD=goexchange_test_password
+   export GOEXCHANGE_JWT_SECRET=<local-jwt-secret>   # 필수 — 없으면 서버가 부팅하지 않는다
+   export GOEXCHANGE_AUTH_RATE_LIMIT_RPS=400         # 배치형 하니스 계약(설계 §6.4)에서 온 값
+   export GOEXCHANGE_AUTH_RATE_LIMIT_BURST=200       # baseline도 한 IP에서 연속 가입하므로 기본 1rps/burst 10이면 429가 난다
    go run cmd/main.go
    ```
    `.env.local`에 `GOEXCHANGE_ENABLE_DEV_TOOLS=true`와 `GOEXCHANGE_DEV_TOOLS_TOKEN`이

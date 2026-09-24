@@ -394,7 +394,11 @@ func main() {
 	// 설계 §6.2 — rate limiter 3종(인증 공용, 주문, 이체). 비활성이면 모두 nil로
 	// 둬 미들웨어가 통과시킨다(A6).
 	var authRateLimiter, orderRateLimiter, transferRateLimiter *middleware.RateLimiter
-	if config.RateLimitEnabledFromEnv() {
+	rateLimitEnabled, err := config.RateLimitEnabledFromEnv()
+	if err != nil {
+		log.Fatal("rate limit enabled flag invalid: ", err)
+	}
+	if rateLimitEnabled {
 		authRPS, err := config.AuthRateLimitRPSFromEnv()
 		if err != nil {
 			log.Fatal("auth rate limit rps invalid: ", err)

@@ -27,9 +27,11 @@ const (
 	EnvDBIdleTxTimeout    = "GOEXCHANGE_DB_IDLE_TX_TIMEOUT"
 )
 
-// 설계 §3 표의 고정값. lock_timeout·idle_in_transaction_session_timeout·커넥션
-// 수는 이번 사이클에서 env로 열지 않는다 — statement_timeout 두 곳만 명시적으로
-// env화됐다(설계 §3 표에 env 이름이 붙은 칸만).
+// 설계 §3 표의 기본값. 서비스 풀의 statement_timeout·lock_timeout·
+// idle_in_transaction_session_timeout은 위 Env* 상수로 env화돼 있고(기본값은
+// 아래 defaultService* — 기존 고정값과 같다). 마이그레이션·리컨실리에이션
+// 풀은 statement_timeout만 env화돼 있고, lock_timeout과 커넥션 수는 env로
+// 열지 않는다.
 const (
 	defaultMigrationStatementTimeout = 10 * time.Minute
 	defaultMigrationLockTimeout      = 10 * time.Second

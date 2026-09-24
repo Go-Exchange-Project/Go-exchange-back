@@ -7,11 +7,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Go-Exchange-Project/Go-exchange-back/internal/auth"
 	"github.com/Go-Exchange-Project/Go-exchange-back/internal/ws"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -255,14 +255,18 @@ func TestAdminMuxServesMetricsAndGatesPprofByEnv(t *testing.T) {
 	})
 }
 
-// 서비스 라우터는 main.go 안에 인라인으로 구성돼 별도 함수가 아니다 — 소스를
-// 읽어 "/metrics" 라우트를 gin 서비스 라우터에 등록하지 않았음을 확인한다
-// (TestMainStartsOrderIdempotencyMonitor·TestCORSAllowsTheHeadersOrderCreationRequires와 같은 방식).
-func TestMainDoesNotRegisterMetricsOnServiceRouter(t *testing.T) {
-	source, err := os.ReadFile("main.go")
+// H7: 실제 newRouter()가 만든 서비스 라우터는 /metrics를 서비스하지 않는다
+// (rate_limit_router_test.go와 같은 방식 — 소스 문자열이 아니라 실제 라우터).
+func TestServiceRouterDoesNotServeMetrics(t *testing.T) {
+	tokenManager, err := auth.NewTokenManager("test-secret", time.Hour)
 	require.NoError(t, err)
-	assert.NotContains(t, string(source), `r.GET("/metrics"`,
-		"서비스 라우터(r)에 /metrics를 등록하면 안 된다 — 관리 서버로 옮겨야 한다")
+	router, err := newRouter(newRateLimitTestRouterConfig(t, tokenManager, nil, nil, nil))
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"서비스 라우터에 /metrics를 등록하면 안 된다 — 관리 서버로 옮겨야 한다")
 }
 
 // H8: 관리 서버 bind 실패는 부팅 실패로 이어진다(주입한 fatal 함수로 확인).

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,6 +60,14 @@ func TestRateLimiterCleanupCannotRaceWithInFlightRequest(t *testing.T) {
 	}()
 
 	<-reached // Allow가 map lock과 entry lock을 모두 쥔 상태다.
+
+	// 락 순서 검출: 정상 구현은 entry lock을 쥔 동안 map lock을 계속 쥔다
+	// (map lock → entry lock → map unlock). `map unlock → entry lock` 변이는
+	// 이 시점에 이미 map을 놓았으므로 TryLock이 성공한다.
+	if rl.mu.TryLock() {
+		rl.mu.Unlock()
+		t.Fatal("entry lock을 쥔 요청이 map lock을 이미 놓았다 — 금지된 락 순서(map unlock → entry lock)")
+	}
 
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -216,4 +225,37 @@ func TestRateLimitByUserUsesUserIDFromContext(t *testing.T) {
 	req3.Header.Set("X-Test-User-ID", "99")
 	router.ServeHTTP(recorder3, req3)
 	assert.Equal(t, http.StatusOK, recorder3.Code, "다른 사용자는 다른 버킷이라 영향받지 않아야 한다")
+}
+
+// RunCleanup은 ctx가 취소되면 종료된다(설계 §6.2 — 종료 시 중단). 짧은
+// interval로 실제 tick이 돈 뒤에도 취소에 반응하는지 확인한다.
+func TestRateLimiterRunCleanupStopsWhenContextIsCancelled(t *testing.T) {
+	rl := NewRateLimiter(RateLimiterConfig{RPS: 1, Burst: 1})
+	rl.Allow("k")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		rl.RunCleanup(ctx, 5*time.Millisecond, time.Nanosecond)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		rl.mu.Lock()
+		defer rl.mu.Unlock()
+		return len(rl.entries) == 0
+	}, 2*time.Second, 5*time.Millisecond, "tick이 돌아 유휴 entry를 지워야 한다")
+
+	select {
+	case <-done:
+		t.Fatal("ctx 취소 전에 RunCleanup이 종료됐다")
+	default:
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 취소 뒤에도 RunCleanup이 종료되지 않았다")
+	}
 }

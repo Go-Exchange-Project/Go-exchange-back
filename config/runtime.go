@@ -184,12 +184,21 @@ func AdminWriteTimeoutFromEnv() (time.Duration, error) {
 
 // RateLimitEnabledFromEnv은 기본 켜짐이다 — 끄면 운영 미들웨어 경로를 우회한
 // 다른 시스템을 측정하게 되므로(설계 §6.4), 부하 테스트에서도 끄지 않는다.
-func RateLimitEnabledFromEnv() bool {
-	value, ok := os.LookupEnv(EnvRateLimitEnabled)
+//
+// 보안 기능이라 fail-open이면 안 된다 — 미설정만 true이고, 인식 가능한 토큰
+// 외의 값(오타 포함)은 에러로 부팅을 막는다(설계 §6.2).
+func RateLimitEnabledFromEnv() (bool, error) {
+	raw, ok := os.LookupEnv(EnvRateLimitEnabled)
 	if !ok {
-		return true
+		return true, nil
 	}
-	return parseBoolEnv(value)
+	switch strings.ToLower(raw) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true, nil
+	case "0", "f", "false", "n", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("%s is not a recognized boolean: %q", EnvRateLimitEnabled, raw)
 }
 
 func AuthRateLimitRPSFromEnv() (int, error) {

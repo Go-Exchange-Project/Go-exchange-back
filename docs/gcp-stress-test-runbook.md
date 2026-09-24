@@ -85,6 +85,18 @@ ssh -i ~/.ssh/goexchange-gcp goexchange@<load_gen_external_ip> \
 - 실행 결과(이 실행에서 429가 있었는지, 있었다면 어떤 조치로 해소했는지)는
   8번 단계의 `docs/benchmarks/03-YYYY-MM-DD-gcp-stress-test.md`에 함께 남긴다.
 
+**운영 배포에서의 인증 한도(공유 IP).** 인증 limiter의 키는 클라이언트 IP다. CGNAT·
+사내 NAT·학교 망처럼 같은 공인 IP를 여러 정상 사용자가 공유하면, 그 IP 하나가 기본
+`1rps/burst 10` 버킷을 나눠 쓰다 정상 사용자가 429를 맞을 수 있다. 배포별로 이런
+환경이 예상되면 `GOEXCHANGE_AUTH_RATE_LIMIT_RPS`·`BURST`를 올린다(기준: 그 IP 뒤의
+예상 동시 가입·로그인 사용자 수를 burst로, 초당 평균 시도 수를 rps로 잡는다). 관측은
+관리 포트(`:9101/metrics`)의 `http_requests_total{path="/auth/login"|"/auth/register", status="429"}`
+증가율(`rate(...[1m])`)과 응답의 `Retry-After` 헤더·`RATE_LIMITED` 코드로 한다. 로드밸런서·
+프록시 뒤라면 `GOEXCHANGE_TRUSTED_PROXIES`에 그 CIDR을 넣어야 클라이언트 IP가 프록시 IP
+하나로 뭉치지 않는다. 이 값들은 **compose가 `backend.environment`로 명시 전달해야만**
+컨테이너에 도달한다(`.env`에만 적으면 반영되지 않는다) — `docker-compose.*.yml`에 해당
+키가 이미 나열돼 있으니 `.env`의 값을 바꾸고 `docker compose up -d`로 재기동한다.
+
 ## 6.5. (선택) CPU 프로파일 캡처
 
 이전 실행에서 CPU 포화가 관측된 VU 구간(예: 150~200)이 있다면, 그 구간에서 30초 CPU 프로파일을 캡처해 실제 병목 함수를 확인할 수 있다.
