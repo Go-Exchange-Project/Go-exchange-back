@@ -90,7 +90,7 @@ ssh -i ~/.ssh/goexchange-gcp goexchange@<load_gen_external_ip> \
 `1rps/burst 10` 버킷을 나눠 쓰다 정상 사용자가 429를 맞을 수 있다. 배포별로 이런
 환경이 예상되면 `GOEXCHANGE_AUTH_RATE_LIMIT_RPS`·`BURST`를 올린다(기준: 그 IP 뒤의
 예상 동시 가입·로그인 사용자 수를 burst로, 초당 평균 시도 수를 rps로 잡는다). 관측은
-관리 포트(`:9101/metrics`)의 `http_requests_total{path="/auth/login"|"/auth/register", status="429"}`
+관리 포트(`:9101/metrics`)의 `http_requests_total{path=~"/auth/(login|register)",status="429"}`
 증가율(`rate(...[1m])`)과 응답의 `Retry-After` 헤더·`RATE_LIMITED` 코드로 한다. 로드밸런서·
 프록시 뒤라면 `GOEXCHANGE_TRUSTED_PROXIES`에 그 CIDR을 넣어야 클라이언트 IP가 프록시 IP
 하나로 뭉치지 않는다. 이 값들은 **compose가 `backend.environment`로 명시 전달해야만**
