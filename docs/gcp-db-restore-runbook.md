@@ -67,57 +67,69 @@ docker logs <postgres-container> --tail 20
 
 ## 4. 데이터 정합성 검증
 
+> 복식 부기 전환(migration 009·010) 이후 `wallets`·`ledger_entries`는 존재하지 않는다.
+> 아래 검사는 `ReconciliationWorker`의 검사 1~4와 같은 질의다.
+
 행 수 확인:
 
 ```sql
-SELECT (SELECT count(*) FROM users)   AS users,
-       (SELECT count(*) FROM orders)  AS orders,
-       (SELECT count(*) FROM trades)  AS trades,
-       (SELECT count(*) FROM wallets) AS wallets,
-       (SELECT count(*) FROM ledger_entries) AS ledger_entries;
+SELECT (SELECT count(*) FROM users)            AS users,
+       (SELECT count(*) FROM orders)           AS orders,
+       (SELECT count(*) FROM trades)           AS trades,
+       (SELECT count(*) FROM accounts)         AS accounts,
+       (SELECT count(*) FROM journal_entries)  AS journal_entries,
+       (SELECT count(*) FROM postings)         AS postings;
 ```
 
-리컨실리에이션 검사 1(원장-지갑 일치) — 위반이면 행이 나온다(0행이 정상):
+검사 1(분개 불균형) — 한 분개 안에서 자산별 전기 합은 0이어야 한다(0행이 정상):
 
 ```sql
-SELECT w.id, w.user_id, w.coin_symbol,
-       w.available_balance - COALESCE(l.a_sum, 0) AS available_gap,
-       w.locked_balance    - COALESCE(l.l_sum, 0) AS locked_gap
-FROM wallets w
-LEFT JOIN (
-  SELECT user_id, coin_symbol,
-         SUM(available_delta) AS a_sum, SUM(locked_delta) AS l_sum
-  FROM ledger_entries GROUP BY user_id, coin_symbol
-) l ON l.user_id = w.user_id AND l.coin_symbol = w.coin_symbol
-WHERE w.available_balance <> COALESCE(l.a_sum, 0)
-   OR w.locked_balance    <> COALESCE(l.l_sum, 0);
+SELECT journal_id, asset, SUM(amount) AS sum
+FROM postings
+GROUP BY journal_id, asset
+HAVING SUM(amount) <> 0
+ORDER BY journal_id, asset;
 ```
 
-리컨실리에이션 검사 2(자산별 총량 보존) — `diff`가 전부 0이어야 정상:
+검사 2(잔고 캐시 drift) — `account_balances`가 전기 합과 같아야 한다(0행이 정상):
 
 ```sql
-WITH wallet_totals AS (
-  SELECT coin_symbol, SUM(available_balance + locked_balance) AS total
-  FROM wallets GROUP BY coin_symbol
-),
-fee_totals AS (
-  SELECT COALESCE(SUM(buyer_fee), 0) + COALESCE(SUM(seller_fee), 0) AS total FROM trades
-),
-funded_totals AS (
-  SELECT coin_symbol, SUM(available_delta) AS total
-  FROM ledger_entries WHERE entry_type = 'DEV_FUND' GROUP BY coin_symbol
-)
-SELECT w.coin_symbol,
-       w.total
-         + CASE WHEN w.coin_symbol = 'KRW' THEN (SELECT total FROM fee_totals) ELSE 0 END
-         - COALESCE(f.total, 0) AS diff
-FROM wallet_totals w
-LEFT JOIN funded_totals f ON f.coin_symbol = w.coin_symbol;
+SELECT a.id AS account_id,
+       COALESCE(b.balance, 0)  AS cached,
+       COALESCE(p.computed, 0) AS computed
+FROM accounts a
+LEFT JOIN account_balances b ON b.account_id = a.id
+LEFT JOIN LATERAL (
+  SELECT SUM(amount) AS computed FROM postings WHERE account_id = a.id
+) p ON true
+WHERE COALESCE(b.balance, 0) IS DISTINCT FROM COALESCE(p.computed, 0)
+ORDER BY a.id;
+```
+
+검사 3(자산별 총량 보존) — 외부·MINT 계정이 반대편을 받으므로 자산별 전체 합은 정확히 0이다(0행이 정상):
+
+```sql
+SELECT asset, SUM(amount) AS sum
+FROM postings
+GROUP BY asset
+HAVING SUM(amount) <> 0
+ORDER BY asset;
+```
+
+검사 4(음수 계정) — 음수를 허용하지 않는 계정이 음수면 없는 돈을 쓴 것이다(0행이 정상):
+
+```sql
+SELECT a.id AS account_id, a.account_type, a.owner_user_id, a.asset, b.balance
+FROM accounts a
+JOIN account_balances b ON b.account_id = a.id
+WHERE a.allows_negative = false
+  AND b.balance < 0
+ORDER BY a.id;
 ```
 
 (더 완전한 검증을 원하면 goexchange 서버를 이 DB에 붙여 기동 — 기동 직후
 리컨실리에이션이 자동 1회 실행되어 `reconciliation_violations` 게이지/로그로
-검사 3종 전부를 확인할 수 있다.)
+검사 전부를 확인할 수 있다. 서버 기동에는 `GOEXCHANGE_JWT_SECRET`이 필요하다.)
 
 ## 5. 정리 (필수 — 비용)
 
@@ -130,5 +142,5 @@ gcloud compute snapshots delete manual-rehearsal-<날짜> --quiet
 
 ## 6. 기록
 
-리허설 결과(스냅샷 이름, 복원 소요 시간, 검사 1·2 결과)를
+리허설 결과(스냅샷 이름, 복원 소요 시간, 검사 1~4 결과)를
 `docs/refactor/`의 C-2 완료 문서에 남긴다.
