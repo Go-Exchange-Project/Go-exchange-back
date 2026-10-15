@@ -1,15 +1,11 @@
 package config
 
 import (
-	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -75,27 +71,6 @@ func parsePositiveIntEnv(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
-}
-
-func ConnectDB() {
-	dsn := DatabaseDSNFromEnv()
-
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		log.Fatal("DB connection failed: ", err)
-	}
-
-	sqlDB, err := db.DB()
-	if err != nil {
-		log.Fatal("DB handle retrieval failed: ", err)
-	}
-	sqlDB.SetMaxOpenConns(MaxOpenConnsFromEnv())
-	sqlDB.SetMaxIdleConns(MaxIdleConnsFromEnv())
-	sqlDB.SetConnMaxLifetime(ConnMaxLifetimeFromEnv())
-	prometheus.MustRegister(collectors.NewDBStatsCollector(sqlDB, "goexchange"))
-
-	DB = db
-	log.Println("DB connection established")
 }
 
 func DatabaseDSNFromEnv() string {

@@ -59,6 +59,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		Password: req.Password,
 	})
 	if err != nil {
+		// D12: 인식된 DB 시간 상한(AuthService.Login이 DomainError(Unavailable)로
+		// 구분해 돌려준다)만 503이다 — 그 밖은 전부 기존 401 계약 그대로다.
+		if kind, ok := service.DomainErrorKind(err); ok && kind == service.ErrorKindUnavailable {
+			httpapi.WriteError(c, http.StatusServiceUnavailable, httpapi.CodeUnavailable, err.Error())
+			return
+		}
 		httpapi.WriteError(c, http.StatusUnauthorized, httpapi.CodeInvalidCredentials, err.Error())
 		return
 	}

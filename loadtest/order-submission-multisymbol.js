@@ -8,6 +8,11 @@ const DEV_TOOLS_TOKEN_HEADER = 'X-GoExchange-Dev-Token';
 
 const TOTAL_USERS = parseInt(__ENV.TOTAL_USERS || '3000', 10);
 const SETUP_BATCH_SIZE = 100;
+// 이 간격이 인증 rate limit 계약의 근거다(설계 §6.4) — register/login 배치
+// 사이 최소 간격을 고정해야 전송률 상한(SETUP_BATCH_SIZE/S)을 결정적으로
+// 계산할 수 있다. env로 열지 않는다 — 값이 바뀌면 docker-compose.stress.yml의
+// GOEXCHANGE_AUTH_RATE_LIMIT_RPS·BURST 계약이 깨진다.
+const SETUP_BATCH_INTERVAL_SECONDS = 0.5;
 // 심볼별 등록 정책(config/market_rules.json)이 다르다 - XRP는 정수 단위
 // (min_order_quantity=1, base_quantity_step=1)로 등록돼 있어 다른 심볼과 같은
 // 소수점 수량(0.001)을 쓰면 주문이 거부된다. 심볼별 주문 수량을 분리한다.
@@ -99,6 +104,11 @@ export function setup() {
         tokensByIndex[i] = res.json('data.token');
       } else if (res.status === 409) {
         loginNeeded.push(i);
+      } else if (res.status === 429) {
+        // preflight: 인증 rate limit에 걸리면 본 실행 전에 즉시 멈춘다 — 걸렸다는
+        // 것은 SETUP_BATCH_INTERVAL_SECONDS·GOEXCHANGE_AUTH_RATE_LIMIT_RPS/BURST
+        // 계약이 이 실행 환경과 맞지 않는다는 뜻이다.
+        throw new Error(`setup preflight: register rate limited (429) for user ${i} — auth rate limit too low for SETUP_BATCH_INTERVAL_SECONDS: ${res.body}`);
       } else {
         throw new Error(`setup: failed to register user ${i}: ${res.status} ${res.body}`);
       }
@@ -114,6 +124,9 @@ export function setup() {
       const loginResponses = http.batch(loginRequests);
       loginResponses.forEach((res, idx) => {
         const i = loginNeeded[idx];
+        if (res.status === 429) {
+          throw new Error(`setup preflight: login rate limited (429) for user ${i} — auth rate limit too low for SETUP_BATCH_INTERVAL_SECONDS: ${res.body}`);
+        }
         if (res.status !== 200) {
           throw new Error(`setup: user ${i} already registered but login failed: ${res.status} ${res.body}`);
         }
@@ -158,6 +171,8 @@ export function setup() {
       const symbol = SYMBOLS[pairIndex % SYMBOLS.length];
       users.push({ token: tokensByIndex[i], role, symbol });
     });
+
+    sleep(SETUP_BATCH_INTERVAL_SECONDS);
   }
 
   return { users };

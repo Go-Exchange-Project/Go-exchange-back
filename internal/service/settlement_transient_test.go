@@ -22,7 +22,9 @@ func TestIsTransientSettlementError(t *testing.T) {
 		{"deadlock detected", &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}, true},
 		{"serialization failure", &pgconn.PgError{Code: "40001", Message: "could not serialize access"}, true},
 		{"lock not available", &pgconn.PgError{Code: "55P03", Message: "lock timeout"}, true},
+		{"query canceled (statement timeout)", &pgconn.PgError{Code: "57014", Message: "canceling statement due to statement timeout"}, true},
 		{"wrapped deadlock", fmt.Errorf("settle: %w", &pgconn.PgError{Code: "40P01"}), true},
+		{"wrapped statement timeout", fmt.Errorf("settle: %w", &pgconn.PgError{Code: "57014"}), true},
 		{"unique violation is permanent", &pgconn.PgError{Code: "23505"}, false},
 		{"plain error", errors.New("deadlock detected"), false},
 		{"nil", nil, false},
@@ -43,6 +45,7 @@ func TestClassifyFailedSettlementTransientCategories(t *testing.T) {
 		{"[SQLSTATE 40P01] settle: deadlock detected", FailedSettlementCategoryDeadlock},
 		{"[SQLSTATE 40001] could not serialize access", FailedSettlementCategorySerializationFailure},
 		{"[SQLSTATE 55P03] canceling statement due to lock timeout", FailedSettlementCategoryLockTimeout},
+		{"[SQLSTATE 57014] canceling statement due to statement timeout", FailedSettlementCategoryStatementTimeout},
 		{"buy order 1 status CANCELLED cannot be settled", FailedSettlementCategoryCancelledOrder},
 		{"idempotency key conflict for \"k\"", FailedSettlementCategoryIdempotencyConflict},
 		{"buyer has insufficient locked KRW balance", FailedSettlementCategoryInsufficientLockedBalance},
@@ -61,6 +64,7 @@ func TestIsTransientFailedSettlementCategory(t *testing.T) {
 	assert.True(t, IsTransientFailedSettlementCategory(FailedSettlementCategoryDeadlock))
 	assert.True(t, IsTransientFailedSettlementCategory(FailedSettlementCategorySerializationFailure))
 	assert.True(t, IsTransientFailedSettlementCategory(FailedSettlementCategoryLockTimeout))
+	assert.True(t, IsTransientFailedSettlementCategory(FailedSettlementCategoryStatementTimeout))
 	assert.False(t, IsTransientFailedSettlementCategory(FailedSettlementCategoryCancelledOrder))
 	assert.False(t, IsTransientFailedSettlementCategory(FailedSettlementCategoryIdempotencyConflict))
 	assert.False(t, IsTransientFailedSettlementCategory(FailedSettlementCategoryInsufficientLockedBalance))

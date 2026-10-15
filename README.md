@@ -195,7 +195,13 @@ GOEXCHANGE_DEV_TOOLS_TOKEN=<local-dev-tools-token>
 GOEXCHANGE_ENABLE_UPBIT=false
 GOEXCHANGE_CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 GOEXCHANGE_WS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+GOEXCHANGE_JWT_SECRET=<local-jwt-secret>
+GOEXCHANGE_AUTH_RATE_LIMIT_RPS=400
+GOEXCHANGE_AUTH_RATE_LIMIT_BURST=200
 ```
+
+`GOEXCHANGE_JWT_SECRET`은 필수입니다 — 없으면 서버가 부팅하지 않습니다.
+인증 rate limit 값은 로컬 개발·E2E용으로 넉넉하게 잡은 것이며 운영 값이 아닙니다(기본값은 `1rps/burst 10`, [TESTING.md](TESTING.md) 참고).
 
 서버 실행:
 

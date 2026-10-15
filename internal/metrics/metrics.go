@@ -270,6 +270,15 @@ var (
 		Name: "matching_engine_cancel_backpressured_total",
 		Help: "Number of cancel commands rejected with ErrCancelOrderBackpressured because execution capacity or the consecutive-cancel quota was exhausted.",
 	})
+
+	// DBTimeoutTotal은 55P03(lock_timeout)·57014(statement_timeout) 두 SQLSTATE만
+	// 센다(설계 §4.2) — 다른 transient 오류(deadlock 등)는 "DB 시간 상한"이 아니라
+	// 포함하지 않는다. 실제 재시도 루프의 시도별 결과에서만 증가시키고, 순수
+	// 분류 함수(IsTransientSettlementError 등) 호출로는 증가시키지 않는다(중복 계측 방지).
+	DBTimeoutTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "goexchange_db_timeout_total",
+		Help: "Total count of 55P03 (lock_timeout) and 57014 (statement_timeout) errors observed on the service DB pool, labeled by SQLSTATE and code path.",
+	}, []string{"sqlstate", "path"})
 )
 
 // hot path에서 라벨 map 조회를 피하기 위해 초기화 시 1회 resolve한다.

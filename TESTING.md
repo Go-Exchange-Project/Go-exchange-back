@@ -48,6 +48,7 @@ $env:GOEXCHANGE_ENABLE_DEV_TOOLS="true"
 $env:GOEXCHANGE_DEV_TOOLS_TOKEN="<local-dev-tools-token>"
 $env:GOEXCHANGE_ENABLE_UPBIT="false"
 $env:GOEXCHANGE_CORS_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+$env:GOEXCHANGE_JWT_SECRET="<local-only-secret>"
 go run ./cmd
 ```
 
@@ -65,6 +66,7 @@ export GOEXCHANGE_ENABLE_DEV_TOOLS="true"
 export GOEXCHANGE_DEV_TOOLS_TOKEN="<local-dev-tools-token>"
 export GOEXCHANGE_ENABLE_UPBIT="false"
 export GOEXCHANGE_CORS_ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
+export GOEXCHANGE_JWT_SECRET="<local-only-secret>"
 go run ./cmd
 ```
 
@@ -72,7 +74,7 @@ go run ./cmd
 
 | 환경변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `GOEXCHANGE_JWT_SECRET` | `dev-only-change-me` | access token 서명에 사용하는 HMAC secret. 로컬 외 환경에서는 강한 secret을 별도로 설정합니다. |
+| `GOEXCHANGE_JWT_SECRET` | 없음(필수) | access token 서명에 사용하는 HMAC secret. 설정하지 않으면 부팅이 실패합니다. |
 
 인증 API:
 
@@ -93,6 +95,44 @@ go run ./cmd
 - `GET /trades?coin_symbol=BTC&limit=50`
 
 조회 응답의 decimal 값은 부동소수점 정밀도 손실을 피하기 위해 JSON string으로 반환합니다.
+
+## 운영 시간 상한·관리 서버·rate limit
+
+서비스 HTTP 서버 시간 상한:
+
+| 환경변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `GOEXCHANGE_HTTP_READ_HEADER_TIMEOUT` | `5s` | 요청 헤더를 다 받을 때까지의 상한(slowloris 방어). |
+| `GOEXCHANGE_HTTP_READ_TIMEOUT` | `15s` | 요청 본문을 다 받을 때까지의 상한. |
+| `GOEXCHANGE_HTTP_WRITE_TIMEOUT` | `20s` | 응답을 다 쓸 때까지의 상한. WebSocket 연결에는 적용되지 않습니다. |
+| `GOEXCHANGE_HTTP_IDLE_TIMEOUT` | `60s` | keep-alive 연결의 유휴 상한. |
+| `GOEXCHANGE_HTTP_MAX_HEADER_BYTES` | `1048576`(1MiB) | 요청 헤더 전체 크기 상한. |
+
+서비스 DB 풀 시간 상한(`internal/service`가 쓰는 풀 — 정산·리컨실리에이션 등 전용 풀은 별도 고정값입니다):
+
+| 환경변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `GOEXCHANGE_DB_STATEMENT_TIMEOUT` | `15s` | 쿼리 하나가 이 시간을 넘기면 `57014`로 취소됩니다. |
+| `GOEXCHANGE_DB_LOCK_TIMEOUT` | `3s` | 락 대기가 이 시간을 넘기면 `55P03`으로 취소됩니다. |
+| `GOEXCHANGE_DB_IDLE_TX_TIMEOUT` | `30s` | 트랜잭션이 열린 채 이 시간 이상 유휴 상태면 종료됩니다. |
+
+관리 서버 — `/metrics`와 pprof는 서비스 포트(`:8080`)가 아니라 여기서만 응답합니다:
+
+| 환경변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `GOEXCHANGE_ADMIN_ADDR` | `127.0.0.1:9101` | 관리 서버 bind 주소. 컨테이너에서는 `0.0.0.0:9101`로 설정해야 포트 포워딩이 닿습니다. bind 실패는 부팅 실패입니다. |
+| `GOEXCHANGE_ADMIN_WRITE_TIMEOUT` | `120s` | pprof CPU 프로파일(기본 30초 캡처)이 여유 있게 끝나도록 서비스 포트보다 길게 잡습니다. |
+| `GOEXCHANGE_ENABLE_PPROF` | `false` | `true`일 때만 관리 서버에 `/debug/pprof/*`를 등록합니다. |
+
+Rate limit(토큰 버킷, 인스턴스 로컬 — 여러 인스턴스로 수평 확장하면 인스턴스별로 따로 집계됩니다) — 초과 시 `429`, `Retry-After` 헤더, `RATE_LIMITED` 코드:
+
+| 환경변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `GOEXCHANGE_RATE_LIMIT_ENABLED` | `true` | `false`면 아래 한도를 전부 끕니다. |
+| `GOEXCHANGE_AUTH_RATE_LIMIT_RPS` / `_BURST` | `1` / `10` | `/auth/login`·`/auth/register`. 키는 클라이언트 IP, 둘은 별도 버킷입니다. |
+| `GOEXCHANGE_ORDER_RATE_LIMIT_RPS` / `_BURST` | `20` / `40` | `POST /orders`·`DELETE /orders/:id`. 키는 인증된 사용자 ID입니다. |
+| `GOEXCHANGE_TRANSFER_RATE_LIMIT_RPS` / `_BURST` | `2` / `5` | `POST /transfers/*`. 키는 인증된 사용자 ID입니다. |
+| `GOEXCHANGE_TRUSTED_PROXIES` | 빈 값 | 콤마 구분 CIDR. 비우면 `X-Forwarded-For`를 무시하고 `RemoteAddr`만 클라이언트 IP로 씁니다. 잘못된 CIDR은 부팅 실패. |
 
 ## 개발용 도구
 

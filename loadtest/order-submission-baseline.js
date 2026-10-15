@@ -96,12 +96,23 @@ export function setup() {
         JSON.stringify({ email: email, password: 'loadtest-password-123' }),
         { headers: { 'Content-Type': 'application/json' }, tags: { name: 'setup' } }
       );
+      if (loginRes.status === 429) {
+        throw new Error(
+          `setup preflight: login rate limited (429) for user ${i} — auth rate limit too low (set GOEXCHANGE_AUTH_RATE_LIMIT_RPS/BURST, see loadtest/README.md): ${loginRes.body}`
+        );
+      }
       if (loginRes.status !== 200) {
         throw new Error(
           `setup: user ${i} (${email}) already registered but login failed: ${loginRes.status} ${loginRes.body}`
         );
       }
       token = loginRes.json('data.token');
+    } else if (registerRes.status === 429) {
+      // preflight: 간격 없이 순차 등록하므로 기본 인증 한도(1rps/burst 10)에서는
+      // 11번째 사용자부터 걸린다. 설정을 빠뜨렸을 때 원인이 드러나야 한다.
+      throw new Error(
+        `setup preflight: register rate limited (429) for user ${i} — auth rate limit too low (set GOEXCHANGE_AUTH_RATE_LIMIT_RPS/BURST, see loadtest/README.md): ${registerRes.body}`
+      );
     } else {
       throw new Error(
         `setup: failed to register user ${i} (${email}): ${registerRes.status} ${registerRes.body}`

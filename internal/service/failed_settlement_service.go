@@ -26,6 +26,7 @@ const (
 	FailedSettlementCategoryDeadlock                  FailedSettlementCategory = "DEADLOCK"
 	FailedSettlementCategorySerializationFailure      FailedSettlementCategory = "SERIALIZATION_FAILURE"
 	FailedSettlementCategoryLockTimeout               FailedSettlementCategory = "LOCK_TIMEOUT"
+	FailedSettlementCategoryStatementTimeout          FailedSettlementCategory = "STATEMENT_TIMEOUT"
 	FailedSettlementCategoryUnknown                   FailedSettlementCategory = "UNKNOWN"
 )
 
@@ -34,7 +35,8 @@ func IsTransientFailedSettlementCategory(category FailedSettlementCategory) bool
 	switch category {
 	case FailedSettlementCategoryDeadlock,
 		FailedSettlementCategorySerializationFailure,
-		FailedSettlementCategoryLockTimeout:
+		FailedSettlementCategoryLockTimeout,
+		FailedSettlementCategoryStatementTimeout:
 		return true
 	}
 	return false
@@ -53,6 +55,14 @@ type failedSettlementRepository interface {
 	FindByID(id uint) (*model.FailedSettlement, error)
 	MarkResolved(id uint, resolution string, resolvedBy string, notes string) error
 	HasOpenFailureForOrder(orderID uint) (bool, error)
+	RecordFailuresAndMarkOutboxProcessed(items []repository.SettlementFailureHandoff) error
+}
+
+// TradeOutboxFailureItem은 RecordBatchFailuresAndMarkOutboxProcessed의 입력
+// 항목이다 — outbox에 커밋된 trade 하나와 그 outbox 행 ID를 묶는다.
+type TradeOutboxFailureItem struct {
+	Trade    *model.Trade
+	OutboxID uint64
 }
 
 type FailedSettlementService struct {
@@ -73,6 +83,31 @@ func (s *FailedSettlementService) RecordFailure(trade *model.Trade, settlementEr
 		return nil, err
 	}
 	return s.Repository.RecordFailure(failure)
+}
+
+// RecordBatchFailuresAndMarkOutboxProcessed는 배치 57014 인계(설계 §4.3)를 위해
+// items의 각 (trade, outboxID) 쌍마다 RecordFailure와 같은 구성(failedSettlementFromTrade,
+// SQLSTATE 태그 포함)으로 FailedSettlement를 만들고, repository의 원자적 배치
+// 인계(RecordFailuresAndMarkOutboxProcessed)에 그대로 넘긴다. 하나라도 구성에
+// 실패하면(예: trade 필드 결손) 아무것도 커밋하지 않고 즉시 에러를 반환한다.
+func (s *FailedSettlementService) RecordBatchFailuresAndMarkOutboxProcessed(items []TradeOutboxFailureItem, settlementErr error) error {
+	if s == nil || s.Repository == nil {
+		return fmt.Errorf("failed settlement repository is required")
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("items is required")
+	}
+
+	occurredAt := time.Now().UTC()
+	handoffs := make([]repository.SettlementFailureHandoff, 0, len(items))
+	for i, item := range items {
+		failure, err := failedSettlementFromTrade(item.Trade, settlementErr, occurredAt)
+		if err != nil {
+			return fmt.Errorf("items[%d]: %w", i, err)
+		}
+		handoffs = append(handoffs, repository.SettlementFailureHandoff{Failure: failure, OutboxID: item.OutboxID})
+	}
+	return s.Repository.RecordFailuresAndMarkOutboxProcessed(handoffs)
 }
 
 func (s *FailedSettlementService) ListOpenFailures(limit int) ([]model.FailedSettlement, error) {
@@ -123,6 +158,8 @@ func ClassifyFailedSettlement(failure *model.FailedSettlement) FailedSettlementC
 		return FailedSettlementCategorySerializationFailure
 	case strings.Contains(message, "[SQLSTATE "+pgCodeLockNotAvailable+"]"):
 		return FailedSettlementCategoryLockTimeout
+	case strings.Contains(message, "[SQLSTATE "+pgCodeQueryCanceled+"]"):
+		return FailedSettlementCategoryStatementTimeout
 	case strings.Contains(message, "CANCELLED"):
 		return FailedSettlementCategoryCancelledOrder
 	case strings.Contains(message, "IDEMPOTENCY KEY CONFLICT"):
