@@ -11,11 +11,13 @@
 | JWT 발급/검증 | 완료 | auth/middleware tests |
 | 보호 API 사용자 스코프 | 완료 | 주문/지갑/체결 조회와 취소 권한 E2E |
 | 잘못된 token 처리 | 완료 | `AUTH_INVALID_TOKEN` E2E |
+| JWT secret 필수화(폴백 없음) | 완료 | auth env tests |
+| 로그인·가입 rate limit(IP 기준) | 완료 | middleware/router tests |
 
 남은 작업:
 
 - refresh token과 token 만료 UX 고도화
-- 비밀번호 정책, rate limit, 계정 잠금
+- 비밀번호 정책, 계정 잠금
 
 ## 주문 정책
 
@@ -47,18 +49,29 @@
 | self-trade 방지 | 완료 | matching/E2E |
 | snapshot depth 제한 | 완료 | matching/frontend flow |
 | 취소 remove | 완료 | matching/service/E2E |
+| 턴 스케줄링(quantum) | 완료 | quantum contract/gate tests |
+| 방출 용량 예약과 park | 완료 | capacity/slice tests |
+| 취소 backpressure 거절 | 완료 | cancel capacity tests |
+| 심볼 샤딩 fan-in | 완료 | sharded engine tests |
+| 취소 명령 내구 기록(outbox) | 완료 | cancel command worker/integration |
 
 남은 작업:
 
 - 엔진 명령 ack 구조 고도화
 - 영구 global event sequence
-- crash/replay를 위한 event sourcing 또는 durable command log 검토
+- 샤드 fan-in 격리(한 샤드의 적체가 다른 샤드를 막지 않게)
 
 ## 자산/정산
 
 | 항목 | 상태 | 검증 |
 | --- | --- | --- |
-| available/locked wallet | 완료 | service tests |
+| 복식 부기 원장 | 완료 | ledger service/integration tests |
+| available/locked 계정 분리 | 완료 | service tests |
+| 수수료 수익 계정(FEE_INCOME) | 완료 | settlement ledger integration |
+| 원장 검산 worker | 완료 | reconciliation tests (분개 불균형·캐시 drift·자산 총합·음수 계정) |
+| 입출금(가짜 BANK/CHAIN rail) | 완료 | transfer integration tests |
+| 입출금 콜백·폴링 이중 확인 | 완료 | transfer/poller tests |
+| 일시적 실패 자동 재시도 | 완료 | settlement retry worker tests |
 | 주문 hold | 완료 | integration tests |
 | 취소 release | 완료 | integration/E2E |
 | 체결 settlement | 완료 | integration/E2E |
@@ -67,13 +80,13 @@
 | 평균매수가 | 완료 | service/E2E |
 | 중복 정산 방지 | 완료 | idempotency tests |
 | settlement 실패 기록 | 완료 | service/integration tests |
-| ledger entries | 완료 | dev fund, hold, release, settlement tests |
+| 분개 기록 | 완료 | dev fund, hold, release, settlement, transfer tests |
 
 남은 작업:
 
-- exchange-level double-entry accounting
-- 자동 reconciliation/retry worker
-- fee revenue account와 수수료 정산 보고서
+- 수수료 정산 보고서와 회계 리포트
+- 실제 은행·체인 연동(현재는 가짜 rail)
+- `FEE_INCOME` 단일 핫 계정의 경합 측정과 분산
 
 ## API/프론트 연동
 
@@ -81,6 +94,10 @@
 | --- | --- | --- |
 | 주문 생성/취소 API | 완료 | handler/service/E2E |
 | 주문/지갑/체결 조회 API | 완료 | E2E |
+| 입출금 API | 완료 | handler/service/integration tests |
+| 주문 멱등성 계약(`Idempotency-Key`) | 완료 | handler/service/integration tests |
+| 이체 멱등성 계약(`client_request_key`) | 완료 | transfer tests, 프런트 component tests |
+| rate limit `429` + `Retry-After` | 완료 | middleware/router tests |
 | structured error response | 완료 | HTTP API tests, E2E |
 | market rules API | 완료 | handler/frontend/E2E |
 | dev wallet fund API | 완료 | dev token guard tests |
@@ -103,16 +120,24 @@
 | CORS/WS origin whitelist | 완료 | config/ws tests |
 | goose migration | 완료 | migration tests |
 | CI backend test | 완료 | GitHub Actions workflow |
-| E2E suite | 완료 | Playwright 16 tests |
+| E2E suite | 완료 | Playwright 21 tests |
+| graceful shutdown | 완료 | 종료 순서·분기 테스트(H8·H9) |
+| Prometheus metrics / Grafana | 완료 | metrics tests, `monitoring/` 구성 |
+| 부하 테스트와 성능 리포트 | 완료 | `docs/benchmarks/` 36건 |
+| deployment manifest | 완료 | compose prod/deploy/stress, GHCR 이미지 발행 |
+| HTTP·DB 시간 상한 | 완료 | H1~H5, DB 프로필 통합 테스트 |
+| JWT secret 필수화 | 완료 | auth env tests |
+| rate limit·프록시 신뢰 | 완료 | middleware/router/config tests |
+| `/metrics`·pprof 관리 포트 분리 | 완료 | admin server tests |
 
 남은 작업:
 
-- deployment manifest
 - readiness/liveness endpoint 분리
-- graceful shutdown
-- structured logging
-- Prometheus metrics/Grafana dashboard
-- 부하 테스트와 성능 개선 리포트
+- structured logging과 분산 추적
+- SLO·알림 정의
+- refresh token과 계정 잠금
+- DB pool 획득 상한(`ctx` 전 계층 배선)
+- 운영 상한 적용 후 실부하 재측정(현재 측정 환경 없음)
 
 ## MVP 결론
 
@@ -122,6 +147,8 @@
 - 주문 전 자산 hold와 취소 시 release
 - 체결 후 수수료, 평균매수가, 체결 내역 반영
 - self-trade, market order, 가격 개선, 최소 주문 정책 같은 거래소 도메인 예외 처리
-- DB transaction, idempotency, failed settlement, ledger 기반의 정합성 방어
+- DB transaction, idempotency, failed settlement, 복식 부기 원장 기반의 정합성 방어
+- 가짜 은행·체인 rail을 통한 입출금 상태 전이와 결과 확인 이중화
+- 시간 상한·요청 상한·관리 포트 분리 같은 운영 경계
 
-다만 운영 거래소라고 말하기에는 아직 배포, 모니터링, 실입출금, 보안 심화, global event stream이 부족합니다.
+다만 운영 거래소라고 말하기에는 아직 실제 입출금 연동, 보안 심화(refresh token·계정 잠금), global event stream, SLO·알림이 부족합니다.
